@@ -1,3 +1,4 @@
+export type { StreamPayHookContext } from "./hooks/consumer";
 export {
 	CheckoutBody,
 	type CheckoutOptions,
@@ -5,7 +6,10 @@ export {
 	checkout,
 } from "./plugins/checkout";
 export { type PortalOptions, portal } from "./plugins/portal";
-export { type SubscriptionsOptions, subscriptions } from "./plugins/subscriptions";
+export {
+	type SubscriptionsOptions,
+	subscriptions,
+} from "./plugins/subscriptions";
 export { type WebhooksOptions, webhooks } from "./plugins/webhooks";
 export { streampay } from "./streampay";
 export type {
@@ -32,6 +36,7 @@ export {
 	STREAMPAY_EVENT_TYPES,
 	type StreamPayEntityType,
 	type StreamPayEventType,
+	type StreamPayWebhookData,
 	type StreamPayWebhookPayload,
 } from "./webhooks/events";
 export {

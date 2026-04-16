@@ -1,8 +1,8 @@
-import type { StreamPayWebhookPayload } from "./events";
+import type { StreamPayWebhookData, StreamPayWebhookPayload } from "./events";
 
-export type WebhookHandler<T = Record<string, unknown>> = (
-	payload: StreamPayWebhookPayload<T>,
-) => Promise<void> | void;
+export type WebhookHandler<
+	T extends StreamPayWebhookData = StreamPayWebhookData,
+> = (payload: StreamPayWebhookPayload<T>) => Promise<void> | void;
 
 export interface WebhookHandlers {
 	onPayload?: WebhookHandler;

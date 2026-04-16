@@ -37,9 +37,22 @@ export const STREAMPAY_EVENT_TYPES = [
 
 export type StreamPayEventType = (typeof STREAMPAY_EVENT_TYPES)[number];
 
-export type StreamPayEntityType = "PAYMENT" | "INVOICE" | "SUBSCRIPTION" | "PAYMENT_LINK";
+export type StreamPayEntityType =
+	| "PAYMENT"
+	| "INVOICE"
+	| "SUBSCRIPTION"
+	| "PAYMENT_LINK";
 
-export interface StreamPayWebhookPayload<T = Record<string, unknown>> {
+export interface StreamPayWebhookData {
+	metadata?: Record<string, unknown>;
+	payment?: { id: string; url: string };
+	invoice?: { id: string; url: string };
+	payment_link?: { id: string; url: string };
+}
+
+export interface StreamPayWebhookPayload<
+	T extends StreamPayWebhookData = StreamPayWebhookData,
+> {
 	event_type: StreamPayEventType;
 	entity_type: StreamPayEntityType;
 	entity_id: string;
