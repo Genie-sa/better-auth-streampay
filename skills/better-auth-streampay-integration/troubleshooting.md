@@ -1,6 +1,6 @@
 # Troubleshooting
 
-The failure modes this integration hits most often, with root cause and fix. If a user reports something not listed here, don't guess — read the plugin source at https://github.com/y0u-0/better-auth-streampay.
+The failure modes this integration hits most often, with root cause and fix. If a user reports something not listed here, don't guess — read the plugin source at https://github.com/Genie-sa/better-auth-streampay.
 
 ## Sign-up throws "account cannot be created at this time"
 

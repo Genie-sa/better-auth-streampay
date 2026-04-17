@@ -31,7 +31,7 @@ detect first, ask only what can't be inferred.
 
 ## External docs (fetch if you hit an unknown)
 
-- Plugin source + README: https://github.com/y0u-0/better-auth-streampay
+- Plugin source + README: https://github.com/Genie-sa/better-auth-streampay
 - StreamPay API docs: https://docs.streampay.sa/
 - StreamPay dashboard: https://streampay.sa
 - Better Auth: https://better-auth.com

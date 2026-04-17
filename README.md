@@ -1,6 +1,6 @@
 # better-auth-streampay
 
-> **Community plugin — not affiliated with Stream or StreamPay.** For plugin bugs, [open an issue here](https://github.com/y0u-0/better-auth-streampay/issues). For StreamPay bugs, contact [Stream support](https://streampay.sa).
+> **Community plugin — not affiliated with Stream or StreamPay.** For plugin bugs, [open an issue here](https://github.com/Genie-sa/better-auth-streampay/issues). For StreamPay bugs, contact [Stream support](https://streampay.sa).
 
 A [Better Auth](https://better-auth.com) plugin for integrating [StreamPay](https://streampay.sa) payments and subscriptions into your authentication flow.
 

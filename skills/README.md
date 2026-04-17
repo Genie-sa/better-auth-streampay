@@ -35,6 +35,6 @@ Claude will auto-load the skill, run Phase 1 detection against your repo, and wa
 
 ## External docs
 
-- Plugin repo: <https://github.com/y0u-0/better-auth-streampay>
+- Plugin repo: <https://github.com/Genie-sa/better-auth-streampay>
 - StreamPay API docs: <https://docs.streampay.sa/>
 - Better Auth: <https://better-auth.com>
