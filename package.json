@@ -54,6 +54,7 @@
   },
   "scripts": {
     "build": "tsup",
+    "prepublishOnly": "bun run build && bun run typecheck",
     "dev": "tsup --watch",
     "test": "vitest run",
     "test:watch": "vitest",
