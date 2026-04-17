@@ -26,6 +26,7 @@ detect first, ask only what can't be inferred.
 - [plugin-reference.md](plugin-reference.md) — every option across `streampay()` and the sub-plugins, with types
 - [webhook-events.md](webhook-events.md) — full event catalog + recommended handler patterns
 - [code-templates.md](code-templates.md) — copy-adapt snippets: server `auth.ts`, client, webhook route per framework, env, migrations
+- [env-setup.md](env-setup.md) — every env var the plugin reads (API key, webhook signing value, Better Auth vars, test-only vars) with dashboard sources and handling rules
 - [troubleshooting.md](troubleshooting.md) — `DUPLICATE_CONSUMER`, webhook signature failures, missing columns, anonymous users
 
 ## External docs (fetch if you hit an unknown)
@@ -89,10 +90,12 @@ If the app has a Better Auth client (`createAuthClient`), add `streampayClient()
 
 ### Phase 6 — Environment
 
-Add to `.env` (or `.env.local` for Next.js). Never print secrets; leave placeholder values. See [code-templates.md](code-templates.md) §Environment.
+Add to `.env` (or `.env.local` for Next.js). Never print values; leave placeholders. Full list with dashboard sources: [env-setup.md](env-setup.md).
 
-- `STREAMPAY_API_KEY=`
-- `STREAMPAY_WEBHOOK_SECRET=` (only if `webhooks()` selected)
+- `STREAMPAY_API_KEY=` — required, Base64(apiKey:apiSecret) from the StreamPay dashboard
+- `STREAMPAY_WEBHOOK_SECRET=` — only if `webhooks()` selected
+- `BETTER_AUTH_SECRET=` — min 32 chars, `openssl rand -hex 32`
+- `BETTER_AUTH_URL=` — required in prod
 
 ### Phase 7 — Database migration
 
