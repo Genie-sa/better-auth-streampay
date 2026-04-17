@@ -229,10 +229,10 @@ describe("consumer hooks", () => {
 				);
 			});
 
-			it('reclaims an already-linked SAME-EMAIL consumer when claimExistingConsumerBy is "email"', async () => {
+			it('reclaims an already-linked SAME-EMAIL consumer when claimExistingConsumerBy is ["email"]', async () => {
 				const options = createTestStreamPayOptions({
 					client: mockClient,
-					claimExistingConsumerBy: "email",
+					claimExistingConsumerBy: ["email"],
 				});
 				mockClient.createConsumer.mockRejectedValue(duplicateError);
 				mockClient.listConsumers.mockResolvedValue(
@@ -255,10 +255,10 @@ describe("consumer hooks", () => {
 				});
 			});
 
-			it('still refuses a linked consumer when claimExistingConsumerBy is "email" but the match is only by phone', async () => {
+			it('still refuses a linked consumer when claimExistingConsumerBy is ["email"] but the match is only by phone', async () => {
 				const options = createTestStreamPayOptions({
 					client: mockClient,
-					claimExistingConsumerBy: "email",
+					claimExistingConsumerBy: ["email"],
 					getConsumerCreateParams: async () => ({
 						phone_number: "+966500000000",
 					}),
@@ -283,10 +283,10 @@ describe("consumer hooks", () => {
 				);
 			});
 
-			it('reclaims an already-linked SAME-PHONE consumer when claimExistingConsumerBy is "phone"', async () => {
+			it('reclaims an already-linked SAME-PHONE consumer when claimExistingConsumerBy is ["phone"]', async () => {
 				const options = createTestStreamPayOptions({
 					client: mockClient,
-					claimExistingConsumerBy: "phone",
+					claimExistingConsumerBy: ["phone"],
 					getConsumerCreateParams: async () => ({
 						phone_number: "+966500000000",
 					}),
@@ -313,10 +313,10 @@ describe("consumer hooks", () => {
 				});
 			});
 
-			it('still refuses a linked consumer when claimExistingConsumerBy is "phone" but the match is only by email', async () => {
+			it('still refuses a linked consumer when claimExistingConsumerBy is ["phone"] but the match is only by email', async () => {
 				const options = createTestStreamPayOptions({
 					client: mockClient,
-					claimExistingConsumerBy: "phone",
+					claimExistingConsumerBy: ["phone"],
 					getConsumerCreateParams: async () => ({
 						phone_number: "+966500000000",
 					}),
@@ -341,10 +341,10 @@ describe("consumer hooks", () => {
 				);
 			});
 
-			it('reclaims either identifier when claimExistingConsumerBy is "both"', async () => {
+			it('reclaims either identifier when claimExistingConsumerBy is ["email", "phone"]', async () => {
 				const options = createTestStreamPayOptions({
 					client: mockClient,
-					claimExistingConsumerBy: "both",
+					claimExistingConsumerBy: ["email", "phone"],
 					getConsumerCreateParams: async () => ({
 						phone_number: "+966500000000",
 					}),
@@ -371,10 +371,9 @@ describe("consumer hooks", () => {
 				});
 			});
 
-			it("does not reclaim linked consumers when claimExistingConsumerBy is null", async () => {
+			it("does not reclaim linked consumers when claimExistingConsumerBy is omitted", async () => {
 				const options = createTestStreamPayOptions({
 					client: mockClient,
-					claimExistingConsumerBy: null,
 				});
 				mockClient.createConsumer.mockRejectedValue(duplicateError);
 				mockClient.listConsumers.mockResolvedValue(
@@ -395,10 +394,10 @@ describe("consumer hooks", () => {
 				);
 			});
 
-			it('prefers an exact email match before other duplicate identifiers when claimExistingConsumerBy is "both"', async () => {
+			it('prefers an exact email match before other duplicate identifiers when claimExistingConsumerBy is ["email", "phone"]', async () => {
 				const options = createTestStreamPayOptions({
 					client: mockClient,
-					claimExistingConsumerBy: "both",
+					claimExistingConsumerBy: ["email", "phone"],
 					getConsumerCreateParams: async () => ({
 						phone_number: "+966500000000",
 					}),

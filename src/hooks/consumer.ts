@@ -49,8 +49,7 @@ function canClaimBy(
 	mode: ClaimExistingConsumerBy | undefined,
 	identifier: ClaimExistingConsumerIdentifier,
 ): boolean {
-	if (mode === "both") return true;
-	return mode === identifier;
+	return mode?.includes(identifier) ?? false;
 }
 
 /**
@@ -75,9 +74,9 @@ function canClaimBy(
  *      find the existing consumer by any of the identifiers we sent.
  *   3. If the existing consumer is stranded (`external_id` unset),
  *      safe to reuse — return its id, the after-hook will link it.
- *   4. If reclaim is enabled for the matching identifier (email, phone,
- *      or both), reuse its id and overwrite `external_id` in the
- *      after-hook.
+ *   4. If `claimExistingConsumerBy` lists the matching identifier
+ *      (email and/or phone), reuse its id and overwrite `external_id`
+ *      in the after-hook.
  *   5. Otherwise, if it's already linked to another user
  *      (`external_id` set and not equal to this user's id), refuse.
  *      Silently reusing would hand user A access to user B's billing

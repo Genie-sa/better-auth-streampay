@@ -69,10 +69,10 @@ The 7–10 `AskUserQuestion` prompts this skill uses in Phase 2. Ask each questi
 - **question**: `If a sign-up hits DUPLICATE_CONSUMER on StreamPay and the match is already linked to another external_id, how should the plugin behave?`
 - **multiSelect**: `false`
 - **options**:
-  - `Never reclaim (safest default)` — `claimExistingConsumerBy: null`. Only reuses stranded consumers (empty external_id).
-  - `Reclaim by email` — `"email"`. Reassigns the linked consumer when its email matches.
-  - `Reclaim by phone` — `"phone"`.
-  - `Reclaim by either email or phone` — `"both"`.
+  - `Never reclaim (safest default)` — omit `claimExistingConsumerBy` (or `[]`). Only reuses stranded consumers (empty external_id).
+  - `Reclaim by email` — `["email"]`. Reassigns the linked consumer when its email matches.
+  - `Reclaim by phone` — `["phone"]`.
+  - `Reclaim by either email or phone` — `["email", "phone"]`.
 
 **Drives**: `claimExistingConsumerBy` option. Explain the security trade-off inline (reclaim is convenient but lets a new user inherit a previous user's billing history — only enable when the app controls both sides of the identifier).
 

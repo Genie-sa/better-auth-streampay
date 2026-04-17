@@ -264,11 +264,10 @@ liveDescribe("live StreamPay — write suite", () => {
 		expect(updated.name).toBe("BA Live Test Consumer (renamed)");
 	});
 
-	it('onBeforeUserCreate refuses a linked duplicate when claimExistingConsumerBy is null', async () => {
+	it("onBeforeUserCreate refuses a linked duplicate when claimExistingConsumerBy is omitted", async () => {
 		const hook = onBeforeUserCreate({
 			client,
 			createConsumerOnSignUp: true,
-			claimExistingConsumerBy: null,
 			use: [],
 		});
 
@@ -283,12 +282,12 @@ liveDescribe("live StreamPay — write suite", () => {
 		).rejects.toThrow(/cannot be created at this time/i);
 	});
 
-	it('onBeforeUserCreate reuses a linked duplicate when claimExistingConsumerBy is "email"', async () => {
+	it('onBeforeUserCreate reuses a linked duplicate when claimExistingConsumerBy is ["email"]', async () => {
 		if (!createdConsumerId) throw new Error("prerequisite test failed");
 		const hook = onBeforeUserCreate({
 			client,
 			createConsumerOnSignUp: true,
-			claimExistingConsumerBy: "email",
+			claimExistingConsumerBy: ["email"],
 			use: [],
 		});
 
@@ -305,13 +304,13 @@ liveDescribe("live StreamPay — write suite", () => {
 		});
 	});
 
-	it('onAfterUserCreate rewrites external_id after an "email" reclaim', async () => {
+	it('onAfterUserCreate rewrites external_id after an ["email"] reclaim', async () => {
 		if (!createdConsumerId) throw new Error("prerequisite test failed");
 		const nextExternalId = `ba-live-email-claimed-${Date.now()}`;
 		const hook = onAfterUserCreate({
 			client,
 			createConsumerOnSignUp: true,
-			claimExistingConsumerBy: "email",
+			claimExistingConsumerBy: ["email"],
 			use: [],
 		});
 
@@ -329,12 +328,12 @@ liveDescribe("live StreamPay — write suite", () => {
 		currentExternalId = nextExternalId;
 	});
 
-	it('onBeforeUserCreate reuses a linked duplicate when claimExistingConsumerBy is "phone"', async () => {
+	it('onBeforeUserCreate reuses a linked duplicate when claimExistingConsumerBy is ["phone"]', async () => {
 		if (!createdConsumerId) throw new Error("prerequisite test failed");
 		const hook = onBeforeUserCreate({
 			client,
 			createConsumerOnSignUp: true,
-			claimExistingConsumerBy: "phone",
+			claimExistingConsumerBy: ["phone"],
 			getConsumerCreateParams: () => ({
 				phone_number: testPhoneNumber,
 			}),
@@ -354,13 +353,13 @@ liveDescribe("live StreamPay — write suite", () => {
 		});
 	});
 
-	it('onAfterUserCreate rewrites external_id after a "phone" reclaim', async () => {
+	it('onAfterUserCreate rewrites external_id after a ["phone"] reclaim', async () => {
 		if (!createdConsumerId) throw new Error("prerequisite test failed");
 		const nextExternalId = `ba-live-phone-claimed-${Date.now()}`;
 		const hook = onAfterUserCreate({
 			client,
 			createConsumerOnSignUp: true,
-			claimExistingConsumerBy: "phone",
+			claimExistingConsumerBy: ["phone"],
 			use: [],
 		});
 
@@ -379,12 +378,12 @@ liveDescribe("live StreamPay — write suite", () => {
 		currentExternalId = nextExternalId;
 	});
 
-	it('onBeforeUserCreate reuses a linked duplicate when claimExistingConsumerBy is "both"', async () => {
+	it('onBeforeUserCreate reuses a linked duplicate when claimExistingConsumerBy is ["email", "phone"]', async () => {
 		if (!createdConsumerId) throw new Error("prerequisite test failed");
 		const hook = onBeforeUserCreate({
 			client,
 			createConsumerOnSignUp: true,
-			claimExistingConsumerBy: "both",
+			claimExistingConsumerBy: ["email", "phone"],
 			use: [],
 		});
 
@@ -401,13 +400,13 @@ liveDescribe("live StreamPay — write suite", () => {
 		});
 	});
 
-	it('onAfterUserCreate rewrites external_id after a "both" reclaim', async () => {
+	it('onAfterUserCreate rewrites external_id after an ["email", "phone"] reclaim', async () => {
 		if (!createdConsumerId) throw new Error("prerequisite test failed");
 		const nextExternalId = `ba-live-both-claimed-${Date.now()}`;
 		const hook = onAfterUserCreate({
 			client,
 			createConsumerOnSignUp: true,
-			claimExistingConsumerBy: "both",
+			claimExistingConsumerBy: ["email", "phone"],
 			use: [],
 		});
 

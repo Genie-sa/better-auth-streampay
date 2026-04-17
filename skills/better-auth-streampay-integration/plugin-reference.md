@@ -9,7 +9,7 @@ Every option on `streampay()` and each sub-plugin, with types and defaults, copi
 | `client` | `StreamPayClient` | ✅ | — | From `StreamSDK.init(process.env.STREAMPAY_API_KEY!)` |
 | `use` | `StreamPayPlugin[]` | ✅ | — | Sub-plugins to compose: `checkout()`, `portal()`, `subscriptions()`, `webhooks()` |
 | `createConsumerOnSignUp` | `boolean` | — | `false` | Create consumer on Better Auth sign-up |
-| `claimExistingConsumerBy` | `"email" \| "phone" \| "both" \| null` | — | `null` | Reclaim a linked duplicate on `DUPLICATE_CONSUMER`. `null` = only stranded consumers are reused. See security note in [interview-questions.md](interview-questions.md) Q5 |
+| `claimExistingConsumerBy` | `("email" \| "phone")[]` | — | `[]` | Reclaim a linked duplicate on `DUPLICATE_CONSUMER`. Omit (or `[]`) = only stranded consumers are reused. Pass `["email", "phone"]` to reclaim by either. See security note in [interview-questions.md](interview-questions.md) Q5 |
 | `getConsumerCreateParams` | `(ctx, request) => Promise<ConsumerCreateOverrides>` | — | — | Inject custom consumer fields at creation time |
 
 ### `ConsumerCreateOverrides` fields

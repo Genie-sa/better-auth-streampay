@@ -96,11 +96,8 @@ export interface ConsumerCreateOverrides {
 	communication_methods?: ("WHATSAPP" | "EMAIL" | "SMS")[];
 }
 
-export type ClaimExistingConsumerBy = "email" | "phone" | "both" | null;
-export type ClaimExistingConsumerIdentifier = Extract<
-	ClaimExistingConsumerBy,
-	"email" | "phone"
->;
+export type ClaimExistingConsumerIdentifier = "email" | "phone";
+export type ClaimExistingConsumerBy = readonly ClaimExistingConsumerIdentifier[];
 
 export interface StreamPayOptions {
 	/**
@@ -119,9 +116,10 @@ export interface StreamPayOptions {
 
 	/**
 	 * Reclaim a duplicate consumer when it matches an existing linked
-	 * record by email, phone, or either identifier. `null` / `undefined`
-	 * disables reclaim and only allows reusing stranded consumers whose
-	 * `external_id` is empty.
+	 * record by one of the listed identifiers. Pass `["email"]`,
+	 * `["phone"]`, or `["email", "phone"]` to reclaim by either.
+	 * Omit the option (or pass `[]`) to disable reclaim — in that case
+	 * only stranded consumers whose `external_id` is empty are reused.
 	 */
 	claimExistingConsumerBy?: ClaimExistingConsumerBy;
 

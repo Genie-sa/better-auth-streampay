@@ -6,13 +6,13 @@ The failure modes this integration hits most often, with root cause and fix. If 
 
 **Symptom**: Sign-up fails with that generic message when StreamPay has an existing consumer at the same email/phone.
 
-**Cause**: `DUPLICATE_CONSUMER` from StreamPay. The existing consumer is already linked to another Better Auth user (its `external_id` is set and differs), and `claimExistingConsumerBy` is unset or `null`. The plugin refuses to silently hand user A access to user B's billing history.
+**Cause**: `DUPLICATE_CONSUMER` from StreamPay. The existing consumer is already linked to another Better Auth user (its `external_id` is set and differs), and `claimExistingConsumerBy` is unset (or `[]`). The plugin refuses to silently hand user A access to user B's billing history.
 
 **Fix options**:
 1. **Intended behavior** — tell the user to recover the original account.
-2. **Reclaim by email** — set `claimExistingConsumerBy: "email"`. Rewrites `external_id` to the new user. Only safe if email ownership is verified.
-3. **Reclaim by phone** — `"phone"`. Same caveat.
-4. **Reclaim by either** — `"both"`. Most permissive; highest risk.
+2. **Reclaim by email** — set `claimExistingConsumerBy: ["email"]`. Rewrites `external_id` to the new user. Only safe if email ownership is verified.
+3. **Reclaim by phone** — `["phone"]`. Same caveat.
+4. **Reclaim by either** — `["email", "phone"]`. Most permissive; highest risk.
 
 Security note: reclaim is a trade-off. Enable only when the app owns the identity signal (verified email, verified phone). Don't enable on public sign-up with no verification.
 

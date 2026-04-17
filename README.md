@@ -121,20 +121,22 @@ npx prisma migrate dev                                     # Prisma
 | Option                    | Type       | Description                                                        |
 | ------------------------- | ---------- | ------------------------------------------------------------------ |
 | `createConsumerOnSignUp`  | `boolean`  | Automatically create a StreamPay consumer when a user signs up     |
-| `claimExistingConsumerBy` | `"email" \| "phone" \| "both" \| null` | Reclaim a duplicate linked consumer by the selected identifier(s) |
+| `claimExistingConsumerBy` | `("email" \| "phone")[]` | Reclaim a duplicate linked consumer by the listed identifier(s) |
 | `getConsumerCreateParams` | `function` | Provide additional consumer fields (phone, language, IBAN, etc.)   |
 
 ### Consumers
 
 When `createConsumerOnSignUp` is enabled, a new StreamPay Consumer is automatically created when a new user signs up. All consumers are created with an `external_id` matching the user's database ID — no mapping table needed. The resulting consumer ID is stored as `streampayConsumerId` on the user row.
 
-If StreamPay rejects sign-up with `DUPLICATE_CONSUMER`, the plugin normally reuses only stranded consumers whose `external_id` is empty. If you set `claimExistingConsumerBy`, the plugin can also reuse an existing consumer that matches the selected identifier even if it is already linked to a different `external_id`. The `after` hook then rewrites that `external_id` to the new Better Auth user id.
+If StreamPay rejects sign-up with `DUPLICATE_CONSUMER`, the plugin normally reuses only stranded consumers whose `external_id` is empty. If you set `claimExistingConsumerBy`, the plugin can also reuse an existing consumer that matches one of the listed identifiers even if it is already linked to a different `external_id`. The `after` hook then rewrites that `external_id` to the new Better Auth user id.
 
 Claim modes:
-- `null` / `undefined` — only reuse stranded consumers
-- `"email"` — reclaim duplicates that match the same email
-- `"phone"` — reclaim duplicates that match the same phone number
-- `"both"` — reclaim duplicates that match either email or phone
+- omitted / `[]` — only reuse stranded consumers
+- `["email"]` — reclaim duplicates that match the same email
+- `["phone"]` — reclaim duplicates that match the same phone number
+- `["email", "phone"]` — reclaim duplicates that match either email or phone
+
+> **Breaking in 0.2.0:** `claimExistingConsumerBy` now takes an array. Replace `"email"` → `["email"]`, `"phone"` → `["phone"]`, `"both"` → `["email", "phone"]`. `null` is no longer accepted — omit the option or pass `[]` to disable.
 
 Consumer data is also kept in sync:
 - **User update** — name/email changes are synced to StreamPay
@@ -146,7 +148,7 @@ Consumer data is also kept in sync:
 streampay({
   client: streamPayClient,
   createConsumerOnSignUp: true,
-  claimExistingConsumerBy: "both",
+  claimExistingConsumerBy: ["email", "phone"],
   getConsumerCreateParams: async ({ user }, request) => ({
     phone_number: "+966501234567",
     preferred_language: "ar",

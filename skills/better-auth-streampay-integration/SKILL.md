@@ -78,7 +78,7 @@ Also ensure `better-auth` and `zod` are present (peer deps).
 Edit the user's `auth.ts` (located in Phase 1). Compose only the sub-plugins the user selected. Use the server template in [code-templates.md](code-templates.md) §Server. Key decisions already answered by the interview:
 
 - `createConsumerOnSignUp` — boolean
-- `claimExistingConsumerBy` — `"email" | "phone" | "both" | null`
+- `claimExistingConsumerBy` — `("email" | "phone")[]` (omit or `[]` to disable)
 - `getConsumerCreateParams` — include only if custom fields were selected
 - `use: [...]` — only the sub-plugins the user picked
 

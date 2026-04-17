@@ -55,7 +55,7 @@ export const auth = betterAuth({
     streampay({
       client: streamPayClient,
       createConsumerOnSignUp: true,
-      claimExistingConsumerBy: null, // or "email" | "phone" | "both"
+      claimExistingConsumerBy: [], // or ["email"], ["phone"], ["email", "phone"]
       getConsumerCreateParams: async ({ user }, request) => ({
         // TODO: source these from request/db/session
         phone_number: undefined,
