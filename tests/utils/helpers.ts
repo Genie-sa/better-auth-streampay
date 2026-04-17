@@ -7,6 +7,10 @@ import { createMockStreamPayClient } from "./mocks";
  * back to an empty tuple — the main plugin factory accepts it because
  * `StreamPayPlugins` is now `readonly StreamPayPlugin[]`, so hook tests
  * that don't exercise any sub-plugin can omit it entirely.
+ *
+ * Leaves `createConsumerOnSignUp` unset (matching the public default of
+ * `false`). Tests that exercise the eager signup path pass it as an
+ * override.
  */
 export const createTestStreamPayOptions = (
 	overrides: Partial<Omit<StreamPayOptions, "use">> & { use?: StreamPayPlugins } = {},
@@ -14,11 +18,21 @@ export const createTestStreamPayOptions = (
 	const { use, ...rest } = overrides;
 	return {
 		client: createMockStreamPayClient(),
-		createConsumerOnSignUp: true,
 		use: use ?? ([] as StreamPayPlugins),
 		...rest,
 	};
 };
+
+/**
+ * Variant of `createTestStreamPayOptions` that opts the plugin into the
+ * eager signup flow (`createConsumerOnSignUp: true`). Use in tests that
+ * specifically exercise `onBeforeUserCreate` / `onAfterUserCreate` /
+ * `onUserUpdate` / `onUserDelete`.
+ */
+export const createEagerTestStreamPayOptions = (
+	overrides: Partial<Omit<StreamPayOptions, "use">> & { use?: StreamPayPlugins } = {},
+): StreamPayOptions =>
+	createTestStreamPayOptions({ createConsumerOnSignUp: true, ...overrides });
 
 /**
  * Build an `Error` that mimics the `StreamSDKError` shape the real SDK

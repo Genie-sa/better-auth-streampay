@@ -28,6 +28,7 @@ vi.mock("better-auth/api", () => ({
 import { webhooks } from "../src/plugins/webhooks";
 import type { WebhookHandler } from "../src/webhooks/dispatcher";
 import { unwrapHandler } from "./utils/better-auth-mock";
+import { createTestStreamPayOptions } from "./utils/helpers";
 import {
 	createMockContext,
 	createMockStreamPayClient,
@@ -67,7 +68,7 @@ describe("webhooks plugin", () => {
 	describe("plugin creation", () => {
 		it("registers the webhook endpoint as `streampayWebhooks`", () => {
 			const plugin = webhooks({ secret: SECRET });
-			const endpoints = plugin(mockClient);
+			const endpoints = plugin(createTestStreamPayOptions({ client: mockClient }));
 			expect(endpoints).toHaveProperty("streampayWebhooks");
 		});
 
@@ -100,7 +101,7 @@ describe("webhooks plugin", () => {
 				onSubscriptionFreezeCancel: vi.fn(),
 				onPaymentLinkPayAttemptFailed: vi.fn(),
 			});
-			const endpoints = plugin(mockClient);
+			const endpoints = plugin(createTestStreamPayOptions({ client: mockClient }));
 			expect(endpoints).toHaveProperty("streampayWebhooks");
 		});
 	});
@@ -121,7 +122,7 @@ describe("webhooks plugin", () => {
 				onPaymentSucceeded,
 				onInvoiceCompleted,
 			});
-			handler = unwrapHandler<WebhookResponse>(plugin(mockClient).streampayWebhooks);
+			handler = unwrapHandler<WebhookResponse>(plugin(createTestStreamPayOptions({ client: mockClient })).streampayWebhooks);
 		});
 
 		it("accepts a valid signature and dispatches to the specific handler", async () => {
@@ -270,7 +271,7 @@ describe("webhooks plugin", () => {
 
 		it("refuses to run when the secret is an empty string", async () => {
 			const plugin = webhooks({ secret: "" });
-			const noSecretHandler = unwrapHandler<WebhookResponse>(plugin(mockClient).streampayWebhooks);
+			const noSecretHandler = unwrapHandler<WebhookResponse>(plugin(createTestStreamPayOptions({ client: mockClient })).streampayWebhooks);
 			const body = JSON.stringify({ event_type: "PAYMENT_SUCCEEDED" });
 
 			const ctx = createMockContext({

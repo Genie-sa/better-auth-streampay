@@ -77,9 +77,9 @@ Also ensure `better-auth` and `zod` are present (peer deps).
 
 Edit the user's `auth.ts` (located in Phase 1). Compose only the sub-plugins the user selected. Use the server template in [code-templates.md](code-templates.md) §Server. Key decisions already answered by the interview:
 
-- `createConsumerOnSignUp` — boolean
+- `createConsumerOnSignUp` — boolean, default `false` (lazy). Lazy is the recommended default across every other Better Auth billing plugin (Stripe/Polar/Dodo). Only set to `true` if the product needs portal/subscription data immediately post-signup (before any payment event).
 - `claimExistingConsumerBy` — `("email" | "phone")[]` (omit or `[]` to disable)
-- `getConsumerCreateParams` — include only if custom fields were selected
+- `getConsumerCreateParams` — include only if custom fields were selected. Runs in both eager and lazy modes.
 - `use: [...]` — only the sub-plugins the user picked
 
 Full option list: [plugin-reference.md](plugin-reference.md).
@@ -111,7 +111,7 @@ Then tell the user: register `https://<their-domain>/api/auth/streampay/webhooks
 
 1. Run typecheck: `tsc --noEmit` (or the project's equivalent).
 2. Run the dev server and visit an auth route — confirm no boot errors.
-3. If `createConsumerOnSignUp` is on, sign up a test user; confirm `streampayConsumerId` is populated on the `user` row.
+3. If `createConsumerOnSignUp` is on, sign up a test user; confirm `streampayConsumerId` is populated on the `user` row. In lazy mode, instead check that the first authenticated `/checkout` call populates the column (consumers are created on demand, not at signup).
 4. Summarize for the user: which sub-plugins were enabled, which webhook events are handled, where to add business logic.
 
 ## Decision tree (quick)

@@ -1,8 +1,8 @@
 import type { CreatePaymentLinkDto } from "@streamsdk/typescript";
 import { APIError, createAuthEndpoint, getSessionFromCtx } from "better-auth/api";
 import { z } from "zod";
-import type { StreamPayClient, StreamPayProduct } from "../types";
-import { findConsumerByExternalId } from "../utils/consumer";
+import type { StreamPayOptions, StreamPayProduct } from "../types";
+import { type EnsureConsumerContext, ensureConsumerForUser } from "../utils/ensure-consumer";
 import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
 
 export interface CheckoutOptions {
@@ -128,20 +128,32 @@ function resolveRedirectUrl(
 	return new URL(urlOrPath, request?.url ?? baseURL).toString();
 }
 
+/**
+ * Pick the consumer for this checkout. An explicit `body.consumerId`
+ * always wins. For authenticated non-anonymous users we lazily ensure
+ * a consumer exists and link it to the user row. Anonymous sessions
+ * and unauthenticated callers get `null` — the StreamPay SDK's
+ * `createPaymentLink` accepts that for guest-style checkout and will
+ * smart-match the consumer by inline email/phone if the caller
+ * provided them (not exposed from this endpoint today).
+ */
 async function resolveConsumerId(
-	client: StreamPayClient,
+	options: StreamPayOptions,
+	ctx: EnsureConsumerContext,
 	body: CheckoutParams,
 	user: StreamPaySessionUser | null,
 ): Promise<string | null> {
 	if (body.consumerId) return body.consumerId;
 	if (!user) return null;
-	if (user.streampayConsumerId) return user.streampayConsumerId;
-	return findConsumerByExternalId(client, { externalId: user.id });
+	if (user.isAnonymous) return null;
+	const { consumerId } = await ensureConsumerForUser(options, ctx, user);
+	return consumerId;
 }
 
 export const checkout =
 	(checkoutOptions: CheckoutOptions = {}) =>
-	(client: StreamPayClient) => {
+	(options: StreamPayOptions) => {
+		const client = options.client;
 		return {
 			checkout: createAuthEndpoint(
 				"/checkout",
@@ -168,7 +180,7 @@ export const checkout =
 					}
 
 					const items = await resolveProducts(ctx.body, checkoutOptions);
-					const consumerId = await resolveConsumerId(client, ctx.body, sessionUser);
+					const consumerId = await resolveConsumerId(options, ctx, ctx.body, sessionUser);
 
 					const successUrl = resolveRedirectUrl(
 						ctx.body.successUrl ?? checkoutOptions.successUrl,

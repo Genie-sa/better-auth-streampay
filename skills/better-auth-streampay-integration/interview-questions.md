@@ -52,18 +52,18 @@ The 7–10 `AskUserQuestion` prompts this skill uses in Phase 2. Ask each questi
 
 **Drives**: the `use: [...]` array in `auth.ts` (Phase 4), whether Phase 8 runs, which env vars are needed (Phase 6).
 
-## Q4 — Auto-create consumers on sign-up
+## Q4 — When to provision StreamPay consumers
 
 - **header**: `Consumer creation`
-- **question**: `Create a StreamPay consumer automatically when a user signs up?`
+- **question**: `When should the plugin create a StreamPay Consumer for a user?`
 - **multiSelect**: `false`
 - **options**:
-  - `Yes` — recommended; sets `createConsumerOnSignUp: true`
-  - `No` — create consumers manually later via the SDK
+  - `Lazily, on first checkout (recommended)` — `createConsumerOnSignUp: false` (the default). Matches Stripe/Polar/Dodo conventions; signup stays off the StreamPay hot path, and users who never pay don't clutter the consumer table.
+  - `Eagerly, at sign-up` — `createConsumerOnSignUp: true`. Use when your product needs portal/subscription data for a brand-new user before any payment has happened.
 
-**Drives**: `createConsumerOnSignUp` boolean and whether Q5 and Q6 are asked.
+**Drives**: `createConsumerOnSignUp` boolean. Q5 (duplicate reclaim) and Q6 (custom fields) still apply in both modes — they run during both eager (`onBeforeUserCreate`) and lazy (`ensureConsumerForUser`) provisioning paths.
 
-## Q5 — Duplicate reclaim policy (conditional on Q4 = Yes)
+## Q5 — Duplicate reclaim policy (applies in both Q4 modes)
 
 - **header**: `Duplicate consumers`
 - **question**: `If a sign-up hits DUPLICATE_CONSUMER on StreamPay and the match is already linked to another external_id, how should the plugin behave?`
@@ -76,7 +76,7 @@ The 7–10 `AskUserQuestion` prompts this skill uses in Phase 2. Ask each questi
 
 **Drives**: `claimExistingConsumerBy` option. Explain the security trade-off inline (reclaim is convenient but lets a new user inherit a previous user's billing history — only enable when the app controls both sides of the identifier).
 
-## Q6 — Custom consumer fields (conditional on Q4 = Yes)
+## Q6 — Custom consumer fields (applies in both Q4 modes)
 
 - **header**: `Custom consumer fields`
 - **question**: `Send any custom fields when creating a consumer?`

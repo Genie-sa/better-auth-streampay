@@ -9,7 +9,7 @@ import type { StreamPayEndpoints, StreamPayOptions } from "./types";
 
 export const streampay = <O extends StreamPayOptions>(options: O) => {
 	const endpoints = options.use
-		.map((use) => use(options.client))
+		.map((use) => use(options))
 		.reduce((acc, plugin) => {
 			Object.assign(acc, plugin);
 			return acc;

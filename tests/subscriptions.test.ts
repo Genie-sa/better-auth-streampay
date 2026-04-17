@@ -26,8 +26,9 @@ vi.mock("better-auth/api", () => ({
 
 import { subscriptions } from "../src/plugins/subscriptions";
 import { unwrapHandler } from "./utils/better-auth-mock";
-import { mockApiError } from "./utils/helpers";
+import { createTestStreamPayOptions, mockApiError } from "./utils/helpers";
 import {
+	createMockConsumer,
 	createMockConsumerList,
 	createMockContext,
 	createMockStreamPayClient,
@@ -52,7 +53,7 @@ describe("subscriptions plugin", () => {
 	describe("plugin creation", () => {
 		it("registers cancelSubscription and freezeSubscription endpoints", () => {
 			const plugin = subscriptions();
-			const endpoints = plugin(mockClient);
+			const endpoints = plugin(createTestStreamPayOptions({ client: mockClient }));
 
 			expect(endpoints).toHaveProperty("cancelSubscription");
 			expect(endpoints).toHaveProperty("freezeSubscription");
@@ -63,7 +64,7 @@ describe("subscriptions plugin", () => {
 		let handler: (ctx: MockCtx) => Promise<unknown>;
 
 		beforeEach(() => {
-			handler = unwrapHandler(subscriptions()(mockClient).cancelSubscription);
+			handler = unwrapHandler(subscriptions()(createTestStreamPayOptions({ client: mockClient })).cancelSubscription);
 		});
 
 		it("cancels a subscription the user owns and forwards cancel_related_invoices", async () => {
@@ -154,13 +155,35 @@ describe("subscriptions plugin", () => {
 				expect.stringContaining("cancelSubscription failed"),
 			);
 		});
+
+		it("lazy-creates a consumer for orphan users, then FORBIDDEN on ownership mismatch", async () => {
+			// Symmetric to the freezeSubscription test: cancel also goes
+			// through assertOwnsSubscription → ensureConsumerForUser.
+			mockClient.listConsumers.mockResolvedValue(createMockConsumerList());
+			mockClient.createConsumer.mockResolvedValue(
+				createMockConsumer({ id: "cons_lazy_cancel", external_id: "user-orphan" }),
+			);
+			mockClient.getSubscription.mockResolvedValue(
+				createMockSubscription({
+					id: OWNED_SUB,
+					organization_consumer_id: "cons_owner",
+				}),
+			);
+			const ctx = createMockContext({
+				user: createMockUser({ id: "user-orphan", streampayConsumerId: null }),
+				body: { subscriptionId: OWNED_SUB },
+			});
+			await expect(handler(ctx)).rejects.toThrow(/does not belong to this user/);
+			expect(mockClient.createConsumer).toHaveBeenCalled();
+			expect(mockClient.cancelSubscription).not.toHaveBeenCalled();
+		});
 	});
 
 	describe("freezeSubscription handler", () => {
 		let handler: (ctx: MockCtx) => Promise<unknown>;
 
 		beforeEach(() => {
-			handler = unwrapHandler(subscriptions()(mockClient).freezeSubscription);
+			handler = unwrapHandler(subscriptions()(createTestStreamPayOptions({ client: mockClient })).freezeSubscription);
 		});
 
 		it("freezes a subscription the user owns with the real API field names", async () => {
@@ -252,8 +275,21 @@ describe("subscriptions plugin", () => {
 			await expect(handler(ctx)).rejects.toThrow(/Session user is missing/);
 		});
 
-		it("returns NOT_FOUND when the user has no linked consumer", async () => {
+		it("lazy-creates a consumer for orphan users, then FORBIDDEN on ownership mismatch", async () => {
+			// Lazy mode: a user without a linked consumer gets one created
+			// at action time. The freshly-created consumer can't own any
+			// existing subscription, so the ownership check rejects as
+			// FORBIDDEN (same user-facing outcome as the old NOT_FOUND).
 			mockClient.listConsumers.mockResolvedValue(createMockConsumerList());
+			mockClient.createConsumer.mockResolvedValue(
+				createMockConsumer({ id: "cons_lazy", external_id: "user-orphan" }),
+			);
+			mockClient.getSubscription.mockResolvedValue(
+				createMockSubscription({
+					id: OWNED_SUB,
+					organization_consumer_id: "cons_owner",
+				}),
+			);
 			const ctx = createMockContext({
 				user: createMockUser({
 					id: "user-orphan",
@@ -264,7 +300,12 @@ describe("subscriptions plugin", () => {
 					freezeStartDatetime: "2026-05-01T00:00:00.000Z",
 				},
 			});
-			await expect(handler(ctx)).rejects.toThrow(/No StreamPay consumer/);
+			await expect(handler(ctx)).rejects.toThrow(/does not belong to this user/);
+			expect(mockClient.createConsumer).toHaveBeenCalled();
+			expect(ctx.context.internalAdapter.updateUser).toHaveBeenCalledWith(
+				"user-orphan",
+				expect.objectContaining({ streampayConsumerId: "cons_lazy" }),
+			);
 		});
 
 		it("propagates SDK failures as INTERNAL_SERVER_ERROR with a log", async () => {

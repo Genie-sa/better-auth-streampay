@@ -6,12 +6,12 @@ A [Better Auth](https://better-auth.com) plugin for integrating [StreamPay](http
 
 ## Features
 
-- Checkout Integration
+- Checkout Integration (lazy-creates a StreamPay consumer on first payment)
 - Consumer Portal (subscriptions, invoices, payments)
 - Subscription Management (cancel, freeze)
-- Automatic Consumer creation on signup
+- Optional eager consumer creation on signup (`createConsumerOnSignUp: true`)
 - Handle StreamPay Webhooks securely with HMAC-SHA256 signature verification
-- Consumer sync on user update/delete
+- Consumer sync on user update/delete (when eager mode is on)
 
 ## Installation
 
@@ -59,7 +59,9 @@ const auth = betterAuth({
   plugins: [
     streampay({
       client: streamPayClient,
-      createConsumerOnSignUp: true,
+      // createConsumerOnSignUp defaults to false: consumers are created
+      // lazily at first checkout or subscription mutation. Set to `true`
+      // to provision a StreamPay consumer at signup instead.
       use: [
         checkout({
           products: [
@@ -120,15 +122,19 @@ npx prisma migrate dev                                     # Prisma
 
 | Option                    | Type       | Description                                                        |
 | ------------------------- | ---------- | ------------------------------------------------------------------ |
-| `createConsumerOnSignUp`  | `boolean`  | Automatically create a StreamPay consumer when a user signs up     |
+| `createConsumerOnSignUp`  | `boolean`  | Create a StreamPay consumer eagerly at signup. Default: `false` (lazy — consumer is created on first checkout / subscription mutation). |
 | `claimExistingConsumerBy` | `("email" \| "phone")[]` | Reclaim a duplicate linked consumer by the listed identifier(s) |
 | `getConsumerCreateParams` | `function` | Provide additional consumer fields (phone, language, IBAN, etc.)   |
 
 ### Consumers
 
-When `createConsumerOnSignUp` is enabled, a new StreamPay Consumer is automatically created when a new user signs up. All consumers are created with an `external_id` matching the user's database ID — no mapping table needed. The resulting consumer ID is stored as `streampayConsumerId` on the user row.
+**Lazy by default (`createConsumerOnSignUp: false`).** A StreamPay Consumer is created on demand the first time an authenticated user hits `/checkout` or a subscription mutation — not at signup. This keeps the signup hot path off StreamPay and the consumer table free of users who never pay. It matches the convention used by every other Better Auth billing plugin (Stripe, Polar, Dodo Payments).
 
-If StreamPay rejects sign-up with `DUPLICATE_CONSUMER`, the plugin normally reuses only stranded consumers whose `external_id` is empty. If you set `claimExistingConsumerBy`, the plugin can also reuse an existing consumer that matches one of the listed identifiers even if it is already linked to a different `external_id`. The `after` hook then rewrites that `external_id` to the new Better Auth user id.
+**Eager opt-in (`createConsumerOnSignUp: true`).** Set the flag to `true` to provision a StreamPay Consumer inside the signup transaction — useful when your product needs portal data (invoices, subscriptions) immediately after signup. The `before` hook aborts signup if StreamPay rejects, keeping the two systems atomic.
+
+All consumers — lazy or eager — are created with `external_id` matching the user's database ID, so no mapping table is needed. The resulting consumer ID is stored as `streampayConsumerId` on the user row.
+
+If StreamPay rejects with `DUPLICATE_CONSUMER`, the plugin normally reuses only stranded consumers whose `external_id` is empty. If you set `claimExistingConsumerBy`, the plugin can also reuse an existing consumer that matches one of the listed identifiers even if it is already linked to a different `external_id`. The `after` hook then rewrites that `external_id` to the new Better Auth user id.
 
 Claim modes:
 - omitted / `[]` — only reuse stranded consumers
@@ -138,16 +144,18 @@ Claim modes:
 
 > **Breaking in 0.2.0:** `claimExistingConsumerBy` now takes an array. Replace `"email"` → `["email"]`, `"phone"` → `["phone"]`, `"both"` → `["email", "phone"]`. `null` is no longer accepted — omit the option or pass `[]` to disable.
 
-Consumer data is also kept in sync:
+Consumer data is kept in sync for any user with a linked `streampayConsumerId` — independent of `createConsumerOnSignUp`:
 - **User update** — name/email changes are synced to StreamPay
 - **User delete** — the StreamPay consumer is deleted
+
+Users with no linked consumer (pre-first-payment in lazy mode, legacy pre-schema users) are skipped cheaply — there is no list-scan on the user-update hot path.
 
 #### Custom Consumer Fields
 
 ```typescript
 streampay({
   client: streamPayClient,
-  createConsumerOnSignUp: true,
+  createConsumerOnSignUp: true, // opt into eager mode
   claimExistingConsumerBy: ["email", "phone"],
   getConsumerCreateParams: async ({ user }, request) => ({
     phone_number: "+966501234567",
@@ -157,6 +165,8 @@ streampay({
   use: [...],
 });
 ```
+
+`getConsumerCreateParams` also runs during lazy provisioning at checkout, so it applies in both modes.
 
 ## Checkout Plugin
 
@@ -239,15 +249,18 @@ portal({ consumerLookupMaxPages: 20 });
 ### Client Usage
 
 ```typescript
-// Get consumer state
-const { data: consumer } = await authClient.state();
+// Get consumer state — returns { hasConsumer, consumer }
+const { data } = await authClient.state();
+if (!data.hasConsumer) {
+  // User has not triggered lazy consumer creation yet — render "no billing activity" state
+}
 
-// List subscriptions (paginated)
+// List subscriptions — returns { hasConsumer, data, pagination }
 const { data: subs } = await authClient.subscriptions({
   query: { page: 1, limit: 20 },
 });
 
-// List invoices (paginated)
+// List invoices
 const { data: invoices } = await authClient.invoices({
   query: { page: 1, limit: 20 },
 });
@@ -255,6 +268,8 @@ const { data: invoices } = await authClient.invoices({
 // List payments
 const { data: payments } = await authClient.payments();
 ```
+
+> **Response shape:** portal reads never eagerly create a consumer. When a user has no StreamPay consumer yet, every read returns `200 OK` with `{ hasConsumer: false, data: [], pagination: null }` (or `consumer: null` for `/state`) instead of `404`. This is additive — the `data` / `consumer` / `pagination` fields keep their shape when `hasConsumer` is true.
 
 ## Subscriptions Plugin
 

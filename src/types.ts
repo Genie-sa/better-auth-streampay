@@ -111,6 +111,16 @@ export interface StreamPayOptions {
 	 * When `true`, a StreamPay consumer is created on sign-up with
 	 * `external_id: user.id`. The resulting consumer id is written back
 	 * onto the Better Auth user row as `streampayConsumerId`.
+	 *
+	 * Defaults to `false` (lazy mode) to match the convention of every
+	 * other better-auth billing plugin — Stripe, Polar, and Dodo all
+	 * default to off. With the default, consumers are created on-demand
+	 * at first checkout or subscription mutation via
+	 * `ensureConsumerForUser`, keeping signup off the StreamPay hot path
+	 * and the StreamPay consumer table free of users who never pay.
+	 *
+	 * Set to `true` to restore eager-on-signup behavior (useful when your
+	 * product uses portal data immediately post-signup).
 	 */
 	createConsumerOnSignUp?: boolean;
 

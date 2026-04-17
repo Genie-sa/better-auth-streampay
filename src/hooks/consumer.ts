@@ -1,56 +1,29 @@
 import type { ConsumerCreate } from "@streamsdk/typescript";
 import type { User } from "better-auth";
 import { APIError } from "better-auth/api";
-import type {
-	ClaimExistingConsumerBy,
-	ClaimExistingConsumerIdentifier,
-	StreamPayOptions,
-} from "../types";
+import type { StreamPayOptions } from "../types";
 import {
-	type ConsumerIdentifiers,
-	findConsumerByExternalId,
-	findConsumerByIdentifiers,
-} from "../utils/consumer";
+	isDuplicateConsumerError,
+	resolveDuplicateConsumer,
+	type StreamPayLoggerContext,
+} from "../utils/ensure-consumer";
 import { formatStreamPayError } from "../utils/format-error";
-import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
+import { asSessionUser } from "../utils/session";
 
 /**
  * The narrow context shape the plugin's hooks actually read. Declared
  * as a structural supertype of Better Auth's `GenericEndpointContext`
  * so tests can pass a `MockCtx` without any cast.
  *
- * The hooks only need a logger now — consumer creation moved to the
+ * The hooks only need a logger here — consumer creation moved to the
  * `before` hook and injects `streampayConsumerId` into the row via the
  * hook's return value, so we no longer call `internalAdapter.updateUser`
  * from the `after` hook.
  */
-export interface StreamPayHookContext {
-	context: {
-		logger: {
-			error: (message: string) => void;
-		};
-	};
-}
+export type StreamPayHookContext = StreamPayLoggerContext;
 
 const isAnonymous = (user: User | Partial<User>): boolean =>
 	"isAnonymous" in user && user.isAnonymous === true;
-
-function sameEmail(a: string | null | undefined, b: string | null | undefined): boolean {
-	if (!a || !b) return false;
-	return a.trim().toLowerCase() === b.trim().toLowerCase();
-}
-
-function samePhone(a: string | null | undefined, b: string | null | undefined): boolean {
-	if (!a || !b) return false;
-	return a.trim() === b.trim();
-}
-
-function canClaimBy(
-	mode: ClaimExistingConsumerBy | undefined,
-	identifier: ClaimExistingConsumerIdentifier,
-): boolean {
-	return mode?.includes(identifier) ?? false;
-}
 
 /**
  * Runs before Better Auth writes the user row. Creates the StreamPay
@@ -133,95 +106,6 @@ export const onBeforeUserCreate =
 	};
 
 /**
- * Narrow an unknown error to a StreamPay `DUPLICATE_CONSUMER` response.
- * Uses `in` operator narrowing only — no casts, no `any`. Mirrors the
- * style in `src/utils/format-error.ts`.
- */
-function isDuplicateConsumerError(err: unknown): boolean {
-	if (!(err instanceof Error)) return false;
-	if (!("body" in err)) return false;
-	const { body } = err;
-	if (!body || typeof body !== "object") return false;
-	if (!("error" in body) || !body.error || typeof body.error !== "object") {
-		return false;
-	}
-	const error = body.error;
-	return "code" in error && typeof error.code === "string" && error.code === "DUPLICATE_CONSUMER";
-}
-
-/**
- * After a `DUPLICATE_CONSUMER` error, locate the existing consumer and
- * decide whether it is safe to reuse. Returns the id to reuse, or
- * `null` if the caller should fall through to the generic error path.
- */
-async function resolveDuplicateConsumer(
-	options: StreamPayOptions,
-	createPayload: ConsumerCreate,
-	context: StreamPayHookContext,
-): Promise<string | null> {
-	// Prefer exact identifier matches in a stable order so the chosen
-	// reclaim mode doesn't get blocked by an earlier match on a different
-	// identifier.
-	const emailMatch =
-		createPayload.email
-			? await findConsumerByIdentifiers(options.client, {
-					email: createPayload.email,
-				})
-			: null;
-	const phoneMatch =
-		!emailMatch && createPayload.phone_number
-			? await findConsumerByIdentifiers(options.client, {
-					phone_number: createPayload.phone_number,
-				})
-			: null;
-
-	const identifiers: ConsumerIdentifiers = {
-		email: createPayload.email ?? null,
-		phone_number: createPayload.phone_number ?? null,
-		external_id: createPayload.external_id ?? null,
-		iban: createPayload.iban ?? null,
-	};
-
-	const existing =
-		emailMatch ?? phoneMatch ?? (await findConsumerByIdentifiers(options.client, identifiers));
-	if (!existing?.id) {
-		// StreamPay said duplicate but the scan missed — paging gap, race, or
-		// soft-delete weirdness. Fall through so the caller surfaces the
-		// original error instead of silently succeeding.
-		return null;
-	}
-
-	if (existing.external_id) {
-		if (
-			canClaimBy(options.claimExistingConsumerBy, "email") &&
-			sameEmail(existing.email, createPayload.email)
-		) {
-			return existing.id;
-		}
-		if (
-			canClaimBy(options.claimExistingConsumerBy, "phone") &&
-			samePhone(existing.phone_number, createPayload.phone_number)
-		) {
-			return existing.id;
-		}
-
-		// Linked to another Better Auth user — reusing would mean inheriting
-		// their billing history. Refuse with a generic message (avoid
-		// user-enumeration via "another account exists at this email").
-		context.context.logger.error(
-			`StreamPay duplicate: consumer ${existing.id} is already linked to external_id=${existing.external_id}`,
-		);
-		throw new APIError("CONFLICT", {
-			message: "This account cannot be created at this time. Please contact support.",
-		});
-	}
-
-	// Stranded consumer — safe to reuse. The after-hook will patch
-	// external_id onto it once Better Auth has assigned a user.id.
-	return existing.id;
-}
-
-/**
  * Runs after the user row is written. Back-links the StreamPay consumer
  * created by `onBeforeUserCreate` to the Better Auth user id via
  * `external_id`. Failures here are logged but never thrown — the user
@@ -253,31 +137,33 @@ export const onAfterUserCreate =
 	};
 
 /**
- * Sync profile updates to the StreamPay consumer. Failures log only —
- * the Better Auth user update has already committed by the time we run,
- * so throwing would desync the two systems.
+ * Sync profile updates to the StreamPay consumer. Runs for any user
+ * with a linked `streampayConsumerId` — regardless of the
+ * `createConsumerOnSignUp` flag. Eager-mode users were linked at
+ * signup; lazy-mode users were linked at first checkout. Either way,
+ * once the link exists we keep it in sync. Users with no link
+ * (pre-first-payment in lazy mode, legacy pre-schema users) short-
+ * circuit cheaply — no list-scan on the user-update hot path.
+ *
+ * Failures log only — the Better Auth user update has already
+ * committed by the time we run, so throwing would desync the two
+ * systems.
  */
 export const onUserUpdate =
 	(options: StreamPayOptions) =>
 	async (user: User, context: StreamPayHookContext | null): Promise<void> => {
-		if (!context || !options.createConsumerOnSignUp) return;
+		if (!context) return;
 		if (isAnonymous(user)) return;
 
 		const sessionUser = asSessionUser(user);
-		if (!sessionUser) return;
+		if (!sessionUser?.streampayConsumerId) return;
 
-		const consumerId = await resolveConsumerId(options, sessionUser);
-		if (!consumerId) return;
-
-		// Build the update payload conditionally so we don't send explicit
-		// `undefined` for fields the user didn't set — `exactOptionalPropertyTypes`
-		// rejects that, and StreamPay treats missing fields as "don't change".
 		const update: Parameters<typeof options.client.updateConsumer>[1] = {};
 		if (sessionUser.name !== undefined) update.name = sessionUser.name;
 		if (sessionUser.email !== undefined) update.email = sessionUser.email;
 
 		try {
-			await options.client.updateConsumer(consumerId, update);
+			await options.client.updateConsumer(sessionUser.streampayConsumerId, update);
 		} catch (err: unknown) {
 			context.context.logger.error(
 				`StreamPay consumer update failed: ${formatStreamPayError(err)}`,
@@ -287,34 +173,25 @@ export const onUserUpdate =
 
 /**
  * Delete the StreamPay consumer when a Better Auth user is removed.
- * Also logs on failure rather than throwing, for the same commit-order
+ * Same guard as `onUserUpdate`: fires whenever there is a linked
+ * consumer, independent of the `createConsumerOnSignUp` flag. Also
+ * logs on failure rather than throwing, for the same commit-order
  * reason as `onUserUpdate`.
  */
 export const onUserDelete =
 	(options: StreamPayOptions) =>
 	async (user: User, context: StreamPayHookContext | null): Promise<void> => {
-		if (!context || !options.createConsumerOnSignUp) return;
+		if (!context) return;
 		if (isAnonymous(user)) return;
 
 		const sessionUser = asSessionUser(user);
-		if (!sessionUser) return;
-
-		const consumerId = await resolveConsumerId(options, sessionUser);
-		if (!consumerId) return;
+		if (!sessionUser?.streampayConsumerId) return;
 
 		try {
-			await options.client.deleteConsumer(consumerId);
+			await options.client.deleteConsumer(sessionUser.streampayConsumerId);
 		} catch (err: unknown) {
 			context.context.logger.error(
 				`StreamPay consumer delete failed: ${formatStreamPayError(err)}`,
 			);
 		}
 	};
-
-async function resolveConsumerId(
-	options: StreamPayOptions,
-	user: StreamPaySessionUser,
-): Promise<string | null> {
-	if (user.streampayConsumerId) return user.streampayConsumerId;
-	return findConsumerByExternalId(options.client, { externalId: user.id });
-}

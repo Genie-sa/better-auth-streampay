@@ -8,7 +8,7 @@ Every option on `streampay()` and each sub-plugin, with types and defaults, copi
 |---|---|---|---|---|
 | `client` | `StreamPayClient` | ✅ | — | From `StreamSDK.init(process.env.STREAMPAY_API_KEY!)` |
 | `use` | `StreamPayPlugin[]` | ✅ | — | Sub-plugins to compose: `checkout()`, `portal()`, `subscriptions()`, `webhooks()` |
-| `createConsumerOnSignUp` | `boolean` | — | `false` | Create consumer on Better Auth sign-up |
+| `createConsumerOnSignUp` | `boolean` | — | `false` | Eager-create consumer at sign-up. Default `false` (lazy — consumer is created at first checkout / subscription mutation). Matches Stripe/Polar/Dodo convention. |
 | `claimExistingConsumerBy` | `("email" \| "phone")[]` | — | `[]` | Reclaim a linked duplicate on `DUPLICATE_CONSUMER`. Omit (or `[]`) = only stranded consumers are reused. Pass `["email", "phone"]` to reclaim by either. See security note in [interview-questions.md](interview-questions.md) Q5 |
 | `getConsumerCreateParams` | `(ctx, request) => Promise<ConsumerCreateOverrides>` | — | — | Inject custom consumer fields at creation time |
 
@@ -49,10 +49,12 @@ The returned object is merged with the default `{ name, email, external_id }` pa
 
 ### Endpoints (all require session)
 
-- `GET /api/auth/consumer/state` → `authClient.state()`
-- `GET /api/auth/consumer/subscriptions/list` → `authClient.subscriptions({ query: { page, limit } })`
-- `GET /api/auth/consumer/invoices/list` → `authClient.invoices(...)`
-- `GET /api/auth/consumer/payments/list` → `authClient.payments()`
+- `GET /api/auth/consumer/state` → `authClient.state()` → `{ hasConsumer, consumer }`
+- `GET /api/auth/consumer/subscriptions/list` → `authClient.subscriptions({ query: { page, limit } })` → `{ hasConsumer, data, pagination }`
+- `GET /api/auth/consumer/invoices/list` → `authClient.invoices(...)` → `{ hasConsumer, data, pagination }`
+- `GET /api/auth/consumer/payments/list` → `authClient.payments()` → `{ hasConsumer, data, pagination }`
+
+All reads return `200 OK` with `hasConsumer: false` and empty arrays when the user has not yet been provisioned a StreamPay consumer. They never eagerly create a consumer — lazy provisioning only fires at checkout or subscription mutations.
 
 ## `subscriptions()` — sub-plugin
 

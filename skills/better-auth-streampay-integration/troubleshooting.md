@@ -39,8 +39,9 @@ Security note: reclaim is a trade-off. Enable only when the app owns the identit
 
 ## Sign-up succeeds but `user.streampayConsumerId` is `null`
 
-**Causes**:
-- `createConsumerOnSignUp` is `false`. Set to `true`.
+**This is expected in lazy mode** (the default since 0.3.0). The column is populated the first time the user hits `/checkout` or a subscription mutation. If you need a consumer eagerly at signup, opt into eager mode: `createConsumerOnSignUp: true`.
+
+**If you're on `createConsumerOnSignUp: true` and the column is still `null`, check:**
 - The migration didn't run, and the column doesn't exist. Run the ORM migration (see [code-templates.md](code-templates.md) §Migrations).
 - StreamPay `createConsumer` threw; check server logs for the formatted error.
 - The user is anonymous — the plugin intentionally skips anonymous sessions; consumers are created on upgrade.

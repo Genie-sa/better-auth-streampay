@@ -54,7 +54,11 @@ export const auth = betterAuth({
   plugins: [
     streampay({
       client: streamPayClient,
-      createConsumerOnSignUp: true,
+      // `createConsumerOnSignUp` defaults to `false` (lazy — the consumer
+      // is created on the first authenticated checkout or subscription
+      // mutation). Set to `true` if your product needs portal data
+      // immediately after signup, before any payment has happened.
+      // createConsumerOnSignUp: true,
       claimExistingConsumerBy: [], // or ["email"], ["phone"], ["email", "phone"]
       getConsumerCreateParams: async ({ user }, request) => ({
         // TODO: source these from request/db/session

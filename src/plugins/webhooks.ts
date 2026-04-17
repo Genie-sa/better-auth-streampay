@@ -1,5 +1,5 @@
 import { APIError, createAuthEndpoint } from "better-auth/api";
-import type { StreamPayClient } from "../types";
+import type { StreamPayOptions } from "../types";
 import { dispatchWebhook, type WebhookHandlers } from "../webhooks/dispatcher";
 import type { StreamPayWebhookPayload } from "../webhooks/events";
 import { StreamPayWebhookError, verifyWebhookOrThrow } from "../webhooks/verify";
@@ -40,8 +40,10 @@ function toErrorCode(reason: StreamPayWebhookError["reason"]): "UNAUTHORIZED" | 
 		: "BAD_REQUEST";
 }
 
-export const webhooks = (options: WebhooksOptions) => (_client: StreamPayClient) => {
-	const { secret, toleranceSeconds, ...handlers } = options;
+export const webhooks =
+	(webhooksOptions: WebhooksOptions) =>
+	(_options: StreamPayOptions) => {
+	const { secret, toleranceSeconds, ...handlers } = webhooksOptions;
 
 	return {
 		streampayWebhooks: createAuthEndpoint(

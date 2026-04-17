@@ -27,7 +27,7 @@ vi.mock("better-auth/api", () => ({
 
 import { checkout } from "../src/plugins/checkout";
 import { unwrapHandler } from "./utils/better-auth-mock";
-import { mockApiError } from "./utils/helpers";
+import { createTestStreamPayOptions, mockApiError } from "./utils/helpers";
 import {
 	createMockContext,
 	createMockPaymentLink,
@@ -59,7 +59,7 @@ describe("checkout plugin", () => {
 	describe("plugin creation", () => {
 		it("registers the checkout endpoint at POST /checkout", () => {
 			const plugin = checkout();
-			const endpoints = plugin(mockClient);
+			const endpoints = plugin(createTestStreamPayOptions({ client: mockClient }));
 
 			expect(endpoints).toHaveProperty("checkout");
 		});
@@ -71,7 +71,7 @@ describe("checkout plugin", () => {
 				failureUrl: "/failure",
 				authenticatedUsersOnly: true,
 			});
-			const endpoints = plugin(mockClient);
+			const endpoints = plugin(createTestStreamPayOptions({ client: mockClient }));
 			expect(endpoints).toHaveProperty("checkout");
 		});
 	});
@@ -86,7 +86,7 @@ describe("checkout plugin", () => {
 					{ productId: SECOND_PRODUCT_ID, slug: "enterprise" },
 				],
 			});
-			handler = unwrapHandler<CheckoutResult>(plugin(mockClient).checkout);
+			handler = unwrapHandler<CheckoutResult>(plugin(createTestStreamPayOptions({ client: mockClient })).checkout);
 			mockedGetSessionFromCtx.mockResolvedValue(null);
 			mockClient.createPaymentLink.mockResolvedValue(createMockPaymentLink());
 		});
@@ -289,7 +289,7 @@ describe("checkout plugin", () => {
 
 		beforeEach(() => {
 			const plugin = checkout({ authenticatedUsersOnly: true });
-			handler = unwrapHandler<CheckoutResult>(plugin(mockClient).checkout);
+			handler = unwrapHandler<CheckoutResult>(plugin(createTestStreamPayOptions({ client: mockClient })).checkout);
 			mockClient.createPaymentLink.mockResolvedValue(createMockPaymentLink());
 		});
 

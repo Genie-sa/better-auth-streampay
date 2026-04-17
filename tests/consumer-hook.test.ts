@@ -34,7 +34,7 @@ import {
 	onUserDelete,
 	onUserUpdate,
 } from "../src/hooks/consumer";
-import { createTestStreamPayOptions, mockApiError } from "./utils/helpers";
+import { createEagerTestStreamPayOptions, mockApiError } from "./utils/helpers";
 import { invokeHook } from "./utils/invoke-hook";
 import {
 	createMockConsumer,
@@ -56,7 +56,7 @@ describe("consumer hooks", () => {
 
 	describe("onBeforeUserCreate", () => {
 		it("creates a StreamPay consumer WITHOUT external_id and injects its id into the row", async () => {
-			const options = createTestStreamPayOptions({ client: mockClient });
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			mockClient.createConsumer.mockResolvedValue(createMockConsumer({ id: "cons_fresh" }));
 
 			const user = createMockUser({
@@ -86,7 +86,7 @@ describe("consumer hooks", () => {
 		});
 
 		it("uses user.email as the consumer name when user.name is empty", async () => {
-			const options = createTestStreamPayOptions({ client: mockClient });
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			mockClient.createConsumer.mockResolvedValue(createMockConsumer());
 
 			const user = createMockUser({ name: "", email: "only@example.com" });
@@ -104,7 +104,7 @@ describe("consumer hooks", () => {
 				phone_number: "+966500000000",
 				preferred_language: "ar",
 			});
-			const options = createTestStreamPayOptions({
+			const options = createEagerTestStreamPayOptions({
 				client: mockClient,
 				getConsumerCreateParams,
 			});
@@ -125,7 +125,7 @@ describe("consumer hooks", () => {
 		});
 
 		it("throws APIError when email is missing (StreamPay requires email)", async () => {
-			const options = createTestStreamPayOptions({ client: mockClient });
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			const user = createMockUser({ email: "" });
 			const ctx = createMockContext({ user });
 
@@ -141,7 +141,7 @@ describe("consumer hooks", () => {
 			// better-auth/dist/db/with-hooks.mjs:11-17), so no user row is
 			// ever persisted. The sign-up fails cleanly instead of leaving
 			// an orphaned row with no StreamPay consumer link.
-			const options = createTestStreamPayOptions({ client: mockClient });
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			mockClient.createConsumer.mockRejectedValue(
 				mockApiError(403, {
 					error: {
@@ -174,7 +174,7 @@ describe("consumer hooks", () => {
 			});
 
 			it("reuses a STRANDED consumer (no external_id) on DUPLICATE_CONSUMER", async () => {
-				const options = createTestStreamPayOptions({ client: mockClient });
+				const options = createEagerTestStreamPayOptions({ client: mockClient });
 				mockClient.createConsumer.mockRejectedValue(duplicateError);
 				// Stranded: external_id is null — this consumer belongs to
 				// nobody, so linking it to the new user is safe.
@@ -200,7 +200,7 @@ describe("consumer hooks", () => {
 			});
 
 			it("REFUSES to reuse a consumer that is already linked to another user", async () => {
-				const options = createTestStreamPayOptions({ client: mockClient });
+				const options = createEagerTestStreamPayOptions({ client: mockClient });
 				mockClient.createConsumer.mockRejectedValue(duplicateError);
 				// Linked: external_id points to some other Better Auth user.
 				// Reusing it would hand this user access to that other user's
@@ -230,7 +230,7 @@ describe("consumer hooks", () => {
 			});
 
 			it('reclaims an already-linked SAME-EMAIL consumer when claimExistingConsumerBy is ["email"]', async () => {
-				const options = createTestStreamPayOptions({
+				const options = createEagerTestStreamPayOptions({
 					client: mockClient,
 					claimExistingConsumerBy: ["email"],
 				});
@@ -256,7 +256,7 @@ describe("consumer hooks", () => {
 			});
 
 			it('still refuses a linked consumer when claimExistingConsumerBy is ["email"] but the match is only by phone', async () => {
-				const options = createTestStreamPayOptions({
+				const options = createEagerTestStreamPayOptions({
 					client: mockClient,
 					claimExistingConsumerBy: ["email"],
 					getConsumerCreateParams: async () => ({
@@ -284,7 +284,7 @@ describe("consumer hooks", () => {
 			});
 
 			it('reclaims an already-linked SAME-PHONE consumer when claimExistingConsumerBy is ["phone"]', async () => {
-				const options = createTestStreamPayOptions({
+				const options = createEagerTestStreamPayOptions({
 					client: mockClient,
 					claimExistingConsumerBy: ["phone"],
 					getConsumerCreateParams: async () => ({
@@ -314,7 +314,7 @@ describe("consumer hooks", () => {
 			});
 
 			it('still refuses a linked consumer when claimExistingConsumerBy is ["phone"] but the match is only by email', async () => {
-				const options = createTestStreamPayOptions({
+				const options = createEagerTestStreamPayOptions({
 					client: mockClient,
 					claimExistingConsumerBy: ["phone"],
 					getConsumerCreateParams: async () => ({
@@ -342,7 +342,7 @@ describe("consumer hooks", () => {
 			});
 
 			it('reclaims either identifier when claimExistingConsumerBy is ["email", "phone"]', async () => {
-				const options = createTestStreamPayOptions({
+				const options = createEagerTestStreamPayOptions({
 					client: mockClient,
 					claimExistingConsumerBy: ["email", "phone"],
 					getConsumerCreateParams: async () => ({
@@ -372,7 +372,7 @@ describe("consumer hooks", () => {
 			});
 
 			it("does not reclaim linked consumers when claimExistingConsumerBy is omitted", async () => {
-				const options = createTestStreamPayOptions({
+				const options = createEagerTestStreamPayOptions({
 					client: mockClient,
 				});
 				mockClient.createConsumer.mockRejectedValue(duplicateError);
@@ -395,7 +395,7 @@ describe("consumer hooks", () => {
 			});
 
 			it('prefers an exact email match before other duplicate identifiers when claimExistingConsumerBy is ["email", "phone"]', async () => {
-				const options = createTestStreamPayOptions({
+				const options = createEagerTestStreamPayOptions({
 					client: mockClient,
 					claimExistingConsumerBy: ["email", "phone"],
 					getConsumerCreateParams: async () => ({
@@ -437,7 +437,7 @@ describe("consumer hooks", () => {
 			});
 
 			it("falls through to the generic error when the scan cannot find the duplicate", async () => {
-				const options = createTestStreamPayOptions({ client: mockClient });
+				const options = createEagerTestStreamPayOptions({ client: mockClient });
 				mockClient.createConsumer.mockRejectedValue(duplicateError);
 				// StreamPay said duplicate but the scan is empty — could be
 				// pagination gap, race, or soft-delete. We must re-throw
@@ -456,7 +456,7 @@ describe("consumer hooks", () => {
 				// If the integrator uses getConsumerCreateParams to set a
 				// phone number and StreamPay rejects because of a phone
 				// duplicate, the reuse path must find the match by phone.
-				const options = createTestStreamPayOptions({
+				const options = createEagerTestStreamPayOptions({
 					client: mockClient,
 					getConsumerCreateParams: async () => ({
 						phone_number: "+966500000000",
@@ -486,7 +486,7 @@ describe("consumer hooks", () => {
 		});
 
 		it("is a no-op when createConsumerOnSignUp is false", async () => {
-			const options = createTestStreamPayOptions({
+			const options = createEagerTestStreamPayOptions({
 				client: mockClient,
 				createConsumerOnSignUp: false,
 			});
@@ -500,7 +500,7 @@ describe("consumer hooks", () => {
 		});
 
 		it("is a no-op for anonymous users", async () => {
-			const options = createTestStreamPayOptions({ client: mockClient });
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			const user = { ...createMockUser({ email: "" }), isAnonymous: true };
 			const ctx = createMockContext({ user });
 
@@ -511,7 +511,7 @@ describe("consumer hooks", () => {
 		});
 
 		it("is a no-op when ctx is null (hook invoked outside a request)", async () => {
-			const options = createTestStreamPayOptions({ client: mockClient });
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			const user = createMockUser();
 
 			const result = await invokeHook(onBeforeUserCreate(options), user, null);
@@ -523,7 +523,7 @@ describe("consumer hooks", () => {
 
 	describe("onAfterUserCreate", () => {
 		it("back-links the consumer by patching external_id onto it", async () => {
-			const options = createTestStreamPayOptions({ client: mockClient });
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			mockClient.updateConsumer.mockResolvedValue(createMockConsumer());
 
 			// By the time this hook runs, the before-hook has already created
@@ -546,7 +546,7 @@ describe("consumer hooks", () => {
 			// runs. Throwing would surface as a 500 after a successful
 			// sign-up — worse UX than leaving the consumer temporarily
 			// unlinked (it can still be resolved via its id on the row).
-			const options = createTestStreamPayOptions({ client: mockClient });
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			mockClient.updateConsumer.mockRejectedValue(
 				mockApiError(500, { error: { message: "streampay down" } }),
 			);
@@ -564,7 +564,7 @@ describe("consumer hooks", () => {
 		});
 
 		it("is a no-op when streampayConsumerId is missing (before-hook was a no-op)", async () => {
-			const options = createTestStreamPayOptions({ client: mockClient });
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			const user = createMockUser({ streampayConsumerId: null });
 			const ctx = createMockContext({ user });
 
@@ -574,7 +574,7 @@ describe("consumer hooks", () => {
 		});
 
 		it("is a no-op when createConsumerOnSignUp is false", async () => {
-			const options = createTestStreamPayOptions({
+			const options = createEagerTestStreamPayOptions({
 				client: mockClient,
 				createConsumerOnSignUp: false,
 			});
@@ -587,7 +587,7 @@ describe("consumer hooks", () => {
 		});
 
 		it("is a no-op for anonymous users", async () => {
-			const options = createTestStreamPayOptions({ client: mockClient });
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			const user = {
 				...createMockUser({ streampayConsumerId: "cons_fresh" }),
 				isAnonymous: true,
@@ -600,7 +600,7 @@ describe("consumer hooks", () => {
 		});
 
 		it("is a no-op when ctx is null", async () => {
-			const options = createTestStreamPayOptions({ client: mockClient });
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			const user = createMockUser({ streampayConsumerId: "cons_fresh" });
 
 			await invokeHook(onAfterUserCreate(options), user, null);
@@ -611,7 +611,7 @@ describe("consumer hooks", () => {
 
 	describe("onUserUpdate", () => {
 		it("syncs name and email to the linked StreamPay consumer", async () => {
-			const options = createTestStreamPayOptions({ client: mockClient });
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			mockClient.updateConsumer.mockResolvedValue(createMockConsumer());
 
 			const user = createMockUser({
@@ -631,25 +631,23 @@ describe("consumer hooks", () => {
 			);
 		});
 
-		it("falls back to a list-scan when streampayConsumerId is not stored", async () => {
-			const options = createTestStreamPayOptions({ client: mockClient });
-			mockClient.listConsumers.mockResolvedValue(
-				createMockConsumerList([
-					createMockConsumer({ id: "cons_from_scan", external_id: "user-123" }),
-				]),
-			);
-			mockClient.updateConsumer.mockResolvedValue(createMockConsumer());
-
+		it("short-circuits when streampayConsumerId is not stored (no list-scan on user-update hot path)", async () => {
+			// Legacy users without the column (pre-schema-migration) are
+			// skipped cheaply rather than triggering a paginated scan on
+			// every profile update. They get linked on their next
+			// ensureConsumerForUser call (first checkout), after which
+			// sync resumes normally.
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			const user = createMockUser({ streampayConsumerId: null });
 			const ctx = createMockContext({ user });
 			await invokeHook(onUserUpdate(options), user, ctx);
 
-			expect(mockClient.listConsumers).toHaveBeenCalled();
-			expect(mockClient.updateConsumer).toHaveBeenCalledWith("cons_from_scan", expect.anything());
+			expect(mockClient.listConsumers).not.toHaveBeenCalled();
+			expect(mockClient.updateConsumer).not.toHaveBeenCalled();
 		});
 
 		it("logs but never throws when StreamPay returns an error", async () => {
-			const options = createTestStreamPayOptions({ client: mockClient });
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			mockClient.updateConsumer.mockRejectedValue(
 				mockApiError(500, { error: { message: "internal" } }),
 			);
@@ -663,20 +661,31 @@ describe("consumer hooks", () => {
 			);
 		});
 
-		it("is a no-op when createConsumerOnSignUp is false", async () => {
-			const options = createTestStreamPayOptions({
+		it("syncs lazy-linked consumers even when createConsumerOnSignUp is false", async () => {
+			// The hook is gated on streampayConsumerId presence, NOT on
+			// the flag. Any user with a linked consumer (eager or lazy)
+			// gets their updates synced.
+			const options = createEagerTestStreamPayOptions({
 				client: mockClient,
 				createConsumerOnSignUp: false,
 			});
-			const user = createMockUser({ streampayConsumerId: "cons_linked" });
+			mockClient.updateConsumer.mockResolvedValue(createMockConsumer());
+			const user = createMockUser({
+				name: "Lazy User",
+				email: "lazy@example.com",
+				streampayConsumerId: "cons_lazy_linked",
+			});
 			const ctx = createMockContext({ user });
 			await invokeHook(onUserUpdate(options), user, ctx);
 
-			expect(mockClient.updateConsumer).not.toHaveBeenCalled();
+			expect(mockClient.updateConsumer).toHaveBeenCalledWith(
+				"cons_lazy_linked",
+				expect.objectContaining({ name: "Lazy User", email: "lazy@example.com" }),
+			);
 		});
 
 		it("is a no-op for anonymous users", async () => {
-			const options = createTestStreamPayOptions({ client: mockClient });
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			const user = {
 				...createMockUser({ streampayConsumerId: "cons_linked" }),
 				isAnonymous: true,
@@ -690,7 +699,7 @@ describe("consumer hooks", () => {
 
 	describe("onUserDelete", () => {
 		it("deletes the linked StreamPay consumer", async () => {
-			const options = createTestStreamPayOptions({ client: mockClient });
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			mockClient.deleteConsumer.mockResolvedValue(undefined);
 
 			const user = createMockUser({ streampayConsumerId: "cons_linked" });
@@ -701,7 +710,7 @@ describe("consumer hooks", () => {
 		});
 
 		it("logs but never throws when StreamPay delete fails", async () => {
-			const options = createTestStreamPayOptions({ client: mockClient });
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			mockClient.deleteConsumer.mockRejectedValue(
 				mockApiError(404, { error: { message: "consumer not found" } }),
 			);
@@ -715,30 +724,32 @@ describe("consumer hooks", () => {
 			);
 		});
 
-		it("is a no-op when no consumer is linked and the scan finds nothing", async () => {
-			const options = createTestStreamPayOptions({ client: mockClient });
+		it("is a no-op when no consumer is linked (skips cheaply, no list-scan)", async () => {
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
 
 			const user = createMockUser({ streampayConsumerId: null });
 			const ctx = createMockContext({ user });
 			await invokeHook(onUserDelete(options), user, ctx);
 
+			expect(mockClient.listConsumers).not.toHaveBeenCalled();
 			expect(mockClient.deleteConsumer).not.toHaveBeenCalled();
 		});
 
-		it("is a no-op when createConsumerOnSignUp is false", async () => {
-			const options = createTestStreamPayOptions({
+		it("deletes lazy-linked consumers even when createConsumerOnSignUp is false", async () => {
+			const options = createEagerTestStreamPayOptions({
 				client: mockClient,
 				createConsumerOnSignUp: false,
 			});
-			const user = createMockUser({ streampayConsumerId: "cons_linked" });
+			mockClient.deleteConsumer.mockResolvedValue(undefined);
+			const user = createMockUser({ streampayConsumerId: "cons_lazy_linked" });
 			const ctx = createMockContext({ user });
 			await invokeHook(onUserDelete(options), user, ctx);
 
-			expect(mockClient.deleteConsumer).not.toHaveBeenCalled();
+			expect(mockClient.deleteConsumer).toHaveBeenCalledWith("cons_lazy_linked");
 		});
 
 		it("is a no-op for anonymous users", async () => {
-			const options = createTestStreamPayOptions({ client: mockClient });
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			const user = {
 				...createMockUser({ streampayConsumerId: "cons_linked" }),
 				isAnonymous: true,

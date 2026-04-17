@@ -1,8 +1,8 @@
 import type { FreezeSubscriptionCreateRequest, SubscriptionCancel } from "@streamsdk/typescript";
 import { APIError, createAuthEndpoint, sessionMiddleware } from "better-auth/api";
 import { z } from "zod";
-import type { StreamPayClient } from "../types";
-import { findConsumerByExternalId } from "../utils/consumer";
+import type { StreamPayOptions } from "../types";
+import { type EnsureConsumerContext, ensureConsumerForUser } from "../utils/ensure-consumer";
 import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
 
 export interface SubscriptionsOptions {
@@ -36,23 +36,21 @@ const FreezeBody = z.object({
 });
 
 async function assertOwnsSubscription(
-	client: StreamPayClient,
+	options: StreamPayOptions,
+	ctx: EnsureConsumerContext,
 	user: StreamPaySessionUser | null,
 	subscriptionId: string,
-	maxPages: number,
 ): Promise<void> {
 	if (!user) {
 		throw new APIError("UNAUTHORIZED", { message: "Session user is missing." });
 	}
-	const consumerId =
-		user.streampayConsumerId ??
-		(await findConsumerByExternalId(client, { externalId: user.id, maxPages }));
-	if (!consumerId) {
-		throw new APIError("NOT_FOUND", {
-			message: "No StreamPay consumer is linked to this user.",
-		});
-	}
-	const subscription = await client.getSubscription(subscriptionId);
+	// `ensureConsumerForUser` short-circuits on the already-linked case
+	// (no StreamPay calls), and lazily creates on the unlinked case so
+	// legacy users created before the schema extension still work. A
+	// freshly-created consumer will never own `subscriptionId`, so the
+	// ownership check below fires correctly.
+	const { consumerId } = await ensureConsumerForUser(options, ctx, user);
+	const subscription = await options.client.getSubscription(subscriptionId);
 	if (subscription.organization_consumer_id !== consumerId) {
 		throw new APIError("FORBIDDEN", {
 			message: "Subscription does not belong to this user.",
@@ -61,8 +59,9 @@ async function assertOwnsSubscription(
 }
 
 export const subscriptions =
-	({ consumerLookupMaxPages = 10 }: SubscriptionsOptions = {}) =>
-	(client: StreamPayClient) => {
+	(_subscriptionsOptions: SubscriptionsOptions = {}) =>
+	(options: StreamPayOptions) => {
+		const client = options.client;
 		return {
 			cancelSubscription: createAuthEndpoint(
 				"/consumer/subscriptions/cancel",
@@ -73,12 +72,7 @@ export const subscriptions =
 				},
 				async (ctx) => {
 					const sessionUser = asSessionUser(ctx.context.session?.user);
-					await assertOwnsSubscription(
-						client,
-						sessionUser,
-						ctx.body.subscriptionId,
-						consumerLookupMaxPages,
-					);
+					await assertOwnsSubscription(options, ctx, sessionUser, ctx.body.subscriptionId);
 
 					const payload: SubscriptionCancel = {
 						cancel_related_invoices: ctx.body.cancelRelatedInvoices ?? false,
@@ -107,12 +101,7 @@ export const subscriptions =
 				},
 				async (ctx) => {
 					const sessionUser = asSessionUser(ctx.context.session?.user);
-					await assertOwnsSubscription(
-						client,
-						sessionUser,
-						ctx.body.subscriptionId,
-						consumerLookupMaxPages,
-					);
+					await assertOwnsSubscription(options, ctx, sessionUser, ctx.body.subscriptionId);
 
 					// Build the payload respecting `exactOptionalPropertyTypes`:
 					// fields are only set when the caller provided them, so the

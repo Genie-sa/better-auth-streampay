@@ -26,7 +26,7 @@ vi.mock("better-auth/api", () => ({
 
 import { portal } from "../src/plugins/portal";
 import { unwrapHandler } from "./utils/better-auth-mock";
-import { mockApiError } from "./utils/helpers";
+import { createTestStreamPayOptions, mockApiError } from "./utils/helpers";
 import {
 	createMockConsumer,
 	createMockConsumerList,
@@ -56,7 +56,7 @@ describe("portal plugin", () => {
 	describe("plugin creation", () => {
 		it("registers all four portal endpoints", () => {
 			const plugin = portal();
-			const endpoints = plugin(mockClient);
+			const endpoints = plugin(createTestStreamPayOptions({ client: mockClient }));
 
 			expect(endpoints).toHaveProperty("state");
 			expect(endpoints).toHaveProperty("subscriptions");
@@ -69,7 +69,7 @@ describe("portal plugin", () => {
 		let handler: (ctx: MockCtx) => Promise<unknown>;
 
 		beforeEach(() => {
-			handler = unwrapHandler(portal()(mockClient).state);
+			handler = unwrapHandler(portal()(createTestStreamPayOptions({ client: mockClient })).state);
 		});
 
 		it("returns the linked consumer for the authenticated user", async () => {
@@ -83,7 +83,7 @@ describe("portal plugin", () => {
 			const result = await handler(ctx);
 
 			expect(mockClient.getConsumer).toHaveBeenCalledWith(LINKED_CONSUMER);
-			expect(result).toBe(consumer);
+			expect(result).toEqual({ hasConsumer: true, consumer });
 		});
 
 		it("throws UNAUTHORIZED when there is no session user", async () => {
@@ -91,12 +91,14 @@ describe("portal plugin", () => {
 			await expect(handler(ctx)).rejects.toThrow(/Session user is missing/);
 		});
 
-		it("throws NOT_FOUND when no consumer is linked and the scan is empty", async () => {
+		it("returns { hasConsumer: false, consumer: null } when no consumer is linked and the scan is empty", async () => {
 			mockClient.listConsumers.mockResolvedValue(createMockConsumerList());
 			const ctx = createMockContext({
 				user: createMockUser({ streampayConsumerId: null }),
 			});
-			await expect(handler(ctx)).rejects.toThrow(/No StreamPay consumer/);
+			const result = await handler(ctx);
+			expect(result).toEqual({ hasConsumer: false, consumer: null });
+			expect(mockClient.getConsumer).not.toHaveBeenCalled();
 		});
 
 		it("falls back to a list-scan when streampayConsumerId is not stored", async () => {
@@ -111,10 +113,11 @@ describe("portal plugin", () => {
 				user: createMockUser({ id: "user-legacy", streampayConsumerId: null }),
 			});
 
-			await handler(ctx);
+			const result = await handler(ctx);
 
 			expect(mockClient.listConsumers).toHaveBeenCalled();
 			expect(mockClient.getConsumer).toHaveBeenCalledWith("cons_scanned");
+			expect(result).toMatchObject({ hasConsumer: true });
 		});
 
 		it("translates SDK errors into INTERNAL_SERVER_ERROR", async () => {
@@ -136,10 +139,10 @@ describe("portal plugin", () => {
 		let handler: (ctx: MockCtx) => Promise<SubsResponse>;
 
 		beforeEach(() => {
-			handler = unwrapHandler<SubsResponse>(portal()(mockClient).subscriptions);
+			handler = unwrapHandler<SubsResponse>(portal()(createTestStreamPayOptions({ client: mockClient })).subscriptions);
 		});
 
-		it("returns only subscriptions owned by the authenticated consumer", async () => {
+		it("returns only subscriptions owned by the authenticated consumer and sets hasConsumer", async () => {
 			mockClient.listSubscriptions.mockResolvedValue(
 				createMockSubscriptionList([
 					createMockSubscription({
@@ -158,6 +161,7 @@ describe("portal plugin", () => {
 			});
 
 			const result = await handler(ctx);
+			expect(result).toMatchObject({ hasConsumer: true });
 			expect(result.data).toHaveLength(1);
 			expect(result.data[0]?.id).toBe("sub_mine");
 		});
@@ -165,6 +169,16 @@ describe("portal plugin", () => {
 		it("requires a session", async () => {
 			const ctx = createMockContext({ user: undefined });
 			await expect(handler(ctx)).rejects.toThrow(/Session user is missing/);
+		});
+
+		it("returns { hasConsumer: false, data: [] } when no consumer is linked", async () => {
+			mockClient.listConsumers.mockResolvedValue(createMockConsumerList());
+			const ctx = createMockContext({
+				user: createMockUser({ streampayConsumerId: null }),
+			});
+			const result = await handler(ctx);
+			expect(result).toEqual({ hasConsumer: false, data: [], pagination: null });
+			expect(mockClient.listSubscriptions).not.toHaveBeenCalled();
 		});
 
 		it("propagates pagination params (page, limit -> size) to the SDK", async () => {
@@ -189,7 +203,7 @@ describe("portal plugin", () => {
 		let handler: (ctx: MockCtx) => Promise<InvoicesResponse>;
 
 		beforeEach(() => {
-			handler = unwrapHandler<InvoicesResponse>(portal()(mockClient).invoices);
+			handler = unwrapHandler<InvoicesResponse>(portal()(createTestStreamPayOptions({ client: mockClient })).invoices);
 		});
 
 		it("returns only invoices scoped to the authenticated consumer", async () => {
@@ -226,7 +240,18 @@ describe("portal plugin", () => {
 				user: createMockUser({ streampayConsumerId: LINKED_CONSUMER }),
 			});
 			const result = await handler(ctx);
+			expect(result).toMatchObject({ hasConsumer: true });
 			expect(result.data).toEqual([]);
+		});
+
+		it("returns { hasConsumer: false, data: [] } when no consumer is linked", async () => {
+			mockClient.listConsumers.mockResolvedValue(createMockConsumerList());
+			const ctx = createMockContext({
+				user: createMockUser({ streampayConsumerId: null }),
+			});
+			const result = await handler(ctx);
+			expect(result).toEqual({ hasConsumer: false, data: [], pagination: null });
+			expect(mockClient.listInvoices).not.toHaveBeenCalled();
 		});
 
 		it("translates SDK errors into INTERNAL_SERVER_ERROR", async () => {
@@ -248,7 +273,7 @@ describe("portal plugin", () => {
 		let handler: (ctx: MockCtx) => Promise<PaymentsResponse>;
 
 		beforeEach(() => {
-			handler = unwrapHandler<PaymentsResponse>(portal()(mockClient).payments);
+			handler = unwrapHandler<PaymentsResponse>(portal()(createTestStreamPayOptions({ client: mockClient })).payments);
 		});
 
 		it("returns the payments list for the authenticated user", async () => {
@@ -273,6 +298,16 @@ describe("portal plugin", () => {
 			expect(mockClient.listPayments).toHaveBeenCalledWith({
 				invoice_id: "11111111-1111-1111-1111-111111111111",
 			});
+		});
+
+		it("returns { hasConsumer: false, data: [] } when no consumer is linked", async () => {
+			mockClient.listConsumers.mockResolvedValue(createMockConsumerList());
+			const ctx = createMockContext({
+				user: createMockUser({ streampayConsumerId: null }),
+			});
+			const result = await handler(ctx);
+			expect(result).toEqual({ hasConsumer: false, data: [], pagination: null });
+			expect(mockClient.listPayments).not.toHaveBeenCalled();
 		});
 
 		it("requires a session", async () => {
