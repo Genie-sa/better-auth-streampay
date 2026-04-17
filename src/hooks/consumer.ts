@@ -1,7 +1,11 @@
 import type { ConsumerCreate } from "@streamsdk/typescript";
 import type { User } from "better-auth";
 import { APIError } from "better-auth/api";
-import type { StreamPayOptions } from "../types";
+import type {
+	ClaimExistingConsumerBy,
+	ClaimExistingConsumerIdentifier,
+	StreamPayOptions,
+} from "../types";
 import {
 	type ConsumerIdentifiers,
 	findConsumerByExternalId,
@@ -31,6 +35,24 @@ export interface StreamPayHookContext {
 const isAnonymous = (user: User | Partial<User>): boolean =>
 	"isAnonymous" in user && user.isAnonymous === true;
 
+function sameEmail(a: string | null | undefined, b: string | null | undefined): boolean {
+	if (!a || !b) return false;
+	return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+function samePhone(a: string | null | undefined, b: string | null | undefined): boolean {
+	if (!a || !b) return false;
+	return a.trim() === b.trim();
+}
+
+function canClaimBy(
+	mode: ClaimExistingConsumerBy | undefined,
+	identifier: ClaimExistingConsumerIdentifier,
+): boolean {
+	if (mode === "both") return true;
+	return mode === identifier;
+}
+
 /**
  * Runs before Better Auth writes the user row. Creates the StreamPay
  * consumer FIRST and injects its id into the row by returning
@@ -53,9 +75,13 @@ const isAnonymous = (user: User | Partial<User>): boolean =>
  *      find the existing consumer by any of the identifiers we sent.
  *   3. If the existing consumer is stranded (`external_id` unset),
  *      safe to reuse — return its id, the after-hook will link it.
- *   4. If it's already linked to another user (`external_id` set and
- *      not equal to this user's id), refuse. Silently reusing would
- *      hand user A access to user B's billing history.
+ *   4. If reclaim is enabled for the matching identifier (email, phone,
+ *      or both), reuse its id and overwrite `external_id` in the
+ *      after-hook.
+ *   5. Otherwise, if it's already linked to another user
+ *      (`external_id` set and not equal to this user's id), refuse.
+ *      Silently reusing would hand user A access to user B's billing
+ *      history.
  */
 export const onBeforeUserCreate =
 	(options: StreamPayOptions) =>
@@ -134,6 +160,22 @@ async function resolveDuplicateConsumer(
 	createPayload: ConsumerCreate,
 	context: StreamPayHookContext,
 ): Promise<string | null> {
+	// Prefer exact identifier matches in a stable order so the chosen
+	// reclaim mode doesn't get blocked by an earlier match on a different
+	// identifier.
+	const emailMatch =
+		createPayload.email
+			? await findConsumerByIdentifiers(options.client, {
+					email: createPayload.email,
+				})
+			: null;
+	const phoneMatch =
+		!emailMatch && createPayload.phone_number
+			? await findConsumerByIdentifiers(options.client, {
+					phone_number: createPayload.phone_number,
+				})
+			: null;
+
 	const identifiers: ConsumerIdentifiers = {
 		email: createPayload.email ?? null,
 		phone_number: createPayload.phone_number ?? null,
@@ -141,7 +183,8 @@ async function resolveDuplicateConsumer(
 		iban: createPayload.iban ?? null,
 	};
 
-	const existing = await findConsumerByIdentifiers(options.client, identifiers);
+	const existing =
+		emailMatch ?? phoneMatch ?? (await findConsumerByIdentifiers(options.client, identifiers));
 	if (!existing?.id) {
 		// StreamPay said duplicate but the scan missed — paging gap, race, or
 		// soft-delete weirdness. Fall through so the caller surfaces the
@@ -150,6 +193,19 @@ async function resolveDuplicateConsumer(
 	}
 
 	if (existing.external_id) {
+		if (
+			canClaimBy(options.claimExistingConsumerBy, "email") &&
+			sameEmail(existing.email, createPayload.email)
+		) {
+			return existing.id;
+		}
+		if (
+			canClaimBy(options.claimExistingConsumerBy, "phone") &&
+			samePhone(existing.phone_number, createPayload.phone_number)
+		) {
+			return existing.id;
+		}
+
 		// Linked to another Better Auth user — reusing would mean inheriting
 		// their billing history. Refuse with a generic message (avoid
 		// user-enumeration via "another account exists at this email").

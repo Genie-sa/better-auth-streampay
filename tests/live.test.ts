@@ -1,6 +1,11 @@
 import { createHmac } from "node:crypto";
 import StreamSDK from "@streamsdk/typescript";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+	onAfterUserCreate,
+	onBeforeUserCreate,
+	type StreamPayHookContext,
+} from "../src/hooks/consumer";
 import type { StreamPayClient } from "../src/types";
 import { findConsumerByExternalId } from "../src/utils/consumer";
 import { verifyWebhook } from "../src/webhooks/verify";
@@ -46,6 +51,43 @@ function getConfig(): {
 interface MeResponse {
 	user?: { email?: string };
 	organization?: { id?: string };
+}
+
+function createHookContext(): StreamPayHookContext {
+	return {
+		context: {
+			logger: {
+				error: () => {},
+			},
+		},
+	};
+}
+
+function createLiveUser(input: {
+	id: string;
+	email: string;
+	name?: string;
+	streampayConsumerId?: string | null;
+}): {
+	id: string;
+	email: string;
+	name: string;
+	image: null;
+	emailVerified: boolean;
+	createdAt: Date;
+	updatedAt: Date;
+	streampayConsumerId: string | null;
+} {
+	return {
+		id: input.id,
+		email: input.email,
+		name: input.name ?? "BA Live Test User",
+		image: null,
+		emailVerified: true,
+		createdAt: new Date(),
+		updatedAt: new Date(),
+		streampayConsumerId: input.streampayConsumerId ?? null,
+	};
 }
 
 liveDescribe("live StreamPay — read-only smoke", () => {
@@ -141,10 +183,12 @@ liveDescribe("live StreamPay — write suite", () => {
 	const sdk = StreamSDK.init(config.apiKey, { baseUrl: config.baseUrl });
 	const client: StreamPayClient = sdk;
 
-	const externalId = `ba-live-test-${Date.now()}`;
+	const initialExternalId = `ba-live-test-${Date.now()}`;
+	const testPhoneNumber = `+9665${String(Date.now()).slice(-8)}`;
 	let orgOwnerEmail = "";
 	let createdConsumerId: string | null = null;
 	let createdPaymentLinkId: string | null = null;
+	let currentExternalId = initialExternalId;
 
 	beforeAll(async () => {
 		// Discover the org-owner email via /api/v2/me — the sandbox
@@ -183,19 +227,21 @@ liveDescribe("live StreamPay — write suite", () => {
 		const consumer = await client.createConsumer({
 			name: "BA Live Test Consumer",
 			email: orgOwnerEmail,
-			external_id: externalId,
+			external_id: currentExternalId,
+			phone_number: testPhoneNumber,
 		});
 		expect(consumer.id).toBeDefined();
 		expect(typeof consumer.id).toBe("string");
-		expect(consumer.external_id).toBe(externalId);
+		expect(consumer.external_id).toBe(currentExternalId);
 		expect(consumer.email).toBe(orgOwnerEmail);
+		expect(consumer.phone_number).toBe(testPhoneNumber);
 		createdConsumerId = consumer.id ?? null;
 	});
 
 	it("findConsumerByExternalId finds the freshly-created consumer", async () => {
 		if (!createdConsumerId) throw new Error("prerequisite test failed");
 		const found = await findConsumerByExternalId(client, {
-			externalId,
+			externalId: currentExternalId,
 			maxPages: 10,
 			pageSize: 100,
 		});
@@ -206,7 +252,7 @@ liveDescribe("live StreamPay — write suite", () => {
 		if (!createdConsumerId) throw new Error("prerequisite test failed");
 		const consumer = await client.getConsumer(createdConsumerId);
 		expect(consumer.id).toBe(createdConsumerId);
-		expect(consumer.external_id).toBe(externalId);
+		expect(consumer.external_id).toBe(currentExternalId);
 	});
 
 	it("updateConsumer changes the name and returns it", async () => {
@@ -216,6 +262,167 @@ liveDescribe("live StreamPay — write suite", () => {
 		});
 		expect(updated.id).toBe(createdConsumerId);
 		expect(updated.name).toBe("BA Live Test Consumer (renamed)");
+	});
+
+	it('onBeforeUserCreate refuses a linked duplicate when claimExistingConsumerBy is null', async () => {
+		const hook = onBeforeUserCreate({
+			client,
+			createConsumerOnSignUp: true,
+			claimExistingConsumerBy: null,
+			use: [],
+		});
+
+		await expect(
+			hook(
+				createLiveUser({
+					id: `ba-live-conflict-${Date.now()}`,
+					email: orgOwnerEmail,
+				}),
+				createHookContext(),
+			),
+		).rejects.toThrow(/cannot be created at this time/i);
+	});
+
+	it('onBeforeUserCreate reuses a linked duplicate when claimExistingConsumerBy is "email"', async () => {
+		if (!createdConsumerId) throw new Error("prerequisite test failed");
+		const hook = onBeforeUserCreate({
+			client,
+			createConsumerOnSignUp: true,
+			claimExistingConsumerBy: "email",
+			use: [],
+		});
+
+		const result = await hook(
+			createLiveUser({
+				id: `ba-live-email-claim-${Date.now()}`,
+				email: orgOwnerEmail,
+			}),
+			createHookContext(),
+		);
+
+		expect(result).toEqual({
+			data: { streampayConsumerId: createdConsumerId },
+		});
+	});
+
+	it('onAfterUserCreate rewrites external_id after an "email" reclaim', async () => {
+		if (!createdConsumerId) throw new Error("prerequisite test failed");
+		const nextExternalId = `ba-live-email-claimed-${Date.now()}`;
+		const hook = onAfterUserCreate({
+			client,
+			createConsumerOnSignUp: true,
+			claimExistingConsumerBy: "email",
+			use: [],
+		});
+
+		await hook(
+			createLiveUser({
+				id: nextExternalId,
+				email: orgOwnerEmail,
+				streampayConsumerId: createdConsumerId,
+			}),
+			createHookContext(),
+		);
+
+		const consumer = await client.getConsumer(createdConsumerId);
+		expect(consumer.external_id).toBe(nextExternalId);
+		currentExternalId = nextExternalId;
+	});
+
+	it('onBeforeUserCreate reuses a linked duplicate when claimExistingConsumerBy is "phone"', async () => {
+		if (!createdConsumerId) throw new Error("prerequisite test failed");
+		const hook = onBeforeUserCreate({
+			client,
+			createConsumerOnSignUp: true,
+			claimExistingConsumerBy: "phone",
+			getConsumerCreateParams: () => ({
+				phone_number: testPhoneNumber,
+			}),
+			use: [],
+		});
+
+		const result = await hook(
+			createLiveUser({
+				id: `ba-live-phone-claim-${Date.now()}`,
+				email: orgOwnerEmail,
+			}),
+			createHookContext(),
+		);
+
+		expect(result).toEqual({
+			data: { streampayConsumerId: createdConsumerId },
+		});
+	});
+
+	it('onAfterUserCreate rewrites external_id after a "phone" reclaim', async () => {
+		if (!createdConsumerId) throw new Error("prerequisite test failed");
+		const nextExternalId = `ba-live-phone-claimed-${Date.now()}`;
+		const hook = onAfterUserCreate({
+			client,
+			createConsumerOnSignUp: true,
+			claimExistingConsumerBy: "phone",
+			use: [],
+		});
+
+		await hook(
+			createLiveUser({
+				id: nextExternalId,
+				email: orgOwnerEmail,
+				streampayConsumerId: createdConsumerId,
+			}),
+			createHookContext(),
+		);
+
+		const consumer = await client.getConsumer(createdConsumerId);
+		expect(consumer.external_id).toBe(nextExternalId);
+		expect(consumer.phone_number).toBe(testPhoneNumber);
+		currentExternalId = nextExternalId;
+	});
+
+	it('onBeforeUserCreate reuses a linked duplicate when claimExistingConsumerBy is "both"', async () => {
+		if (!createdConsumerId) throw new Error("prerequisite test failed");
+		const hook = onBeforeUserCreate({
+			client,
+			createConsumerOnSignUp: true,
+			claimExistingConsumerBy: "both",
+			use: [],
+		});
+
+		const result = await hook(
+			createLiveUser({
+				id: `ba-live-both-claim-${Date.now()}`,
+				email: orgOwnerEmail,
+			}),
+			createHookContext(),
+		);
+
+		expect(result).toEqual({
+			data: { streampayConsumerId: createdConsumerId },
+		});
+	});
+
+	it('onAfterUserCreate rewrites external_id after a "both" reclaim', async () => {
+		if (!createdConsumerId) throw new Error("prerequisite test failed");
+		const nextExternalId = `ba-live-both-claimed-${Date.now()}`;
+		const hook = onAfterUserCreate({
+			client,
+			createConsumerOnSignUp: true,
+			claimExistingConsumerBy: "both",
+			use: [],
+		});
+
+		await hook(
+			createLiveUser({
+				id: nextExternalId,
+				email: orgOwnerEmail,
+				streampayConsumerId: createdConsumerId,
+			}),
+			createHookContext(),
+		);
+
+		const consumer = await client.getConsumer(createdConsumerId);
+		expect(consumer.external_id).toBe(nextExternalId);
+		currentExternalId = nextExternalId;
 	});
 
 	it.runIf(!!process.env.STREAMPAY_TEST_PRODUCT_ID)(
@@ -264,7 +471,7 @@ liveDescribe("live StreamPay — write suite", () => {
 		// After deletion, the consumer is flagged `is_deleted` rather than
 		// 404'd by StreamPay, so we verify via list-scan with our helper.
 		const foundAfter = await findConsumerByExternalId(client, {
-			externalId,
+			externalId: currentExternalId,
 			maxPages: 10,
 			pageSize: 100,
 		});

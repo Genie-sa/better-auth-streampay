@@ -13,6 +13,8 @@ export {
 export { type WebhooksOptions, webhooks } from "./plugins/webhooks";
 export { streampay } from "./streampay";
 export type {
+	ClaimExistingConsumerBy,
+	ClaimExistingConsumerIdentifier,
 	ConsumerCreateOverrides,
 	StreamPayEndpoints,
 	StreamPayOptions,

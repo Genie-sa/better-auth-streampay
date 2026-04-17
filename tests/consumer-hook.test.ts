@@ -229,6 +229,214 @@ describe("consumer hooks", () => {
 				);
 			});
 
+			it('reclaims an already-linked SAME-EMAIL consumer when claimExistingConsumerBy is "email"', async () => {
+				const options = createTestStreamPayOptions({
+					client: mockClient,
+					claimExistingConsumerBy: "email",
+				});
+				mockClient.createConsumer.mockRejectedValue(duplicateError);
+				mockClient.listConsumers.mockResolvedValue(
+					createMockConsumerList([
+						createMockConsumer({
+							id: "cons_claimed",
+							email: "test@example.com",
+							external_id: "old-user-id",
+						}),
+					]),
+				);
+
+				const user = createMockUser();
+				const ctx = createMockContext({ user });
+
+				const result = await invokeHook(onBeforeUserCreate(options), user, ctx);
+
+				expect(result).toEqual({
+					data: { streampayConsumerId: "cons_claimed" },
+				});
+			});
+
+			it('still refuses a linked consumer when claimExistingConsumerBy is "email" but the match is only by phone', async () => {
+				const options = createTestStreamPayOptions({
+					client: mockClient,
+					claimExistingConsumerBy: "email",
+					getConsumerCreateParams: async () => ({
+						phone_number: "+966500000000",
+					}),
+				});
+				mockClient.createConsumer.mockRejectedValue(duplicateError);
+				mockClient.listConsumers.mockResolvedValue(
+					createMockConsumerList([
+						createMockConsumer({
+							id: "cons_phone_only",
+							email: "other@example.com",
+							phone_number: "+966500000000",
+							external_id: "old-user-id",
+						}),
+					]),
+				);
+
+				const user = createMockUser();
+				const ctx = createMockContext({ user });
+
+				await expect(invokeHook(onBeforeUserCreate(options), user, ctx)).rejects.toBeInstanceOf(
+					MockAPIError,
+				);
+			});
+
+			it('reclaims an already-linked SAME-PHONE consumer when claimExistingConsumerBy is "phone"', async () => {
+				const options = createTestStreamPayOptions({
+					client: mockClient,
+					claimExistingConsumerBy: "phone",
+					getConsumerCreateParams: async () => ({
+						phone_number: "+966500000000",
+					}),
+				});
+				mockClient.createConsumer.mockRejectedValue(duplicateError);
+				mockClient.listConsumers.mockResolvedValue(
+					createMockConsumerList([
+						createMockConsumer({
+							id: "cons_phone_claimed",
+							email: "other@example.com",
+							phone_number: "+966500000000",
+							external_id: "old-user-id",
+						}),
+					]),
+				);
+
+				const user = createMockUser();
+				const ctx = createMockContext({ user });
+
+				const result = await invokeHook(onBeforeUserCreate(options), user, ctx);
+
+				expect(result).toEqual({
+					data: { streampayConsumerId: "cons_phone_claimed" },
+				});
+			});
+
+			it('still refuses a linked consumer when claimExistingConsumerBy is "phone" but the match is only by email', async () => {
+				const options = createTestStreamPayOptions({
+					client: mockClient,
+					claimExistingConsumerBy: "phone",
+					getConsumerCreateParams: async () => ({
+						phone_number: "+966500000000",
+					}),
+				});
+				mockClient.createConsumer.mockRejectedValue(duplicateError);
+				mockClient.listConsumers.mockResolvedValue(
+					createMockConsumerList([
+						createMockConsumer({
+							id: "cons_email_only",
+							email: "test@example.com",
+							phone_number: null,
+							external_id: "old-user-id",
+						}),
+					]),
+				);
+
+				const user = createMockUser();
+				const ctx = createMockContext({ user });
+
+				await expect(invokeHook(onBeforeUserCreate(options), user, ctx)).rejects.toBeInstanceOf(
+					MockAPIError,
+				);
+			});
+
+			it('reclaims either identifier when claimExistingConsumerBy is "both"', async () => {
+				const options = createTestStreamPayOptions({
+					client: mockClient,
+					claimExistingConsumerBy: "both",
+					getConsumerCreateParams: async () => ({
+						phone_number: "+966500000000",
+					}),
+				});
+				mockClient.createConsumer.mockRejectedValue(duplicateError);
+				mockClient.listConsumers.mockResolvedValue(
+					createMockConsumerList([
+						createMockConsumer({
+							id: "cons_claimed_by_phone",
+							email: "other@example.com",
+							phone_number: "+966500000000",
+							external_id: "old-user-id",
+						}),
+					]),
+				);
+
+				const user = createMockUser();
+				const ctx = createMockContext({ user });
+
+				const result = await invokeHook(onBeforeUserCreate(options), user, ctx);
+
+				expect(result).toEqual({
+					data: { streampayConsumerId: "cons_claimed_by_phone" },
+				});
+			});
+
+			it("does not reclaim linked consumers when claimExistingConsumerBy is null", async () => {
+				const options = createTestStreamPayOptions({
+					client: mockClient,
+					claimExistingConsumerBy: null,
+				});
+				mockClient.createConsumer.mockRejectedValue(duplicateError);
+				mockClient.listConsumers.mockResolvedValue(
+					createMockConsumerList([
+						createMockConsumer({
+							id: "cons_linked_null_mode",
+							email: "test@example.com",
+							external_id: "old-user-id",
+						}),
+					]),
+				);
+
+				const user = createMockUser();
+				const ctx = createMockContext({ user });
+
+				await expect(invokeHook(onBeforeUserCreate(options), user, ctx)).rejects.toBeInstanceOf(
+					MockAPIError,
+				);
+			});
+
+			it('prefers an exact email match before other duplicate identifiers when claimExistingConsumerBy is "both"', async () => {
+				const options = createTestStreamPayOptions({
+					client: mockClient,
+					claimExistingConsumerBy: "both",
+					getConsumerCreateParams: async () => ({
+						phone_number: "+966500000000",
+					}),
+				});
+				mockClient.createConsumer.mockRejectedValue(duplicateError);
+				mockClient.listConsumers
+					.mockResolvedValueOnce(
+						createMockConsumerList([
+							createMockConsumer({
+								id: "cons_email_match",
+								email: "test@example.com",
+								phone_number: null,
+								external_id: "old-user-id",
+							}),
+						]),
+					)
+					.mockResolvedValueOnce(
+						createMockConsumerList([
+							createMockConsumer({
+								id: "cons_phone_match",
+								email: "different@example.com",
+								phone_number: "+966500000000",
+								external_id: "another-user-id",
+							}),
+						]),
+					);
+
+				const user = createMockUser();
+				const ctx = createMockContext({ user });
+
+				const result = await invokeHook(onBeforeUserCreate(options), user, ctx);
+
+				expect(result).toEqual({
+					data: { streampayConsumerId: "cons_email_match" },
+				});
+				expect(mockClient.listConsumers).toHaveBeenCalledTimes(1);
+			});
+
 			it("falls through to the generic error when the scan cannot find the duplicate", async () => {
 				const options = createTestStreamPayOptions({ client: mockClient });
 				mockClient.createConsumer.mockRejectedValue(duplicateError);

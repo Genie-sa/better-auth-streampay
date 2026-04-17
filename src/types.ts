@@ -96,6 +96,12 @@ export interface ConsumerCreateOverrides {
 	communication_methods?: ("WHATSAPP" | "EMAIL" | "SMS")[];
 }
 
+export type ClaimExistingConsumerBy = "email" | "phone" | "both" | null;
+export type ClaimExistingConsumerIdentifier = Extract<
+	ClaimExistingConsumerBy,
+	"email" | "phone"
+>;
+
 export interface StreamPayOptions {
 	/**
 	 * An initialized StreamPay SDK client (from `@streamsdk/typescript`,
@@ -110,6 +116,14 @@ export interface StreamPayOptions {
 	 * onto the Better Auth user row as `streampayConsumerId`.
 	 */
 	createConsumerOnSignUp?: boolean;
+
+	/**
+	 * Reclaim a duplicate consumer when it matches an existing linked
+	 * record by email, phone, or either identifier. `null` / `undefined`
+	 * disables reclaim and only allows reusing stranded consumers whose
+	 * `external_id` is empty.
+	 */
+	claimExistingConsumerBy?: ClaimExistingConsumerBy;
 
 	/**
 	 * Provide StreamPay-specific consumer fields at creation time

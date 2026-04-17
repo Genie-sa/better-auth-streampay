@@ -19,7 +19,7 @@ export interface VerifyWebhookInput {
 	signatureHeader: string | null | undefined;
 	/**
 	 * Maximum allowed age of the signature, in seconds. Defaults to 5
-	 * minutes to mirror Svix/Polar's replay protection window.
+	 * minutes as a conservative replay-protection window.
 	 */
 	toleranceSeconds?: number;
 	/** Hook for tests to freeze the clock. */
