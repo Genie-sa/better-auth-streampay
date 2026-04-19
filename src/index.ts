@@ -36,8 +36,16 @@ export {
 } from "./webhooks/dispatcher";
 export {
 	STREAMPAY_EVENT_TYPES,
+	STREAMPAY_INVOICE_EVENT_TYPES,
+	STREAMPAY_PAYMENT_EVENT_TYPES,
+	STREAMPAY_PAYMENT_LINK_EVENT_TYPES,
+	STREAMPAY_SUBSCRIPTION_EVENT_TYPES,
 	type StreamPayEntityType,
 	type StreamPayEventType,
+	type StreamPayInvoiceEventType,
+	type StreamPayPaymentEventType,
+	type StreamPayPaymentLinkEventType,
+	type StreamPaySubscriptionEventType,
 	type StreamPayWebhookData,
 	type StreamPayWebhookPayload,
 } from "./webhooks/events";
