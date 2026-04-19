@@ -5,10 +5,11 @@ import type {
 	SubscriptionDetailed,
 	SubscriptionListResponse,
 } from "@streamsdk/typescript";
-import { APIError, createAuthEndpoint, sessionMiddleware } from "better-auth/api";
+import { createAuthEndpoint, sessionMiddleware } from "better-auth/api";
 import type { StreamPayClient, StreamPayOptions } from "../types";
 import { findConsumerByExternalId } from "../utils/consumer";
-import { DEFAULT_CONSUMER_LOOKUP_MAX_PAGES } from "../utils/ensure-consumer";
+import { resolveConsumerLookupMaxPages } from "../utils/ensure-consumer";
+import { rejectUnauthorized, toAPIError } from "../utils/errors";
 import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
 
 export interface PortalOptions {
@@ -22,44 +23,22 @@ export interface PortalOptions {
 
 /**
  * Portal reads never eagerly create a consumer — a user with no
- * StreamPay footprint has no billing data to show, so we just return
- * an empty `{ hasConsumer: false, ... }` shape. The legacy list-scan
- * is preserved so users who predate the schema extension still
- * resolve correctly.
- *
- * Anonymous sessions are rejected up front: they cannot own billing
- * data, and running the scan for them would risk leaking an orphan
- * consumer row downstream.
+ * StreamPay footprint has no billing data to show, so we return an
+ * empty `{ hasConsumer: false, ... }` shape. The legacy list-scan
+ * covers users who predate the schema extension. Anonymous sessions
+ * are rejected up front to avoid leaking an orphan consumer row.
  */
 async function getConsumerIdOrNull(
 	client: StreamPayClient,
 	user: StreamPaySessionUser | null,
 	maxPages: number,
 ): Promise<string | null> {
-	if (!user) {
-		throw new APIError("UNAUTHORIZED", { message: "Session user is missing." });
-	}
-	if (user.isAnonymous) {
-		throw new APIError("UNAUTHORIZED", {
-			message: "Anonymous users cannot access the billing portal.",
-		});
-	}
+	rejectUnauthorized(user, "Anonymous users cannot access the billing portal.");
 	if (user.streampayConsumerId) return user.streampayConsumerId;
 	return findConsumerByExternalId(client, {
 		externalId: user.id,
 		maxPages,
 	});
-}
-
-function toAPIError(
-	message: string,
-	err: unknown,
-	logger: { error: (message: string) => void },
-): never {
-	if (err instanceof APIError) throw err;
-	const detail = err instanceof Error ? err.message : String(err);
-	logger.error(`${message} ${detail}`);
-	throw new APIError("INTERNAL_SERVER_ERROR", { message });
 }
 
 /**
@@ -100,10 +79,7 @@ export const portal =
 	({ consumerLookupMaxPages }: PortalOptions = {}) =>
 	(options: StreamPayOptions) => {
 		const client = options.client;
-		const maxPages =
-			consumerLookupMaxPages ??
-			options.consumerLookupMaxPages ??
-			DEFAULT_CONSUMER_LOOKUP_MAX_PAGES;
+		const maxPages = resolveConsumerLookupMaxPages(options, consumerLookupMaxPages);
 		return {
 			state: createAuthEndpoint(
 				"/consumer/state",

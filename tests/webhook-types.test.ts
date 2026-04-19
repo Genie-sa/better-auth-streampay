@@ -143,6 +143,41 @@ describe("webhook type narrowing", () => {
 		});
 	});
 
+	describe("cross-entity handler mismatches are rejected", () => {
+		// These are the negative tests that protect the handler
+		// narrowing contract from regressing. If `WebhookHandler`
+		// ever becomes covariant in `TEvent`/`TEntity`, the positive
+		// tests above still pass but users lose the type safety that
+		// prevents mis-registering a payment handler as an invoice
+		// handler. These assertions fail in that regression.
+
+		it("WebhookHandlers[onPaymentSucceeded] rejects a handler typed for a different event literal", () => {
+			type PaymentSucceededHandler = NonNullable<WebhookHandlers["onPaymentSucceeded"]>;
+			// A handler typed for INVOICE_CREATED must NOT be assignable
+			// to the onPaymentSucceeded slot.
+			type InvoiceCreatedHandler = (
+				payload: StreamPayWebhookPayload<"INVOICE_CREATED", "INVOICE">,
+			) => void;
+			expectTypeOf<InvoiceCreatedHandler>().not.toMatchTypeOf<PaymentSucceededHandler>();
+		});
+
+		it("WebhookHandlers[onInvoiceCreated] rejects a payment-shaped handler", () => {
+			type InvoiceCreatedSlot = NonNullable<WebhookHandlers["onInvoiceCreated"]>;
+			type PaymentHandler = (
+				payload: StreamPayWebhookPayload<"PAYMENT_SUCCEEDED", "PAYMENT">,
+			) => void;
+			expectTypeOf<PaymentHandler>().not.toMatchTypeOf<InvoiceCreatedSlot>();
+		});
+
+		it("WebhookHandlers[onSubscriptionCanceled] rejects a payment-link-shaped handler", () => {
+			type SubCanceledSlot = NonNullable<WebhookHandlers["onSubscriptionCanceled"]>;
+			type PaymentLinkHandler = (
+				payload: StreamPayWebhookPayload<"PAYMENT_LINK_PAY_ATTEMPT_FAILED", "PAYMENT_LINK">,
+			) => void;
+			expectTypeOf<PaymentLinkHandler>().not.toMatchTypeOf<SubCanceledSlot>();
+		});
+	});
+
 	describe("WebhookHandler default parameterization", () => {
 		it("bare WebhookHandler accepts the wide payload (backwards compatible)", () => {
 			expectTypeOf<Parameters<WebhookHandler>[0]>().toEqualTypeOf<StreamPayWebhookPayload>();

@@ -1,24 +1,22 @@
 import type { FreezeSubscriptionCreateRequest, SubscriptionCancel } from "@streamsdk/typescript";
-import { APIError, createAuthEndpoint, sessionMiddleware } from "better-auth/api";
+import { createAuthEndpoint, sessionMiddleware } from "better-auth/api";
+import { APIError } from "better-auth/api";
 import { z } from "zod";
 import type { StreamPayOptions } from "../types";
-import { type EnsureConsumerContext, ensureConsumerForUser } from "../utils/ensure-consumer";
+import type { EnsureConsumerContext } from "../utils/ensure-consumer";
+import { rejectUnauthorized, toAPIError } from "../utils/errors";
 import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
 
 /**
- * Reserved for future options. Today the sub-plugin is fully
- * configured via the top-level `StreamPayOptions` (specifically
- * `consumerLookupMaxPages`, which both portal and the lazy-ensure
- * path read from the same knob).
+ * Reserved for future sub-plugin options. Today the sub-plugin reads
+ * from top-level `StreamPayOptions` only (notably
+ * `consumerLookupMaxPages`).
  */
 export type SubscriptionsOptions = Record<string, never>;
 
 /**
- * Request body for POST /consumer/subscriptions/cancel.
- *
- * Field names mirror StreamPay's `SubscriptionCancel` schema so callers
- * can pass `cancelRelatedInvoices` with the exact same semantics as the
- * upstream `cancel_related_invoices` flag.
+ * Request body for POST /consumer/subscriptions/cancel. Field names
+ * mirror StreamPay's `SubscriptionCancel` schema.
  */
 const CancelBody = z.object({
 	subscriptionId: z.string().uuid(),
@@ -26,11 +24,8 @@ const CancelBody = z.object({
 });
 
 /**
- * Request body for POST /consumer/subscriptions/freeze.
- *
- * Mirrors StreamPay's `FreezeSubscriptionCreateRequest`: a required start
- * datetime, an optional end datetime (`null` = open-ended freeze), and an
- * optional `notes` field.
+ * Request body for POST /consumer/subscriptions/freeze. Mirrors
+ * StreamPay's `FreezeSubscriptionCreateRequest`.
  */
 const FreezeBody = z.object({
 	subscriptionId: z.string().uuid(),
@@ -39,28 +34,34 @@ const FreezeBody = z.object({
 	notes: z.string().optional(),
 });
 
+/**
+ * Assert the caller owns the subscription before allowing a mutation.
+ *
+ * Short-circuits with FORBIDDEN when the user has no
+ * `streampayConsumerId` — without this guard, an authenticated user
+ * who POSTs a random subscription UUID would cause
+ * `ensureConsumerForUser` to lazy-create a StreamPay consumer they
+ * never needed. The ownership check would then correctly reject, but
+ * the plugin just minted an orphan row. Users who need a lazy-create
+ * path already get one via `/checkout`; this endpoint only serves
+ * users who own existing subscriptions, which implies a linked id.
+ */
 async function assertOwnsSubscription(
 	options: StreamPayOptions,
-	ctx: EnsureConsumerContext,
+	_ctx: EnsureConsumerContext,
 	user: StreamPaySessionUser | null,
 	subscriptionId: string,
 ): Promise<void> {
-	if (!user) {
-		throw new APIError("UNAUTHORIZED", { message: "Session user is missing." });
-	}
-	if (user.isAnonymous) {
-		throw new APIError("UNAUTHORIZED", {
-			message: "Anonymous users cannot manage subscriptions.",
+	rejectUnauthorized(user, "Anonymous users cannot manage subscriptions.");
+
+	if (!user.streampayConsumerId) {
+		throw new APIError("FORBIDDEN", {
+			message: "Subscription does not belong to this user.",
 		});
 	}
-	// `ensureConsumerForUser` short-circuits on the already-linked case
-	// (no StreamPay calls), and lazily creates on the unlinked case so
-	// legacy users created before the schema extension still work. A
-	// freshly-created consumer will never own `subscriptionId`, so the
-	// ownership check below fires correctly.
-	const { consumerId } = await ensureConsumerForUser(options, ctx, user);
+
 	const subscription = await options.client.getSubscription(subscriptionId);
-	if (subscription.organization_consumer_id !== consumerId) {
+	if (subscription.organization_consumer_id !== user.streampayConsumerId) {
 		throw new APIError("FORBIDDEN", {
 			message: "Subscription does not belong to this user.",
 		});
@@ -90,13 +91,15 @@ export const subscriptions =
 					try {
 						const result = await client.cancelSubscription(ctx.body.subscriptionId, payload);
 						return ctx.json(result);
-					} catch (err: unknown) {
-						if (err instanceof APIError) throw err;
-						const message = err instanceof Error ? err.message : String(err);
-						ctx.context.logger.error(`StreamPay cancelSubscription failed: ${message}`);
-						throw new APIError("INTERNAL_SERVER_ERROR", {
-							message: "Subscription cancellation failed.",
-						});
+					} catch (err) {
+						toAPIError(
+							{
+								logPrefix: "StreamPay cancelSubscription failed:",
+								userMessage: "Subscription cancellation failed.",
+							},
+							err,
+							ctx.context.logger,
+						);
 					}
 				},
 			),
@@ -112,9 +115,7 @@ export const subscriptions =
 					const sessionUser = asSessionUser(ctx.context.session?.user);
 					await assertOwnsSubscription(options, ctx, sessionUser, ctx.body.subscriptionId);
 
-					// Build the payload respecting `exactOptionalPropertyTypes`:
-					// fields are only set when the caller provided them, so the
-					// SDK never sees explicit `undefined` for an optional field.
+					// exactOptionalPropertyTypes: set fields only when provided.
 					const payload: FreezeSubscriptionCreateRequest = {
 						freeze_start_datetime: ctx.body.freezeStartDatetime,
 					};
@@ -128,13 +129,15 @@ export const subscriptions =
 					try {
 						const result = await client.freezeSubscription(ctx.body.subscriptionId, payload);
 						return ctx.json(result);
-					} catch (err: unknown) {
-						if (err instanceof APIError) throw err;
-						const message = err instanceof Error ? err.message : String(err);
-						ctx.context.logger.error(`StreamPay freezeSubscription failed: ${message}`);
-						throw new APIError("INTERNAL_SERVER_ERROR", {
-							message: "Subscription freeze failed.",
-						});
+					} catch (err) {
+						toAPIError(
+							{
+								logPrefix: "StreamPay freezeSubscription failed:",
+								userMessage: "Subscription freeze failed.",
+							},
+							err,
+							ctx.context.logger,
+						);
 					}
 				},
 			),

@@ -145,6 +145,7 @@ describe("subscriptions plugin", () => {
 			});
 			await expect(handler(ctx)).rejects.toThrow(/Anonymous users cannot/);
 			expect(mockClient.createConsumer).not.toHaveBeenCalled();
+			expect(mockClient.listConsumers).not.toHaveBeenCalled();
 			expect(mockClient.getSubscription).not.toHaveBeenCalled();
 			expect(mockClient.cancelSubscription).not.toHaveBeenCalled();
 		});
@@ -171,25 +172,19 @@ describe("subscriptions plugin", () => {
 			);
 		});
 
-		it("lazy-creates a consumer for orphan users, then FORBIDDEN on ownership mismatch", async () => {
-			// Symmetric to the freezeSubscription test: cancel also goes
-			// through assertOwnsSubscription → ensureConsumerForUser.
-			mockClient.listConsumers.mockResolvedValue(createMockConsumerList());
-			mockClient.createConsumer.mockResolvedValue(
-				createMockConsumer({ id: "cons_lazy_cancel", external_id: "user-orphan" }),
-			);
-			mockClient.getSubscription.mockResolvedValue(
-				createMockSubscription({
-					id: OWNED_SUB,
-					organization_consumer_id: "cons_owner",
-				}),
-			);
+		it("short-circuits with FORBIDDEN for users with no streampayConsumerId — no consumer is minted", async () => {
+			// A user without a linked consumer cannot own any subscription.
+			// The handler must reject WITHOUT calling ensureConsumerForUser
+			// or createConsumer — otherwise an attacker could POST random
+			// subscription UUIDs to lazy-mint orphan consumer rows.
 			const ctx = createMockContext({
-				user: createMockUser({ id: "user-orphan", streampayConsumerId: null }),
+				user: createMockUser({ id: "user-no-link", streampayConsumerId: null }),
 				body: { subscriptionId: OWNED_SUB },
 			});
 			await expect(handler(ctx)).rejects.toThrow(/does not belong to this user/);
-			expect(mockClient.createConsumer).toHaveBeenCalled();
+			expect(mockClient.createConsumer).not.toHaveBeenCalled();
+			expect(mockClient.listConsumers).not.toHaveBeenCalled();
+			expect(mockClient.getSubscription).not.toHaveBeenCalled();
 			expect(mockClient.cancelSubscription).not.toHaveBeenCalled();
 		});
 	});
@@ -300,27 +295,17 @@ describe("subscriptions plugin", () => {
 			});
 			await expect(handler(ctx)).rejects.toThrow(/Anonymous users cannot/);
 			expect(mockClient.createConsumer).not.toHaveBeenCalled();
+			expect(mockClient.listConsumers).not.toHaveBeenCalled();
 			expect(mockClient.freezeSubscription).not.toHaveBeenCalled();
 		});
 
-		it("lazy-creates a consumer for orphan users, then FORBIDDEN on ownership mismatch", async () => {
-			// Lazy mode: a user without a linked consumer gets one created
-			// at action time. The freshly-created consumer can't own any
-			// existing subscription, so the ownership check rejects as
-			// FORBIDDEN (same user-facing outcome as the old NOT_FOUND).
-			mockClient.listConsumers.mockResolvedValue(createMockConsumerList());
-			mockClient.createConsumer.mockResolvedValue(
-				createMockConsumer({ id: "cons_lazy", external_id: "user-orphan" }),
-			);
-			mockClient.getSubscription.mockResolvedValue(
-				createMockSubscription({
-					id: OWNED_SUB,
-					organization_consumer_id: "cons_owner",
-				}),
-			);
+		it("short-circuits with FORBIDDEN for users with no streampayConsumerId — no consumer is minted", async () => {
+			// Symmetric to the cancelSubscription test. A user without a
+			// linked consumer can't own a subscription, so the handler
+			// rejects without calling ensureConsumerForUser/createConsumer.
 			const ctx = createMockContext({
 				user: createMockUser({
-					id: "user-orphan",
+					id: "user-no-link",
 					streampayConsumerId: null,
 				}),
 				body: {
@@ -329,11 +314,10 @@ describe("subscriptions plugin", () => {
 				},
 			});
 			await expect(handler(ctx)).rejects.toThrow(/does not belong to this user/);
-			expect(mockClient.createConsumer).toHaveBeenCalled();
-			expect(ctx.context.internalAdapter.updateUser).toHaveBeenCalledWith(
-				"user-orphan",
-				expect.objectContaining({ streampayConsumerId: "cons_lazy" }),
-			);
+			expect(mockClient.createConsumer).not.toHaveBeenCalled();
+			expect(mockClient.listConsumers).not.toHaveBeenCalled();
+			expect(mockClient.getSubscription).not.toHaveBeenCalled();
+			expect(mockClient.freezeSubscription).not.toHaveBeenCalled();
 		});
 
 		it("propagates SDK failures as INTERNAL_SERVER_ERROR with a log", async () => {

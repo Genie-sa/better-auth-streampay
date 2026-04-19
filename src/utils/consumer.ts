@@ -1,5 +1,6 @@
 import type { ConsumerResponse } from "@streamsdk/typescript";
 import type { StreamPayClient } from "../types";
+import { DEFAULT_CONSUMER_LOOKUP_MAX_PAGES } from "./ensure-consumer";
 
 /**
  * StreamPay's /consumers list endpoint exposes a `search_term` query
@@ -23,7 +24,11 @@ export interface FindConsumerByExternalIdOptions {
 
 export async function findConsumerByExternalId(
 	client: StreamPayClient,
-	{ externalId, maxPages = 10, pageSize = 100 }: FindConsumerByExternalIdOptions,
+	{
+		externalId,
+		maxPages = DEFAULT_CONSUMER_LOOKUP_MAX_PAGES,
+		pageSize = 100,
+	}: FindConsumerByExternalIdOptions,
 ): Promise<string | null> {
 	const hit = await scanConsumers(
 		client,
@@ -61,7 +66,7 @@ export async function findConsumerByIdentifiers(
 	identifiers: ConsumerIdentifiers,
 	opts: { maxPages?: number; pageSize?: number } = {},
 ): Promise<ConsumerResponse | null> {
-	const { maxPages = 10, pageSize = 100 } = opts;
+	const { maxPages = DEFAULT_CONSUMER_LOOKUP_MAX_PAGES, pageSize = 100 } = opts;
 	return scanConsumers(client, { maxPages, pageSize }, (c) => matchesAnyIdentifier(c, identifiers));
 }
 
@@ -85,14 +90,17 @@ async function scanConsumers(
 	{ maxPages, pageSize }: { maxPages: number; pageSize: number },
 	predicate: (c: ConsumerResponse) => boolean,
 ): Promise<ConsumerResponse | null> {
+	// Terminate on `has_next_page !== true` (matching `collectByConsumer`
+	// in portal.ts). Treats `undefined` as "done" — if the SDK ever omits
+	// the pagination envelope we exit after page 1 rather than looping to
+	// the cap.
 	for (let page = 1; page <= maxPages; page++) {
 		const response = await client.listConsumers({ page, size: pageSize });
 		const items = response.data ?? [];
 		const hit = items.find(predicate);
 		if (hit) return hit;
 
-		const total = response.pagination?.total_count ?? 0;
-		if (items.length < pageSize || page * pageSize >= total) return null;
+		if (response.pagination?.has_next_page !== true) return null;
 	}
 	return null;
 }

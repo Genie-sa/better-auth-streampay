@@ -124,12 +124,6 @@ liveDescribe("live StreamPay — read-only smoke", () => {
 		expect(Array.isArray(response.data)).toBe(true);
 	});
 
-	it("lists payments", async () => {
-		const response = await client.listPayments();
-		expect(response).toBeDefined();
-		expect(Array.isArray(response.data)).toBe(true);
-	});
-
 	it("findConsumerByExternalId returns null for a definitely-missing id", async () => {
 		const result = await findConsumerByExternalId(client, {
 			externalId: "ba-streampay-test-99999999-9999-9999-9999-999999999999",

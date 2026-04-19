@@ -6,13 +6,10 @@ import type {
 	CreatePaymentLinkDto,
 	FreezeSubscriptionBase,
 	FreezeSubscriptionCreateRequest,
-	InvoiceDetailed,
 	InvoiceListItem,
 	InvoiceListResponse,
 	PaginationParams,
 	PaymentLinkDetailed,
-	PaymentListResponse,
-	PaymentResponse,
 	SubscriptionCancel,
 	SubscriptionDetailed,
 	SubscriptionListResponse,
@@ -53,9 +50,6 @@ export const createMockStreamPayClient = (): MockedStreamPayClient => ({
 			) => Promise<FreezeSubscriptionBase>
 		>(),
 	listInvoices: vi.fn<(params?: PaginationParams) => Promise<InvoiceListResponse>>(),
-	getInvoice: vi.fn<(invoiceId: string) => Promise<InvoiceDetailed>>(),
-	listPayments: vi.fn<(params?: { invoice_id?: string }) => Promise<PaymentListResponse>>(),
-	getPayment: vi.fn<(paymentId: string) => Promise<PaymentResponse>>(),
 });
 
 /**
@@ -199,13 +193,6 @@ export const createMockInvoice = (overrides: InvoiceListItem = {}): InvoiceListI
 	...overrides,
 });
 
-export const createMockPayment = (overrides: PaymentResponse = {}): PaymentResponse => ({
-	id: "pay_mocked",
-	current_status: "SUCCEEDED",
-	amount: "10.00",
-	...overrides,
-});
-
 // ----------------------------------------------------------------------
 // List-response builders. Every field on `Pagination` is optional, so
 // the object literal is assignable to the real SDK type directly.
@@ -249,14 +236,3 @@ export const createMockInvoiceList = (items: InvoiceListItem[] = []): InvoiceLis
 	},
 });
 
-export const createMockPaymentList = (items: PaymentResponse[] = []): PaymentListResponse => ({
-	data: items,
-	pagination: {
-		total_count: items.length,
-		current_page: 1,
-		limit: 100,
-		max_page: Math.max(1, items.length),
-		has_next_page: false,
-		has_previous_page: false,
-	},
-});

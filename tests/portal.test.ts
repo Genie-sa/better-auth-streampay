@@ -291,6 +291,41 @@ describe("portal plugin", () => {
 			expect(result.data).toEqual([]);
 		});
 
+		it("uses DEFAULT_CONSUMER_LOOKUP_MAX_PAGES when neither portal nor top-level option is set", async () => {
+			// Defensive: prove the default is at least the documented
+			// value (100). If a refactor silently drops the default,
+			// large orgs get silent truncation.
+			const { DEFAULT_CONSUMER_LOOKUP_MAX_PAGES } = await import(
+				"../src/utils/ensure-consumer"
+			);
+			expect(DEFAULT_CONSUMER_LOOKUP_MAX_PAGES).toBeGreaterThanOrEqual(100);
+
+			mockClient.listSubscriptions.mockResolvedValue({
+				data: [],
+				pagination: {
+					total_count: 9999,
+					current_page: 1,
+					limit: 100,
+					max_page: 9999,
+					has_next_page: true,
+					has_previous_page: false,
+				},
+			});
+
+			const defaultHandler = unwrapHandler<SubsResponse>(
+				portal()(createTestStreamPayOptions({ client: mockClient })).subscriptions,
+			);
+			const ctx = createMockContext({
+				user: createMockUser({ streampayConsumerId: LINKED_CONSUMER }),
+			});
+			await defaultHandler(ctx);
+
+			// Cap reached — exact count must equal the default.
+			expect(mockClient.listSubscriptions).toHaveBeenCalledTimes(
+				DEFAULT_CONSUMER_LOOKUP_MAX_PAGES,
+			);
+		});
+
 		it("top-level consumerLookupMaxPages from StreamPayOptions is used when portal option is not set", async () => {
 			mockClient.listSubscriptions.mockResolvedValue({
 				data: [],
@@ -340,6 +375,48 @@ describe("portal plugin", () => {
 			});
 			await handler2(ctx);
 
+			expect(mockClient.listSubscriptions).toHaveBeenCalledTimes(1);
+		});
+
+		it("exits after page 1 when the SDK omits the pagination envelope", async () => {
+			// Defensive: the SDK's list response schema declares pagination
+			// as optional. If an older/future SDK revision returns just
+			// `{ data: [...] }`, the loop must treat the missing envelope
+			// as "no next page" rather than running all the way to the cap.
+			mockClient.listSubscriptions.mockResolvedValue({
+				data: [
+					createMockSubscription({ id: "sub_mine", organization_consumer_id: LINKED_CONSUMER }),
+				],
+			});
+
+			const ctx = createMockContext({
+				user: createMockUser({ streampayConsumerId: LINKED_CONSUMER }),
+			});
+
+			await handler(ctx);
+			expect(mockClient.listSubscriptions).toHaveBeenCalledTimes(1);
+		});
+
+		it("exits after page 1 when pagination.has_next_page is undefined", async () => {
+			mockClient.listSubscriptions.mockResolvedValue({
+				data: [
+					createMockSubscription({ id: "sub_mine", organization_consumer_id: LINKED_CONSUMER }),
+				],
+				pagination: {
+					total_count: 1,
+					current_page: 1,
+					limit: 100,
+					max_page: 1,
+					// has_next_page omitted on purpose
+					has_previous_page: false,
+				},
+			});
+
+			const ctx = createMockContext({
+				user: createMockUser({ streampayConsumerId: LINKED_CONSUMER }),
+			});
+
+			await handler(ctx);
 			expect(mockClient.listSubscriptions).toHaveBeenCalledTimes(1);
 		});
 

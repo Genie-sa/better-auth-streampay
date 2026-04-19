@@ -16,17 +16,33 @@ import type { StreamPaySessionUser } from "./session";
 
 /**
  * Default cap for fallback list-based lookups. Tied to StreamPay's
- * 100-item page ceiling — 50 pages = 5,000 items per scan, a sane
- * upper bound for most orgs. Exposed as a knob via
+ * 100-item page ceiling — 100 pages = 10,000 items per scan, a
+ * generous ceiling that covers large orgs without tuning while still
+ * bounding worst-case latency. Exposed as a knob via
  * `StreamPayOptions.consumerLookupMaxPages`.
  */
-export const DEFAULT_CONSUMER_LOOKUP_MAX_PAGES = 50;
+export const DEFAULT_CONSUMER_LOOKUP_MAX_PAGES = 100;
 
 /**
- * Minimal logger-only context shape shared by both the signup hooks and
- * the lazy `ensureConsumerForUser` path. `StreamPayHookContext` in
- * `src/hooks/consumer.ts` and `EnsureConsumerContext` below both
- * satisfy this structurally.
+ * Resolve the page cap for list-based lookups. Accepts the caller's
+ * option, a per-callsite override, or the default — and clamps the
+ * result to at least 1 integer. A `0`, negative, or non-integer value
+ * from user config would otherwise break pagination silently
+ * (0-iteration loop or `NaN` comparisons).
+ */
+export function resolveConsumerLookupMaxPages(
+	options: Pick<StreamPayOptions, "consumerLookupMaxPages">,
+	override?: number,
+): number {
+	const raw = override ?? options.consumerLookupMaxPages ?? DEFAULT_CONSUMER_LOOKUP_MAX_PAGES;
+	const coerced = Math.floor(Number(raw));
+	return Number.isFinite(coerced) ? Math.max(1, coerced) : DEFAULT_CONSUMER_LOOKUP_MAX_PAGES;
+}
+
+/**
+ * Minimal logger-only context shape shared by the signup hooks and
+ * `ensureConsumerForUser`. Structurally satisfied by
+ * `StreamPayHookContext` and `EnsureConsumerContext` below.
  */
 export interface StreamPayLoggerContext {
 	context: {
@@ -37,14 +53,11 @@ export interface StreamPayLoggerContext {
 }
 
 /**
- * The narrow context shape `ensureConsumerForUser` needs: a logger and
- * Better Auth's `internalAdapter.updateUser` so the newly-linked
- * `streampayConsumerId` can be written back to the user row.
- *
- * Both `GenericEndpointContext` (from Better Auth's endpoint handlers)
- * and the project's `MockCtx` are structurally assignable here — we
- * deliberately do not import Better Auth's type to keep tests type-safe
- * without a cast.
+ * Context shape `ensureConsumerForUser` needs: a logger and Better
+ * Auth's `internalAdapter.updateUser` so the newly-linked
+ * `streampayConsumerId` can be written back to the user row. Both
+ * `GenericEndpointContext` and the project's `MockCtx` satisfy this
+ * structurally.
  */
 export interface EnsureConsumerContext extends StreamPayLoggerContext {
 	context: StreamPayLoggerContext["context"] & {
@@ -73,8 +86,7 @@ export function canClaimBy(
 
 /**
  * Narrow an unknown error to a StreamPay `DUPLICATE_CONSUMER` response.
- * Uses the `in` operator narrowing only — no casts, no `any`. Mirrors
- * `formatStreamPayError`'s shape-reading style.
+ * `in` operator narrowing only — no casts, no `any`.
  */
 export function isDuplicateConsumerError(err: unknown): boolean {
 	if (!(err instanceof Error)) return false;
@@ -89,20 +101,31 @@ export function isDuplicateConsumerError(err: unknown): boolean {
 }
 
 /**
+ * Narrow an unknown error to an HTTP 404 Not Found from the StreamPay
+ * SDK. The SDK decorates its errors with a numeric `status` property
+ * (see `mockApiError` in tests/utils/helpers.ts for the full shape).
+ * Used by hooks that need to self-heal when a remote consumer was
+ * deleted out-of-band.
+ */
+export function isNotFoundError(err: unknown): boolean {
+	if (!(err instanceof Error)) return false;
+	if (!("status" in err)) return false;
+	return typeof err.status === "number" && err.status === 404;
+}
+
+/**
  * After a `DUPLICATE_CONSUMER` error, locate the existing consumer and
  * decide whether it is safe to reuse. Returns the id to reuse, or
  * `null` if the caller should fall through to the generic error path.
- *
- * Shared between the signup `before` hook and the lazy
- * `ensureConsumerForUser` path so behavior stays identical — a change
- * to the claim logic applies everywhere a consumer is provisioned.
+ * Shared between the signup hook and the lazy path so claim rules stay
+ * in lockstep.
  */
 export async function resolveDuplicateConsumer(
 	options: StreamPayOptions,
 	createPayload: ConsumerCreate,
 	context: StreamPayLoggerContext,
 ): Promise<string | null> {
-	const maxPages = options.consumerLookupMaxPages ?? DEFAULT_CONSUMER_LOOKUP_MAX_PAGES;
+	const maxPages = resolveConsumerLookupMaxPages(options);
 	const emailMatch = createPayload.email
 		? await findConsumerByIdentifiers(
 				options.client,
@@ -166,21 +189,10 @@ export async function resolveDuplicateConsumer(
 }
 
 /**
- * Lazy/on-demand consumer provisioning used by checkout and
- * subscription mutations when `createConsumerOnSignUp` is off (or when
- * a legacy user predates the hook).
- *
- * Flow:
- *   1. Short-circuit if `user.streampayConsumerId` is already set.
- *   2. Recover: scan by `external_id === user.id` for a consumer that
- *      was created previously but whose id never made it to the user
- *      row (crash between create and updateUser, for example).
- *   3. Create the consumer with `external_id: user.id`.
- *   4. On `DUPLICATE_CONSUMER` fall through to `resolveDuplicateConsumer`,
- *      which decides reuse-vs-reject with the same rules as sign-up.
- *   5. Persist `streampayConsumerId` on the user row. A failure here is
- *      logged but not fatal — the consumer exists, and the next call
- *      will rediscover it via the external_id recovery scan.
+ * Lazy/on-demand consumer provisioning used by checkout when
+ * `createConsumerOnSignUp` is off (or when a legacy user predates the
+ * hook). Short-circuits on the already-linked case; otherwise tries
+ * recovery-scan → create → duplicate-resolve → persist.
  *
  * Race safety: two concurrent callers race through create; the loser
  * gets `DUPLICATE_CONSUMER`, falls through to lookup, finds the same
@@ -195,7 +207,7 @@ export async function ensureConsumerForUser(
 		return { consumerId: user.streampayConsumerId, created: false };
 	}
 
-	const maxPages = options.consumerLookupMaxPages ?? DEFAULT_CONSUMER_LOOKUP_MAX_PAGES;
+	const maxPages = resolveConsumerLookupMaxPages(options);
 	const recovered = await findConsumerByExternalId(options.client, {
 		externalId: user.id,
 		maxPages,
@@ -240,13 +252,33 @@ export async function ensureConsumerForUser(
 		if (isDuplicateConsumerError(err)) {
 			const reusedId = await resolveDuplicateConsumer(options, payload, ctx);
 			if (reusedId) {
+				// Back-fill external_id on the reused consumer so subsequent
+				// recovery scans in `findConsumerByExternalId` can locate it
+				// without falling through to another `createConsumer` +
+				// `DUPLICATE_CONSUMER` round. Failure here is non-fatal — the
+				// consumer is still usable; we just pay the list-scan cost
+				// on the next cold call.
+				try {
+					await options.client.updateConsumer(reusedId, { external_id: user.id });
+				} catch (backfillErr: unknown) {
+					ctx.context.logger.error(
+						`StreamPay consumer external_id backfill failed for user=${user.id} consumer=${reusedId}: ${formatStreamPayError(backfillErr)}`,
+					);
+				}
 				await persistConsumerId(ctx, user.id, reusedId);
 				return { consumerId: reusedId, created: false };
 			}
 		}
 
+		// Log the detailed upstream failure server-side; surface a generic
+		// message to the client so SDK error strings (which may include
+		// other users' identifiers via DUPLICATE_CONSUMER's
+		// `additional_info`) can never reach a response body.
+		ctx.context.logger.error(
+			`StreamPay consumer creation failed for user=${user.id}: ${formatStreamPayError(err)}`,
+		);
 		throw new APIError("INTERNAL_SERVER_ERROR", {
-			message: `StreamPay consumer creation failed: ${formatStreamPayError(err)}`,
+			message: "StreamPay consumer provisioning failed. Please try again.",
 		});
 	}
 }

@@ -3,6 +3,7 @@ import { APIError, createAuthEndpoint, getSessionFromCtx } from "better-auth/api
 import { z } from "zod";
 import type { StreamPayOptions, StreamPayProduct } from "../types";
 import { type EnsureConsumerContext, ensureConsumerForUser } from "../utils/ensure-consumer";
+import { toAPIError } from "../utils/errors";
 import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
 
 export interface CheckoutOptions {
@@ -241,13 +242,15 @@ export const checkout =
 							id: link.id ?? null,
 							redirect: ctx.body.redirect ?? true,
 						});
-					} catch (err: unknown) {
-						if (err instanceof APIError) throw err;
-						const message = err instanceof Error ? err.message : String(err);
-						ctx.context.logger.error(`StreamPay checkout creation failed: ${message}`);
-						throw new APIError("INTERNAL_SERVER_ERROR", {
-							message: "StreamPay checkout creation failed.",
-						});
+					} catch (err) {
+						toAPIError(
+							{
+								logPrefix: "StreamPay checkout creation failed:",
+								userMessage: "StreamPay checkout creation failed.",
+							},
+							err,
+							ctx.context.logger,
+						);
 					}
 				},
 			),

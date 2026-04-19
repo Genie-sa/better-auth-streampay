@@ -6,12 +6,9 @@ import type {
 	CreatePaymentLinkDto,
 	FreezeSubscriptionBase,
 	FreezeSubscriptionCreateRequest,
-	InvoiceDetailed,
 	InvoiceListResponse,
 	PaginationParams,
 	PaymentLinkDetailed,
-	PaymentListResponse,
-	PaymentResponse,
 	SubscriptionCancel,
 	SubscriptionDetailed,
 	SubscriptionListResponse,
@@ -24,15 +21,15 @@ import type { webhooks } from "./plugins/webhooks";
 
 /**
  * The subset of the StreamPay SDK client this plugin actually touches.
- * We intentionally re-declare it as an interface (rather than importing
- * `StreamClient` from `@streamsdk/typescript`) because the SDK does not
- * currently export the class type. Declaring the contract here also lets
- * advanced users swap in a custom implementation (a mock, an HTTP client
- * they control, a future fork) without us caring where it came from.
+ * Declared as an interface (rather than importing `StreamClient` from
+ * `@streamsdk/typescript`) because the SDK does not currently export
+ * the class type. Declaring the contract here also lets advanced users
+ * swap in a custom implementation (a mock, an HTTP client they
+ * control, a future fork).
  *
- * Every method signature below matches `@streamsdk/typescript@1.0.6`
- * exactly; we deliberately do NOT widen the parameter types, so when the
- * SDK tightens its DTOs our plugin inherits the improvement for free.
+ * Method signatures mirror the SDK exactly — we deliberately do not
+ * widen parameter types, so when the SDK tightens its DTOs our plugin
+ * inherits the improvement for free.
  */
 export interface StreamPayClient {
 	// Consumers
@@ -58,13 +55,10 @@ export interface StreamPayClient {
 		input: FreezeSubscriptionCreateRequest,
 	): Promise<FreezeSubscriptionBase>;
 
-	// Invoices
+	// Invoices — list only; per-invoice GET and payment lookups are
+	// not on the plugin's hot path (removed from the StreamPayClient
+	// contract with the portal payments endpoint in 0.3).
 	listInvoices(params?: PaginationParams): Promise<InvoiceListResponse>;
-	getInvoice(invoiceId: string): Promise<InvoiceDetailed>;
-
-	// Payments
-	listPayments(params?: { invoice_id?: string }): Promise<PaymentListResponse>;
-	getPayment(paymentId: string): Promise<PaymentResponse>;
 }
 
 export interface StreamPayProduct {
