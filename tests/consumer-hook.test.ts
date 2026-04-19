@@ -610,8 +610,15 @@ describe("consumer hooks", () => {
 	});
 
 	describe("onUserUpdate", () => {
-		it("syncs name and email to the linked StreamPay consumer", async () => {
+		it("syncs BOTH name and email when both differ from the remote consumer", async () => {
 			const options = createEagerTestStreamPayOptions({ client: mockClient });
+			mockClient.getConsumer.mockResolvedValue(
+				createMockConsumer({
+					id: "cons_linked",
+					name: "Old Name",
+					email: "old@example.com",
+				}),
+			);
 			mockClient.updateConsumer.mockResolvedValue(createMockConsumer());
 
 			const user = createMockUser({
@@ -622,37 +629,135 @@ describe("consumer hooks", () => {
 			const ctx = createMockContext({ user });
 			await invokeHook(onUserUpdate(options), user, ctx);
 
-			expect(mockClient.updateConsumer).toHaveBeenCalledWith(
-				"cons_linked",
-				expect.objectContaining({
-					name: "Renamed",
-					email: "renamed@example.com",
-				}),
-			);
+			expect(mockClient.getConsumer).toHaveBeenCalledWith("cons_linked");
+			expect(mockClient.updateConsumer).toHaveBeenCalledWith("cons_linked", {
+				name: "Renamed",
+				email: "renamed@example.com",
+			});
 		});
 
-		it("short-circuits when streampayConsumerId is not stored (no list-scan on user-update hot path)", async () => {
+		it("skips updateConsumer entirely when remote matches local (no-op update)", async () => {
+			// The core win of fetch+diff: a user row update that didn't
+			// touch name/email (avatar change, emailVerified flip, etc.)
+			// should not result in any StreamPay write.
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
+			mockClient.getConsumer.mockResolvedValue(
+				createMockConsumer({
+					id: "cons_linked",
+					name: "Same Name",
+					email: "same@example.com",
+				}),
+			);
+
+			const user = createMockUser({
+				name: "Same Name",
+				email: "same@example.com",
+				streampayConsumerId: "cons_linked",
+			});
+			const ctx = createMockContext({ user });
+			await invokeHook(onUserUpdate(options), user, ctx);
+
+			expect(mockClient.getConsumer).toHaveBeenCalledWith("cons_linked");
+			expect(mockClient.updateConsumer).not.toHaveBeenCalled();
+		});
+
+		it("sends ONLY email when only email changed", async () => {
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
+			mockClient.getConsumer.mockResolvedValue(
+				createMockConsumer({
+					id: "cons_linked",
+					name: "Same Name",
+					email: "old@example.com",
+				}),
+			);
+			mockClient.updateConsumer.mockResolvedValue(createMockConsumer());
+
+			const user = createMockUser({
+				name: "Same Name",
+				email: "new@example.com",
+				streampayConsumerId: "cons_linked",
+			});
+			const ctx = createMockContext({ user });
+			await invokeHook(onUserUpdate(options), user, ctx);
+
+			expect(mockClient.updateConsumer).toHaveBeenCalledWith("cons_linked", {
+				email: "new@example.com",
+			});
+		});
+
+		it("sends ONLY name when only name changed", async () => {
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
+			mockClient.getConsumer.mockResolvedValue(
+				createMockConsumer({
+					id: "cons_linked",
+					name: "Old Name",
+					email: "same@example.com",
+				}),
+			);
+			mockClient.updateConsumer.mockResolvedValue(createMockConsumer());
+
+			const user = createMockUser({
+				name: "New Name",
+				email: "same@example.com",
+				streampayConsumerId: "cons_linked",
+			});
+			const ctx = createMockContext({ user });
+			await invokeHook(onUserUpdate(options), user, ctx);
+
+			expect(mockClient.updateConsumer).toHaveBeenCalledWith("cons_linked", {
+				name: "New Name",
+			});
+		});
+
+		it("short-circuits without calling getConsumer when streampayConsumerId is not stored", async () => {
 			// Legacy users without the column (pre-schema-migration) are
-			// skipped cheaply rather than triggering a paginated scan on
-			// every profile update. They get linked on their next
-			// ensureConsumerForUser call (first checkout), after which
-			// sync resumes normally.
+			// skipped cheaply. No getConsumer, no updateConsumer. They get
+			// linked on their next ensureConsumerForUser call (first
+			// checkout), after which sync resumes normally.
 			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			const user = createMockUser({ streampayConsumerId: null });
 			const ctx = createMockContext({ user });
 			await invokeHook(onUserUpdate(options), user, ctx);
 
+			expect(mockClient.getConsumer).not.toHaveBeenCalled();
+			expect(mockClient.updateConsumer).not.toHaveBeenCalled();
 			expect(mockClient.listConsumers).not.toHaveBeenCalled();
+		});
+
+		it("logs but never throws when getConsumer fails", async () => {
+			// Fetch-diff introduces a new failure mode: the pre-update GET
+			// can fail (consumer deleted, StreamPay down). The hook must
+			// still swallow the error — the Better Auth user update has
+			// already committed.
+			const options = createEagerTestStreamPayOptions({ client: mockClient });
+			mockClient.getConsumer.mockRejectedValue(
+				mockApiError(404, { error: { message: "not found" } }),
+			);
+
+			const user = createMockUser({ streampayConsumerId: "cons_linked" });
+			const ctx = createMockContext({ user });
+
+			await expect(invokeHook(onUserUpdate(options), user, ctx)).resolves.toBeUndefined();
+			expect(ctx.context.logger.error).toHaveBeenCalledWith(
+				expect.stringContaining("StreamPay consumer update failed"),
+			);
 			expect(mockClient.updateConsumer).not.toHaveBeenCalled();
 		});
 
-		it("logs but never throws when StreamPay returns an error", async () => {
+		it("logs but never throws when updateConsumer fails", async () => {
 			const options = createEagerTestStreamPayOptions({ client: mockClient });
+			mockClient.getConsumer.mockResolvedValue(
+				createMockConsumer({ id: "cons_linked", name: "Old", email: "old@example.com" }),
+			);
 			mockClient.updateConsumer.mockRejectedValue(
 				mockApiError(500, { error: { message: "internal" } }),
 			);
 
-			const user = createMockUser({ streampayConsumerId: "cons_linked" });
+			const user = createMockUser({
+				name: "New",
+				email: "new@example.com",
+				streampayConsumerId: "cons_linked",
+			});
 			const ctx = createMockContext({ user });
 
 			await expect(invokeHook(onUserUpdate(options), user, ctx)).resolves.toBeUndefined();
@@ -669,6 +774,13 @@ describe("consumer hooks", () => {
 				client: mockClient,
 				createConsumerOnSignUp: false,
 			});
+			mockClient.getConsumer.mockResolvedValue(
+				createMockConsumer({
+					id: "cons_lazy_linked",
+					name: "Stale Name",
+					email: "stale@example.com",
+				}),
+			);
 			mockClient.updateConsumer.mockResolvedValue(createMockConsumer());
 			const user = createMockUser({
 				name: "Lazy User",
@@ -678,13 +790,13 @@ describe("consumer hooks", () => {
 			const ctx = createMockContext({ user });
 			await invokeHook(onUserUpdate(options), user, ctx);
 
-			expect(mockClient.updateConsumer).toHaveBeenCalledWith(
-				"cons_lazy_linked",
-				expect.objectContaining({ name: "Lazy User", email: "lazy@example.com" }),
-			);
+			expect(mockClient.updateConsumer).toHaveBeenCalledWith("cons_lazy_linked", {
+				name: "Lazy User",
+				email: "lazy@example.com",
+			});
 		});
 
-		it("is a no-op for anonymous users", async () => {
+		it("is a no-op for anonymous users (no getConsumer either)", async () => {
 			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			const user = {
 				...createMockUser({ streampayConsumerId: "cons_linked" }),
@@ -693,6 +805,7 @@ describe("consumer hooks", () => {
 			const ctx = createMockContext({ user });
 			await invokeHook(onUserUpdate(options), user, ctx);
 
+			expect(mockClient.getConsumer).not.toHaveBeenCalled();
 			expect(mockClient.updateConsumer).not.toHaveBeenCalled();
 		});
 	});

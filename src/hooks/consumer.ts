@@ -1,4 +1,4 @@
-import type { ConsumerCreate } from "@streamsdk/typescript";
+import type { ConsumerCreate, ConsumerUpdate } from "@streamsdk/typescript";
 import type { User } from "better-auth";
 import { APIError } from "better-auth/api";
 import type { StreamPayOptions } from "../types";
@@ -145,6 +145,17 @@ export const onAfterUserCreate =
  * (pre-first-payment in lazy mode, legacy pre-schema users) short-
  * circuit cheaply — no list-scan on the user-update hot path.
  *
+ * Fetch-diff-update: we `getConsumer` first and only call
+ * `updateConsumer` when the remote row actually differs from the
+ * local user row on `name` or `email`. This mirrors the
+ * `@better-auth/stripe` plugin's pattern — every user-row mutation
+ * ran through this hook even when the caller only touched
+ * `image`/`emailVerified`/etc., so sending a blind PATCH on every
+ * invocation would dump hundreds of no-op `updateConsumer` calls at
+ * StreamPay for no user-visible benefit. A single GET on the happy
+ * path is cheap; the write is only emitted when something really
+ * changed.
+ *
  * Failures log only — the Better Auth user update has already
  * committed by the time we run, so throwing would desync the two
  * systems.
@@ -158,12 +169,20 @@ export const onUserUpdate =
 		const sessionUser = asSessionUser(user);
 		if (!sessionUser?.streampayConsumerId) return;
 
-		const update: Parameters<typeof options.client.updateConsumer>[1] = {};
-		if (sessionUser.name !== undefined) update.name = sessionUser.name;
-		if (sessionUser.email !== undefined) update.email = sessionUser.email;
-
 		try {
-			await options.client.updateConsumer(sessionUser.streampayConsumerId, update);
+			const remote = await options.client.getConsumer(sessionUser.streampayConsumerId);
+
+			const patch: ConsumerUpdate = {};
+			if (sessionUser.name !== undefined && remote.name !== sessionUser.name) {
+				patch.name = sessionUser.name;
+			}
+			if (sessionUser.email !== undefined && remote.email !== sessionUser.email) {
+				patch.email = sessionUser.email;
+			}
+
+			if (Object.keys(patch).length === 0) return;
+
+			await options.client.updateConsumer(sessionUser.streampayConsumerId, patch);
 		} catch (err: unknown) {
 			context.context.logger.error(
 				`StreamPay consumer update failed: ${formatStreamPayError(err)}`,

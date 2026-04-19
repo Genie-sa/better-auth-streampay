@@ -11,6 +11,7 @@ Every option on `streampay()` and each sub-plugin, with types and defaults, copi
 | `createConsumerOnSignUp` | `boolean` | — | `false` | Eager-create consumer at sign-up. Default `false` (lazy — consumer is created at first checkout / subscription mutation). Matches Stripe/Polar/Dodo convention. |
 | `claimExistingConsumerBy` | `("email" \| "phone")[]` | — | `[]` | Reclaim a linked duplicate on `DUPLICATE_CONSUMER`. Omit (or `[]`) = only stranded consumers are reused. Pass `["email", "phone"]` to reclaim by either. See security note in [interview-questions.md](interview-questions.md) Q5 |
 | `getConsumerCreateParams` | `(ctx, request) => Promise<ConsumerCreateOverrides>` | — | — | Inject custom consumer fields at creation time |
+| `consumerLookupMaxPages` | `number` | — | `50` | Max pages (100 items each) scanned by fallback lookups: legacy consumer recovery, duplicate resolution after `DUPLICATE_CONSUMER`, and the portal's client-side subs/invoices filter. Bump for orgs with many legacy consumers or high-volume users. |
 
 ### `ConsumerCreateOverrides` fields
 
@@ -45,16 +46,19 @@ The returned object is merged with the default `{ name, email, external_id }` pa
 
 | Option | Type | Description |
 |---|---|---|
-| `consumerLookupMaxPages` | `number` | Pages to scan when resolving legacy consumers without `external_id`. Default: `10` |
+| `consumerLookupMaxPages` | `number` | Overrides the top-level `StreamPayOptions.consumerLookupMaxPages` for portal reads only. Default: inherits top-level (`50`). |
 
 ### Endpoints (all require session)
 
 - `GET /api/auth/consumer/state` → `authClient.state()` → `{ hasConsumer, consumer }`
-- `GET /api/auth/consumer/subscriptions/list` → `authClient.subscriptions({ query: { page, limit } })` → `{ hasConsumer, data, pagination }`
-- `GET /api/auth/consumer/invoices/list` → `authClient.invoices(...)` → `{ hasConsumer, data, pagination }`
-- `GET /api/auth/consumer/payments/list` → `authClient.payments()` → `{ hasConsumer, data, pagination }`
+- `GET /api/auth/consumer/subscriptions/list` → `authClient.subscriptions()` → `{ hasConsumer, data }`
+- `GET /api/auth/consumer/invoices/list` → `authClient.invoices()` → `{ hasConsumer, data }`
 
-All reads return `200 OK` with `hasConsumer: false` and empty arrays when the user has not yet been provisioned a StreamPay consumer. They never eagerly create a consumer — lazy provisioning only fires at checkout or subscription mutations.
+All reads return `200 OK` with `hasConsumer: false` and empty arrays when the user has not yet been provisioned a StreamPay consumer. They never eagerly create a consumer — lazy provisioning only fires at checkout or subscription mutations. Anonymous sessions are rejected with `UNAUTHORIZED`.
+
+Subscriptions and invoices are paginated client-side: the plugin walks every page returned by the SDK and filters to the authenticated consumer's items, capped by `consumerLookupMaxPages`. The `page`/`limit` query params are not accepted — results are returned in full.
+
+> The legacy `/api/auth/consumer/payments/list` endpoint was removed in v0.3. No peer plugin (Polar, Stripe) exposes a payments list, and StreamPay's `/payments` API has no consumer filter. Use `client.listPayments({ invoice_id })` directly for per-invoice drill-down.
 
 ## `subscriptions()` — sub-plugin
 

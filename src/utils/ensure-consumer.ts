@@ -15,6 +15,14 @@ import { formatStreamPayError } from "./format-error";
 import type { StreamPaySessionUser } from "./session";
 
 /**
+ * Default cap for fallback list-based lookups. Tied to StreamPay's
+ * 100-item page ceiling — 50 pages = 5,000 items per scan, a sane
+ * upper bound for most orgs. Exposed as a knob via
+ * `StreamPayOptions.consumerLookupMaxPages`.
+ */
+export const DEFAULT_CONSUMER_LOOKUP_MAX_PAGES = 50;
+
+/**
  * Minimal logger-only context shape shared by both the signup hooks and
  * the lazy `ensureConsumerForUser` path. `StreamPayHookContext` in
  * `src/hooks/consumer.ts` and `EnsureConsumerContext` below both
@@ -94,16 +102,21 @@ export async function resolveDuplicateConsumer(
 	createPayload: ConsumerCreate,
 	context: StreamPayLoggerContext,
 ): Promise<string | null> {
+	const maxPages = options.consumerLookupMaxPages ?? DEFAULT_CONSUMER_LOOKUP_MAX_PAGES;
 	const emailMatch = createPayload.email
-		? await findConsumerByIdentifiers(options.client, {
-				email: createPayload.email,
-			})
+		? await findConsumerByIdentifiers(
+				options.client,
+				{ email: createPayload.email },
+				{ maxPages },
+			)
 		: null;
 	const phoneMatch =
 		!emailMatch && createPayload.phone_number
-			? await findConsumerByIdentifiers(options.client, {
-					phone_number: createPayload.phone_number,
-				})
+			? await findConsumerByIdentifiers(
+					options.client,
+					{ phone_number: createPayload.phone_number },
+					{ maxPages },
+				)
 			: null;
 
 	const identifiers: ConsumerIdentifiers = {
@@ -114,7 +127,9 @@ export async function resolveDuplicateConsumer(
 	};
 
 	const existing =
-		emailMatch ?? phoneMatch ?? (await findConsumerByIdentifiers(options.client, identifiers));
+		emailMatch ??
+		phoneMatch ??
+		(await findConsumerByIdentifiers(options.client, identifiers, { maxPages }));
 	if (!existing?.id) return null;
 
 	if (existing.external_id) {
@@ -180,7 +195,11 @@ export async function ensureConsumerForUser(
 		return { consumerId: user.streampayConsumerId, created: false };
 	}
 
-	const recovered = await findConsumerByExternalId(options.client, { externalId: user.id });
+	const maxPages = options.consumerLookupMaxPages ?? DEFAULT_CONSUMER_LOOKUP_MAX_PAGES;
+	const recovered = await findConsumerByExternalId(options.client, {
+		externalId: user.id,
+		maxPages,
+	});
 	if (recovered) {
 		await persistConsumerId(ctx, user.id, recovered);
 		return { consumerId: recovered, created: false };

@@ -134,6 +134,21 @@ describe("subscriptions plugin", () => {
 			await expect(handler(ctx)).rejects.toThrow(/Session user is missing/);
 		});
 
+		it("rejects anonymous sessions before any StreamPay call — no orphan consumer leak", async () => {
+			// An anonymous session has a valid Better Auth user with a
+			// generated id; without this guard, ensureConsumerForUser
+			// would happily create a StreamPay consumer for them that
+			// can never be reclaimed. Reject before the lazy path fires.
+			const ctx = createMockContext({
+				user: { ...createMockUser({ streampayConsumerId: null }), isAnonymous: true },
+				body: { subscriptionId: OWNED_SUB },
+			});
+			await expect(handler(ctx)).rejects.toThrow(/Anonymous users cannot/);
+			expect(mockClient.createConsumer).not.toHaveBeenCalled();
+			expect(mockClient.getSubscription).not.toHaveBeenCalled();
+			expect(mockClient.cancelSubscription).not.toHaveBeenCalled();
+		});
+
 		it("propagates SDK failures as INTERNAL_SERVER_ERROR with a log", async () => {
 			mockClient.getSubscription.mockResolvedValue(
 				createMockSubscription({
@@ -273,6 +288,19 @@ describe("subscriptions plugin", () => {
 				},
 			});
 			await expect(handler(ctx)).rejects.toThrow(/Session user is missing/);
+		});
+
+		it("rejects anonymous sessions before any StreamPay call — no orphan consumer leak", async () => {
+			const ctx = createMockContext({
+				user: { ...createMockUser({ streampayConsumerId: null }), isAnonymous: true },
+				body: {
+					subscriptionId: OWNED_SUB,
+					freezeStartDatetime: "2026-05-01T00:00:00.000Z",
+				},
+			});
+			await expect(handler(ctx)).rejects.toThrow(/Anonymous users cannot/);
+			expect(mockClient.createConsumer).not.toHaveBeenCalled();
+			expect(mockClient.freezeSubscription).not.toHaveBeenCalled();
 		});
 
 		it("lazy-creates a consumer for orphan users, then FORBIDDEN on ownership mismatch", async () => {

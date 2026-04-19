@@ -371,7 +371,6 @@ Webhooks are verified using HMAC-SHA256 with replay protection. The signature he
 | `state`               | GET    | `/consumer/state`                 | Required  | `portal()`        |
 | `subscriptions`       | GET    | `/consumer/subscriptions/list`    | Required  | `portal()`        |
 | `invoices`            | GET    | `/consumer/invoices/list`         | Required  | `portal()`        |
-| `payments`            | GET    | `/consumer/payments/list`         | Required  | `portal()`        |
 | `cancelSubscription`  | POST   | `/consumer/subscriptions/cancel`  | Required  | `subscriptions()` |
 | `freezeSubscription`  | POST   | `/consumer/subscriptions/freeze`  | Required  | `subscriptions()` |
 | `streampayWebhooks`   | POST   | `/streampay/webhooks`             | Signature | `webhooks()`      |

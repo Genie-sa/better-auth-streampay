@@ -143,6 +143,17 @@ export interface StreamPayOptions {
 		request?: Request,
 	) => Promise<ConsumerCreateOverrides> | ConsumerCreateOverrides;
 
+	/**
+	 * Maximum pages scanned by fallback list-based lookups — legacy
+	 * consumer recovery (`findConsumerByExternalId`), post-`DUPLICATE_CONSUMER`
+	 * identifier matching, and the portal's client-side filter on
+	 * subscriptions/invoices. With StreamPay's 100-item page cap, the
+	 * default of `50` covers up to 5,000 items per scan. Large orgs
+	 * with more legacy consumers or more per-user invoices should bump
+	 * this; the knob here trades API calls for coverage.
+	 */
+	consumerLookupMaxPages?: number;
+
 	/** Sub-plugins composed into the main `streampay()` plugin. */
 	use: StreamPayPlugins;
 }

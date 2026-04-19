@@ -5,9 +5,13 @@ import type { StreamPayOptions } from "../types";
 import { type EnsureConsumerContext, ensureConsumerForUser } from "../utils/ensure-consumer";
 import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
 
-export interface SubscriptionsOptions {
-	consumerLookupMaxPages?: number;
-}
+/**
+ * Reserved for future options. Today the sub-plugin is fully
+ * configured via the top-level `StreamPayOptions` (specifically
+ * `consumerLookupMaxPages`, which both portal and the lazy-ensure
+ * path read from the same knob).
+ */
+export type SubscriptionsOptions = Record<string, never>;
 
 /**
  * Request body for POST /consumer/subscriptions/cancel.
@@ -43,6 +47,11 @@ async function assertOwnsSubscription(
 ): Promise<void> {
 	if (!user) {
 		throw new APIError("UNAUTHORIZED", { message: "Session user is missing." });
+	}
+	if (user.isAnonymous) {
+		throw new APIError("UNAUTHORIZED", {
+			message: "Anonymous users cannot manage subscriptions.",
+		});
 	}
 	// `ensureConsumerForUser` short-circuits on the already-linked case
 	// (no StreamPay calls), and lazily creates on the unlinked case so

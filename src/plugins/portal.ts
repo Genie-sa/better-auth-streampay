@@ -1,24 +1,24 @@
+import type {
+	InvoiceListItem,
+	InvoiceListResponse,
+	PaginationParams,
+	SubscriptionDetailed,
+	SubscriptionListResponse,
+} from "@streamsdk/typescript";
 import { APIError, createAuthEndpoint, sessionMiddleware } from "better-auth/api";
-import { z } from "zod";
 import type { StreamPayClient, StreamPayOptions } from "../types";
 import { findConsumerByExternalId } from "../utils/consumer";
+import { DEFAULT_CONSUMER_LOOKUP_MAX_PAGES } from "../utils/ensure-consumer";
 import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
 
 export interface PortalOptions {
 	/**
-	 * Maximum pages to scan when falling back to list-based consumer lookup
-	 * for sessions that predate the plugin's schema extension. Keep this
-	 * small — the common path should be the stored `streampayConsumerId`.
+	 * Overrides the top-level `StreamPayOptions.consumerLookupMaxPages`
+	 * for portal reads only. Useful when the portal's list-filtering
+	 * cost profile differs from the rest of the plugin's lookup paths.
 	 */
 	consumerLookupMaxPages?: number;
 }
-
-const PaginationQuery = z
-	.object({
-		page: z.coerce.number().int().positive().optional(),
-		limit: z.coerce.number().int().positive().max(200).optional(),
-	})
-	.optional();
 
 /**
  * Portal reads never eagerly create a consumer — a user with no
@@ -26,6 +26,10 @@ const PaginationQuery = z
  * an empty `{ hasConsumer: false, ... }` shape. The legacy list-scan
  * is preserved so users who predate the schema extension still
  * resolve correctly.
+ *
+ * Anonymous sessions are rejected up front: they cannot own billing
+ * data, and running the scan for them would risk leaking an orphan
+ * consumer row downstream.
  */
 async function getConsumerIdOrNull(
 	client: StreamPayClient,
@@ -34,6 +38,11 @@ async function getConsumerIdOrNull(
 ): Promise<string | null> {
 	if (!user) {
 		throw new APIError("UNAUTHORIZED", { message: "Session user is missing." });
+	}
+	if (user.isAnonymous) {
+		throw new APIError("UNAUTHORIZED", {
+			message: "Anonymous users cannot access the billing portal.",
+		});
 	}
 	if (user.streampayConsumerId) return user.streampayConsumerId;
 	return findConsumerByExternalId(client, {
@@ -53,26 +62,55 @@ function toAPIError(
 	throw new APIError("INTERNAL_SERVER_ERROR", { message });
 }
 
-function buildPagination(
-	query: { page?: number | undefined; limit?: number | undefined } | undefined,
-): { page?: number; size?: number } {
-	const result: { page?: number; size?: number } = {};
-	if (query?.page !== undefined) result.page = query.page;
-	if (query?.limit !== undefined) result.size = query.limit;
-	return result;
+/**
+ * Walk `fetchPage` one page at a time, collecting every item whose
+ * `organization_consumer_id` matches `consumerId`. Stops when the SDK
+ * reports `has_next_page: false` or the page cap is reached — the cap
+ * is the same knob (`consumerLookupMaxPages`) that governs consumer
+ * recovery scans, tied to StreamPay's 100-item page ceiling.
+ *
+ * Why this exists: the StreamPay REST API supports
+ * `?organization_consumer_id=<id>` on `/subscriptions` and `/invoices`,
+ * but `@streamsdk/typescript` narrows those list methods to
+ * `PaginationParams` only. Until the SDK widens, the only contract-
+ * compatible way to return all of a user's items is to paginate and
+ * filter in memory. This fixes the latent truncation-at-100 bug the
+ * single-page filter used to have.
+ */
+async function collectByConsumer<T extends { organization_consumer_id?: string | null }>(
+	fetchPage: (params: PaginationParams) => Promise<{
+		data?: T[];
+		pagination?: { has_next_page?: boolean };
+	}>,
+	consumerId: string,
+	maxPages: number,
+): Promise<T[]> {
+	const out: T[] = [];
+	for (let page = 1; page <= maxPages; page++) {
+		const response = await fetchPage({ page, size: 100 });
+		for (const item of response.data ?? []) {
+			if (item.organization_consumer_id === consumerId) out.push(item);
+		}
+		if (response.pagination?.has_next_page !== true) break;
+	}
+	return out;
 }
 
 export const portal =
-	({ consumerLookupMaxPages = 10 }: PortalOptions = {}) =>
+	({ consumerLookupMaxPages }: PortalOptions = {}) =>
 	(options: StreamPayOptions) => {
 		const client = options.client;
+		const maxPages =
+			consumerLookupMaxPages ??
+			options.consumerLookupMaxPages ??
+			DEFAULT_CONSUMER_LOOKUP_MAX_PAGES;
 		return {
 			state: createAuthEndpoint(
 				"/consumer/state",
 				{ method: "GET", use: [sessionMiddleware] },
 				async (ctx) => {
 					const user = asSessionUser(ctx.context.session?.user);
-					const consumerId = await getConsumerIdOrNull(client, user, consumerLookupMaxPages);
+					const consumerId = await getConsumerIdOrNull(client, user, maxPages);
 					if (!consumerId) return ctx.json({ hasConsumer: false, consumer: null });
 					try {
 						const consumer = await client.getConsumer(consumerId);
@@ -85,26 +123,23 @@ export const portal =
 
 			subscriptions: createAuthEndpoint(
 				"/consumer/subscriptions/list",
-				{
-					method: "GET",
-					query: PaginationQuery,
-					use: [sessionMiddleware],
-				},
+				{ method: "GET", use: [sessionMiddleware] },
 				async (ctx) => {
 					const user = asSessionUser(ctx.context.session?.user);
-					const consumerId = await getConsumerIdOrNull(client, user, consumerLookupMaxPages);
+					const consumerId = await getConsumerIdOrNull(client, user, maxPages);
 					if (!consumerId) {
-						return ctx.json({ hasConsumer: false, data: [], pagination: null });
+						return ctx.json({ hasConsumer: false, data: [] });
 					}
 					try {
-						const result = await client.listSubscriptions(buildPagination(ctx.query));
-						const items = result.data ?? [];
-						const filtered = items.filter((s) => s.organization_consumer_id === consumerId);
-						return ctx.json({
-							hasConsumer: true,
-							data: filtered,
-							pagination: result.pagination,
-						});
+						const items = await collectByConsumer<SubscriptionDetailed>(
+							(params) =>
+								client.listSubscriptions(params) as Promise<
+									Pick<SubscriptionListResponse, "data" | "pagination">
+								>,
+							consumerId,
+							maxPages,
+						);
+						return ctx.json({ hasConsumer: true, data: items });
 					} catch (err) {
 						toAPIError("StreamPay listSubscriptions failed.", err, ctx.context.logger);
 					}
@@ -113,67 +148,28 @@ export const portal =
 
 			invoices: createAuthEndpoint(
 				"/consumer/invoices/list",
-				{
-					method: "GET",
-					query: PaginationQuery,
-					use: [sessionMiddleware],
-				},
+				{ method: "GET", use: [sessionMiddleware] },
 				async (ctx) => {
 					const user = asSessionUser(ctx.context.session?.user);
-					const consumerId = await getConsumerIdOrNull(client, user, consumerLookupMaxPages);
+					const consumerId = await getConsumerIdOrNull(client, user, maxPages);
 					if (!consumerId) {
-						return ctx.json({ hasConsumer: false, data: [], pagination: null });
+						return ctx.json({ hasConsumer: false, data: [] });
 					}
 					try {
-						const result = await client.listInvoices(buildPagination(ctx.query));
-						const items = result.data ?? [];
-						const filtered = items.filter(
-							(invoice) => invoice.organization_consumer_id === consumerId,
+						const items = await collectByConsumer<InvoiceListItem>(
+							(params) =>
+								client.listInvoices(params) as Promise<
+									Pick<InvoiceListResponse, "data" | "pagination">
+								>,
+							consumerId,
+							maxPages,
 						);
-						return ctx.json({
-							hasConsumer: true,
-							data: filtered,
-							pagination: result.pagination,
-						});
+						return ctx.json({ hasConsumer: true, data: items });
 					} catch (err) {
 						toAPIError("StreamPay listInvoices failed.", err, ctx.context.logger);
 					}
 				},
 			),
-
-			payments: createAuthEndpoint(
-				"/consumer/payments/list",
-				{
-					method: "GET",
-					query: z
-						.object({
-							page: z.coerce.number().int().positive().optional(),
-							limit: z.coerce.number().int().positive().max(200).optional(),
-							invoiceId: z.string().uuid().optional(),
-						})
-						.optional(),
-					use: [sessionMiddleware],
-				},
-				async (ctx) => {
-					const user = asSessionUser(ctx.context.session?.user);
-					const consumerId = await getConsumerIdOrNull(client, user, consumerLookupMaxPages);
-					if (!consumerId) {
-						return ctx.json({ hasConsumer: false, data: [], pagination: null });
-					}
-					const invoiceId = ctx.query?.invoiceId;
-					try {
-						const params: { invoice_id?: string } = {};
-						if (invoiceId) params.invoice_id = invoiceId;
-						const result = await client.listPayments(params);
-						return ctx.json({
-							hasConsumer: true,
-							data: result.data,
-							pagination: result.pagination,
-						});
-					} catch (err) {
-						toAPIError("StreamPay listPayments failed.", err, ctx.context.logger);
-					}
-				},
-			),
 		};
 	};
+

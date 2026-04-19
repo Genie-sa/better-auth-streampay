@@ -68,7 +68,10 @@ export const createMockStreamPayClient = (): MockedStreamPayClient => ({
  *     `MockUser` without coercion.
  *   - TypeScript surfaces any real breaking change at compile time.
  */
-export type MockUser = User & { streampayConsumerId: string | null };
+export type MockUser = User & {
+	streampayConsumerId: string | null;
+	isAnonymous?: boolean;
+};
 
 export const createMockUser = (overrides: Partial<MockUser> = {}): MockUser => ({
 	id: "user-123",
