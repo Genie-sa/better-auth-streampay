@@ -33,14 +33,10 @@ export const STREAMPAY_SUBSCRIPTION_EVENT_TYPES = [
 	"SUBSCRIPTION_UNFREEZE_FUTURE",
 	"SUBSCRIPTION_FREEZE_CANCEL",
 ] as const;
-export type StreamPaySubscriptionEventType =
-	(typeof STREAMPAY_SUBSCRIPTION_EVENT_TYPES)[number];
+export type StreamPaySubscriptionEventType = (typeof STREAMPAY_SUBSCRIPTION_EVENT_TYPES)[number];
 
-export const STREAMPAY_PAYMENT_LINK_EVENT_TYPES = [
-	"PAYMENT_LINK_PAY_ATTEMPT_FAILED",
-] as const;
-export type StreamPayPaymentLinkEventType =
-	(typeof STREAMPAY_PAYMENT_LINK_EVENT_TYPES)[number];
+export const STREAMPAY_PAYMENT_LINK_EVENT_TYPES = ["PAYMENT_LINK_PAY_ATTEMPT_FAILED"] as const;
+export type StreamPayPaymentLinkEventType = (typeof STREAMPAY_PAYMENT_LINK_EVENT_TYPES)[number];
 
 export const STREAMPAY_EVENT_TYPES = [
 	...STREAMPAY_PAYMENT_EVENT_TYPES,
@@ -83,14 +79,9 @@ export type StreamPayWebhookPayload<
 	TEvent extends StreamPayEventType = StreamPayEventType,
 	TEntity extends StreamPayEntityType = StreamPayEntityType,
 	TData extends StreamPayWebhookData = StreamPayWebhookData,
-> = Extract<
-	StreamPayWebhookPayloadVariant<TData>,
-	{ event_type: TEvent; entity_type: TEntity }
->;
+> = Extract<StreamPayWebhookPayloadVariant<TData>, { event_type: TEvent; entity_type: TEntity }>;
 
-type StreamPayWebhookPayloadVariant<
-	TData extends StreamPayWebhookData = StreamPayWebhookData,
-> =
+type StreamPayWebhookPayloadVariant<TData extends StreamPayWebhookData = StreamPayWebhookData> =
 	// Payment
 	| (StreamPayWebhookEnvelope<TData> & { event_type: "PAYMENT_SUCCEEDED"; entity_type: "PAYMENT" })
 	| (StreamPayWebhookEnvelope<TData> & { event_type: "PAYMENT_FAILED"; entity_type: "PAYMENT" })
@@ -99,7 +90,7 @@ type StreamPayWebhookPayloadVariant<
 	| (StreamPayWebhookEnvelope<TData> & {
 			event_type: "PAYMENT_MARKED_AS_PAID";
 			entity_type: "PAYMENT";
-		})
+	  })
 	// Invoice
 	| (StreamPayWebhookEnvelope<TData> & { event_type: "INVOICE_CREATED"; entity_type: "INVOICE" })
 	| (StreamPayWebhookEnvelope<TData> & { event_type: "INVOICE_SENT"; entity_type: "INVOICE" })
@@ -108,56 +99,56 @@ type StreamPayWebhookPayloadVariant<
 	| (StreamPayWebhookEnvelope<TData> & {
 			event_type: "INVOICE_COMPLETED";
 			entity_type: "INVOICE";
-		})
+	  })
 	| (StreamPayWebhookEnvelope<TData> & { event_type: "INVOICE_CANCELED"; entity_type: "INVOICE" })
 	| (StreamPayWebhookEnvelope<TData> & { event_type: "INVOICE_UPDATED"; entity_type: "INVOICE" })
 	// Subscription
 	| (StreamPayWebhookEnvelope<TData> & {
 			event_type: "SUBSCRIPTION_CREATED";
 			entity_type: "SUBSCRIPTION";
-		})
+	  })
 	| (StreamPayWebhookEnvelope<TData> & {
 			event_type: "SUBSCRIPTION_ACTIVATED";
 			entity_type: "SUBSCRIPTION";
-		})
+	  })
 	| (StreamPayWebhookEnvelope<TData> & {
 			event_type: "SUBSCRIPTION_INACTIVATED";
 			entity_type: "SUBSCRIPTION";
-		})
+	  })
 	| (StreamPayWebhookEnvelope<TData> & {
 			event_type: "SUBSCRIPTION_CANCELED";
 			entity_type: "SUBSCRIPTION";
-		})
+	  })
 	| (StreamPayWebhookEnvelope<TData> & {
 			event_type: "SUBSCRIPTION_FROZEN";
 			entity_type: "SUBSCRIPTION";
-		})
+	  })
 	| (StreamPayWebhookEnvelope<TData> & {
 			event_type: "SUBSCRIPTION_CYCLE_RENEWAL_FAILED";
 			entity_type: "SUBSCRIPTION";
-		})
+	  })
 	| (StreamPayWebhookEnvelope<TData> & {
 			event_type: "SUBSCRIPTION_CANCEL_AT_PERIOD_END";
 			entity_type: "SUBSCRIPTION";
-		})
+	  })
 	| (StreamPayWebhookEnvelope<TData> & {
 			event_type: "SUBSCRIPTION_FREEZE_NOW";
 			entity_type: "SUBSCRIPTION";
-		})
+	  })
 	| (StreamPayWebhookEnvelope<TData> & {
 			event_type: "SUBSCRIPTION_UNFREEZE_NOW";
 			entity_type: "SUBSCRIPTION";
-		})
+	  })
 	| (StreamPayWebhookEnvelope<TData> & {
 			event_type: "SUBSCRIPTION_UNFREEZE_FUTURE";
 			entity_type: "SUBSCRIPTION";
-		})
+	  })
 	| (StreamPayWebhookEnvelope<TData> & {
 			event_type: "SUBSCRIPTION_FREEZE_CANCEL";
 			entity_type: "SUBSCRIPTION";
-		})
+	  })
 	// Payment Link
 	| (StreamPayWebhookEnvelope<TData> & {
 			event_type: "PAYMENT_LINK_PAY_ATTEMPT_FAILED";
 			entity_type: "PAYMENT_LINK";
-		});
+	  });

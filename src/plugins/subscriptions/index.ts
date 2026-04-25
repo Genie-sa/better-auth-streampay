@@ -4,13 +4,18 @@ import type { StreamPayWebhookPayload } from "../../webhooks/events";
 import { buildSubscriptionEndpoints } from "./endpoints";
 import { createPlanResolver, validatePlansShape } from "./plans";
 import { subscriptionTable, webhookEventTable } from "./schema";
-import {
-	classifyWebhookFailure,
-	syncWebhookPayload,
-	type SyncContext,
-} from "./sync";
+import { classifyWebhookFailure, type SyncContext, syncWebhookPayload } from "./sync";
 import type { StreamPayPlanLike, SubscriptionsOptions } from "./types";
 
+export { checkLimit, hasFeature, type LimitCheckResult, type ResolvedPlans } from "./plans";
+export { type SubscriptionSchema, subscriptionSchema } from "./schema";
+export {
+	classifyWebhookFailure,
+	type PluginAdapter,
+	type SyncContext,
+	syncWebhookPayload,
+	type WebhookSyncFailure,
+} from "./sync";
 export type {
 	AuthorizeReferenceContext,
 	StreamPayPlan,
@@ -19,23 +24,14 @@ export type {
 	SubscriptionCallback,
 	SubscriptionCallbackData,
 	SubscriptionCallbacks,
-	SubscriptionsOptions,
 	SubscriptionStatus,
+	SubscriptionsOptions,
 } from "./types";
 export {
 	PLAN_NAME_METADATA_KEY,
 	REFERENCE_ID_METADATA_KEY,
 	UPGRADE_IDEMPOTENCY_WINDOW_MS,
 } from "./types";
-export { hasFeature, checkLimit, type LimitCheckResult, type ResolvedPlans } from "./plans";
-export { subscriptionSchema, type SubscriptionSchema } from "./schema";
-export {
-	classifyWebhookFailure,
-	syncWebhookPayload,
-	type PluginAdapter,
-	type SyncContext,
-	type WebhookSyncFailure,
-} from "./sync";
 
 /**
  * Shared registry the main `streampay()` plugin hands to each sub-plugin

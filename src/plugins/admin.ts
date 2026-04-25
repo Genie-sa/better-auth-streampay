@@ -113,7 +113,6 @@ function getAdapter(ctx: GenericEndpointContext): PluginAdapter {
 // own validation; don't add plugin-level body validation here.
 const ForwardedBody = z.object({}).passthrough();
 
-
 const PaymentsListQuery = z
 	.object({
 		page: z.coerce.number().int().positive().optional(),
@@ -450,11 +449,7 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 				const { id: subscriptionId, freezeId } = ctx.params;
 				const input = ctx.body as unknown as FreezeSubscriptionUpdateRequest;
 				try {
-					const freeze = await client.updateSubscriptionFreeze(
-						subscriptionId,
-						freezeId,
-						input,
-					);
+					const freeze = await client.updateSubscriptionFreeze(subscriptionId, freezeId, input);
 					await syncSubscriptionFromUpstream(
 						client,
 						getAdapter(ctx),

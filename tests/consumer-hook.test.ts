@@ -367,7 +367,6 @@ describe("consumer hooks", () => {
 			expect(mockClient.createConsumer).not.toHaveBeenCalled();
 			expect(result).toBeUndefined();
 		});
-
 	});
 
 	describe("onAfterUserCreate", () => {
@@ -421,7 +420,6 @@ describe("consumer hooks", () => {
 
 			expect(mockClient.updateConsumer).not.toHaveBeenCalled();
 		});
-
 	});
 
 	describe("onUserUpdate", () => {

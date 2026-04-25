@@ -41,10 +41,7 @@ import {
 	type MockCtx,
 	type MockedStreamPayClient,
 } from "./utils/mocks";
-import {
-	createMockAdapter,
-	createMockSubscriptionRow,
-} from "./utils/subscription-helpers";
+import { createMockAdapter, createMockSubscriptionRow } from "./utils/subscription-helpers";
 
 const PRO_PLAN: StreamPayPlan = {
 	name: "pro",
@@ -187,9 +184,7 @@ describe("subscriptions() endpoints", () => {
 
 		it("does not reuse rows older than the idempotency window", async () => {
 			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
-			const handler = unwrapHandler<{ reused: boolean }>(
-				plugin.endpoints.upgradeSubscription,
-			);
+			const handler = unwrapHandler<{ reused: boolean }>(plugin.endpoints.upgradeSubscription);
 
 			mockClient.createPaymentLink.mockResolvedValue({ id: "pl_fresh", url: "https://x" });
 			mockClient.getPaymentUrl.mockReturnValue("https://x");
@@ -713,7 +708,6 @@ describe("subscriptions() endpoints", () => {
 			expect(result.synced).toBe(false);
 			expect(mockClient.listSubscriptions).not.toHaveBeenCalled();
 		});
-
 	});
 
 	describe("schema contribution", () => {

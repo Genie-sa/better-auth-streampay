@@ -15,7 +15,7 @@ import { ensureConsumerForUser } from "../../utils/ensure-consumer";
 import { toAPIError } from "../../utils/errors";
 import { asSessionUser, type StreamPaySessionUser } from "../../utils/session";
 import { checkLimit, hasFeature, type ResolvedPlans } from "./plans";
-import { syncSubscriptionFromUpstream, type PluginAdapter } from "./sync";
+import { type PluginAdapter, syncSubscriptionFromUpstream } from "./sync";
 import {
 	PLAN_NAME_METADATA_KEY,
 	REFERENCE_ID_METADATA_KEY,
@@ -121,13 +121,7 @@ async function authorizeReference(
 	ctx: GenericEndpointContext,
 	user: StreamPaySessionUser,
 	referenceId: string,
-	action:
-		| "upgrade"
-		| "cancel"
-		| "freeze"
-		| "unfreeze"
-		| "read"
-		| "change-plan",
+	action: "upgrade" | "cancel" | "freeze" | "unfreeze" | "read" | "change-plan",
 	subsOptions: SubscriptionsOptions,
 ): Promise<void> {
 	if (referenceId === user.id) return;
@@ -396,7 +390,12 @@ export function buildSubscriptionEndpoints(
 							Array.isArray(sub.items) &&
 							sub.items.some((item) => {
 								const productId =
-									typeof item === "object" && item && "product" in item && item.product && typeof item.product === "object" && "id" in item.product
+									typeof item === "object" &&
+									item &&
+									"product" in item &&
+									item.product &&
+									typeof item.product === "object" &&
+									"id" in item.product
 										? item.product.id
 										: typeof item === "object" && item && "product_id" in item
 											? item.product_id
@@ -417,9 +416,7 @@ export function buildSubscriptionEndpoints(
 						update: {
 							streampaySubscriptionId: match.id,
 							status: match.status === "ACTIVE" ? "active" : "incomplete",
-							periodStart: match.current_period_start
-								? new Date(match.current_period_start)
-								: null,
+							periodStart: match.current_period_start ? new Date(match.current_period_start) : null,
 							periodEnd: match.current_period_end ? new Date(match.current_period_end) : null,
 							amountHalalat: (() => {
 								if (!match.amount) return row.amountHalalat;
@@ -492,10 +489,7 @@ export function buildSubscriptionEndpoints(
 							...echoSubscriptionPatch(stream),
 							until_cycle_number: stream.current_cycle_number ?? 1,
 						};
-						const result = await client.updateSubscription(
-							row.streampaySubscriptionId,
-							patch,
-						);
+						const result = await client.updateSubscription(row.streampaySubscriptionId, patch);
 						await adapter.update({
 							model: SUBSCRIPTION_MODEL,
 							update: {
@@ -575,10 +569,7 @@ export function buildSubscriptionEndpoints(
 					],
 				});
 				const row = existing.find(
-					(r) =>
-						r.status === "active" ||
-						r.status === "frozen" ||
-						r.status === "past_due",
+					(r) => r.status === "active" || r.status === "frozen" || r.status === "past_due",
 				);
 				if (!row) {
 					throw new APIError("NOT_FOUND", {
@@ -617,10 +608,7 @@ export function buildSubscriptionEndpoints(
 							items: [{ product_id: nextPlan.productId, quantity: 1 }],
 							coupons: existingCoupons,
 						};
-						const result = await client.updateSubscription(
-							row.streampaySubscriptionId,
-							patch,
-						);
+						const result = await client.updateSubscription(row.streampaySubscriptionId, patch);
 						// Local-only fields first (plan/group are our
 						// semantics, not upstream's), then sync upstream-
 						// derived fields (amount/interval/period/...).
@@ -859,15 +847,11 @@ export function buildSubscriptionEndpoints(
 					// `freeze_end_datetime` set to the current time — the
 					// server then auto-transitions the subscription back to
 					// ACTIVE and fires SUBSCRIPTION_ACTIVATED.
-					await client.updateSubscriptionFreeze(
-						row.streampaySubscriptionId,
-						active.id,
-						{
-							freeze_start_datetime: active.freeze_start_datetime,
-							freeze_end_datetime: new Date(nowMs).toISOString(),
-							notes: active.notes ?? null,
-						},
-					);
+					await client.updateSubscriptionFreeze(row.streampaySubscriptionId, active.id, {
+						freeze_start_datetime: active.freeze_start_datetime,
+						freeze_end_datetime: new Date(nowMs).toISOString(),
+						notes: active.notes ?? null,
+					});
 					await syncSubscriptionFromUpstream(
 						client,
 						adapter,
@@ -960,9 +944,7 @@ export function buildSubscriptionEndpoints(
 				if (ctx.query.group) where.push({ field: "group", value: ctx.query.group });
 				const rows = await adapter.findMany<Subscription>({ model: SUBSCRIPTION_MODEL, where });
 				const plans = await plansRef();
-				const live = rows.find(
-					(row) => row.status === "active" || row.status === "frozen",
-				);
+				const live = rows.find((row) => row.status === "active" || row.status === "frozen");
 				if (!live) return ctx.json({ hasFeature: false });
 				const plan = plans.byName.get(live.plan);
 				return ctx.json({ hasFeature: hasFeature(live, plan, ctx.query.feature) });
@@ -985,9 +967,7 @@ export function buildSubscriptionEndpoints(
 				if (ctx.query.group) where.push({ field: "group", value: ctx.query.group });
 				const rows = await adapter.findMany<Subscription>({ model: SUBSCRIPTION_MODEL, where });
 				const plans = await plansRef();
-				const live = rows.find(
-					(row) => row.status === "active" || row.status === "frozen",
-				);
+				const live = rows.find((row) => row.status === "active" || row.status === "frozen");
 				if (!live) return ctx.json({ allowed: false, limit: 0, remaining: 0 });
 				const plan = plans.byName.get(live.plan);
 				return ctx.json(checkLimit(live, plan, ctx.query.feature, ctx.query.count));
@@ -995,4 +975,3 @@ export function buildSubscriptionEndpoints(
 		),
 	};
 }
-

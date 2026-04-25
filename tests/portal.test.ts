@@ -55,7 +55,9 @@ describe("portal plugin", () => {
 		let handler: (ctx: MockCtx) => Promise<unknown>;
 
 		beforeEach(() => {
-			handler = unwrapHandler(portal()(createTestStreamPayOptions({ client: mockClient })).endpoints.state);
+			handler = unwrapHandler(
+				portal()(createTestStreamPayOptions({ client: mockClient })).endpoints.state,
+			);
 		});
 
 		it("returns the linked consumer for the authenticated user", async () => {
@@ -182,7 +184,8 @@ describe("portal plugin", () => {
 			mockClient.listSubscriptions.mockResolvedValue(createMockSubscriptionList([]));
 
 			const handler2 = unwrapHandler<SubsResponse>(
-				portal({ pageSize: 250 })(createTestStreamPayOptions({ client: mockClient })).endpoints.subscriptions,
+				portal({ pageSize: 250 })(createTestStreamPayOptions({ client: mockClient })).endpoints
+					.subscriptions,
 			);
 			const ctx = createMockContext({
 				user: createMockUser({ streampayConsumerId: LINKED_CONSUMER }),

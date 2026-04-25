@@ -49,9 +49,9 @@ export function createMockAdapter(): PluginAdapter & {
 			if (value === undefined || value === null) continue;
 			const clash = tables[model].find((row) => row[field] === value);
 			if (clash) {
-				const err = new Error(
-					`UNIQUE constraint failed: ${model}.${field}`,
-				) as Error & { code?: string };
+				const err = new Error(`UNIQUE constraint failed: ${model}.${field}`) as Error & {
+					code?: string;
+				};
 				err.code = "SQLITE_CONSTRAINT_UNIQUE";
 				throw err;
 			}
@@ -67,7 +67,8 @@ export function createMockAdapter(): PluginAdapter & {
 			model: string;
 			data: D;
 		}): Promise<T> {
-			const table = tables[args.model] ?? (tables[args.model] = []);
+			const table = tables[args.model] ?? [];
+			tables[args.model] = table;
 			const data = args.data as Record<string, unknown>;
 			assertUnique(args.model, data);
 			const row = {
@@ -154,9 +155,7 @@ export function createMockSyncContext<
  * Build a local `subscription` row with sensible defaults. Every
  * field is overridable via the partial arg.
  */
-export function createMockSubscriptionRow(
-	overrides: Partial<Subscription> = {},
-): Subscription {
+export function createMockSubscriptionRow(overrides: Partial<Subscription> = {}): Subscription {
 	const now = new Date();
 	return {
 		id: overrides.id ?? `sub_row_${++nextId}`,

@@ -15,8 +15,7 @@ const PlanSchema = z.object({
 			message: "must have a non-negative numeric `priceHalalat`.",
 		}),
 	billingInterval: z.enum(["WEEK", "MONTH", "QUARTER", "YEAR"], {
-		error: () =>
-			"has invalid `billingInterval`. Expected one of: WEEK, MONTH, QUARTER, YEAR.",
+		error: () => "has invalid `billingInterval`. Expected one of: WEEK, MONTH, QUARTER, YEAR.",
 	}),
 	billingIntervalCount: z
 		.number()

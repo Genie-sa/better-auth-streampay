@@ -63,7 +63,8 @@
     "test:coverage": "vitest run --coverage --exclude tests/live/**/*.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "biome check ./src ./tests",
-    "format": "biome format --write ./src ./tests"
+    "format": "biome format --write ./src ./tests",
+    "prepare": "lefthook install"
   },
   "peerDependencies": {
     "@streamsdk/typescript": "^1.0.6",
@@ -75,6 +76,7 @@
     "@streamsdk/typescript": "^1.0.6",
     "@types/node": "^25.6.0",
     "better-auth": "^1.6.5",
+    "lefthook": "^2.1.6",
     "msw": "^2.13.3",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",

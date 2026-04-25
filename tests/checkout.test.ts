@@ -66,7 +66,9 @@ describe("checkout plugin", () => {
 					{ productId: SECOND_PRODUCT_ID, slug: "enterprise" },
 				],
 			});
-			handler = unwrapHandler<CheckoutResult>(plugin(createTestStreamPayOptions({ client: mockClient })).endpoints.checkout);
+			handler = unwrapHandler<CheckoutResult>(
+				plugin(createTestStreamPayOptions({ client: mockClient })).endpoints.checkout,
+			);
 			mockedGetSessionFromCtx.mockResolvedValue(null);
 			mockClient.createPaymentLink.mockResolvedValue(createMockPaymentLink());
 		});
@@ -213,7 +215,9 @@ describe("checkout plugin", () => {
 
 		beforeEach(() => {
 			const plugin = checkout({ authenticatedUsersOnly: true });
-			handler = unwrapHandler<CheckoutResult>(plugin(createTestStreamPayOptions({ client: mockClient })).endpoints.checkout);
+			handler = unwrapHandler<CheckoutResult>(
+				plugin(createTestStreamPayOptions({ client: mockClient })).endpoints.checkout,
+			);
 			mockClient.createPaymentLink.mockResolvedValue(createMockPaymentLink());
 		});
 

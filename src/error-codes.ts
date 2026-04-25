@@ -50,12 +50,9 @@ export const $ERROR_CODES = defineErrorCodes({
 	COUPON_LOCKED: "The coupon is referenced by a finalized invoice and cannot be modified.",
 	SUBSCRIPTION_NOT_FOUND: "The subscription does not exist.",
 	SUBSCRIPTION_PLAN_NOT_FOUND: "The requested subscription plan is not configured.",
-	SUBSCRIPTION_ALREADY_ACTIVE:
-		"An active subscription already exists for this plan group.",
-	SUBSCRIPTION_INVALID_STATE:
-		"The subscription is in a state that forbids this action.",
-	SUBSCRIPTION_FREEZE_NOT_ACTIVE:
-		"No active freeze period was found for this subscription.",
+	SUBSCRIPTION_ALREADY_ACTIVE: "An active subscription already exists for this plan group.",
+	SUBSCRIPTION_INVALID_STATE: "The subscription is in a state that forbids this action.",
+	SUBSCRIPTION_FREEZE_NOT_ACTIVE: "No active freeze period was found for this subscription.",
 	SUBSCRIPTION_REFERENCE_NOT_AUTHORIZED:
 		"You are not authorized to act on this subscription reference.",
 	UNKNOWN: "An unexpected error occurred.",

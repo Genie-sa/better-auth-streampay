@@ -1,18 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { classifyWebhookFailure } from "../src/plugins/subscriptions/sync";
-import { syncWebhookPayload } from "../src/plugins/subscriptions/sync";
+import { classifyWebhookFailure, syncWebhookPayload } from "../src/plugins/subscriptions/sync";
 import {
 	PLAN_NAME_METADATA_KEY,
 	REFERENCE_ID_METADATA_KEY,
 	type SubscriptionCallbacks,
 } from "../src/plugins/subscriptions/types";
 import { mockApiError } from "./utils/helpers";
+import { createMockStreamPayClient, type MockedStreamPayClient } from "./utils/mocks";
 import {
 	createMockSubscriptionRow,
 	createMockSyncContext,
 	createMockWebhookPayload,
 } from "./utils/subscription-helpers";
-import { createMockStreamPayClient, type MockedStreamPayClient } from "./utils/mocks";
 
 const PLAN = {
 	name: "pro",
@@ -203,43 +202,45 @@ describe("syncWebhookPayload", () => {
 				expected: "active",
 				callback: "onSubscriptionResumed" as const,
 			},
-		])(
-			"$event updates row status to $expected and fires $callback",
-			async ({ event, status, expected, callback }) => {
-				const ctx = createMockSyncContext();
-				await ctx.adapter.create({
-					model: "subscription",
-					data: createMockSubscriptionRow({
-						id: "row_2",
-						streampaySubscriptionId: "sub_e",
-						status: "active",
-					}),
-				});
+		])("$event updates row status to $expected and fires $callback", async ({
+			event,
+			status,
+			expected,
+			callback,
+		}) => {
+			const ctx = createMockSyncContext();
+			await ctx.adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_2",
+					streampaySubscriptionId: "sub_e",
+					status: "active",
+				}),
+			});
 
-				const subResponse: Parameters<typeof client.getSubscription.mockResolvedValue>[0] = {
-					id: "sub_e",
-					status,
-					amount: "99.00",
-					organization_consumer_id: "cons_1",
+			const subResponse: Parameters<typeof client.getSubscription.mockResolvedValue>[0] = {
+				id: "sub_e",
+				status,
+				amount: "99.00",
+				organization_consumer_id: "cons_1",
+			};
+			if (status === "FROZEN") {
+				subResponse.latest_freeze = {
+					freeze_start_datetime: "2026-02-01T00:00:00Z",
+					freeze_end_datetime: "2026-03-01T00:00:00Z",
 				};
-				if (status === "FROZEN") {
-					subResponse.latest_freeze = {
-						freeze_start_datetime: "2026-02-01T00:00:00Z",
-						freeze_end_datetime: "2026-03-01T00:00:00Z",
-					};
-				}
-				client.getSubscription.mockResolvedValue(subResponse);
+			}
+			client.getSubscription.mockResolvedValue(subResponse);
 
-				const fn = vi.fn();
-				const opts = { [callback]: fn } as unknown as SubscriptionCallbacks;
-				const payload = createMockWebhookPayload({ event_type: event, entity_id: "sub_e" });
+			const fn = vi.fn();
+			const opts = { [callback]: fn } as unknown as SubscriptionCallbacks;
+			const payload = createMockWebhookPayload({ event_type: event, entity_id: "sub_e" });
 
-				await syncWebhookPayload(ctx, payload, client, resolvedPlans(), opts);
-				const row = (ctx.adapter.tables.subscription ?? [])[0];
-				expect(row?.status).toBe(expected);
-				expect(fn).toHaveBeenCalledTimes(1);
-			},
-		);
+			await syncWebhookPayload(ctx, payload, client, resolvedPlans(), opts);
+			const row = (ctx.adapter.tables.subscription ?? [])[0];
+			expect(row?.status).toBe(expected);
+			expect(fn).toHaveBeenCalledTimes(1);
+		});
 	});
 
 	describe("SUBSCRIPTION_CYCLE_RENEWAL_FAILED", () => {

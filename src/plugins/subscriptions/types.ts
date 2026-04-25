@@ -113,13 +113,7 @@ export interface SubscriptionCallbacks {
 export interface AuthorizeReferenceContext {
 	user: StreamPaySessionUser;
 	referenceId: string;
-	action:
-		| "upgrade"
-		| "cancel"
-		| "freeze"
-		| "unfreeze"
-		| "read"
-		| "change-plan";
+	action: "upgrade" | "cancel" | "freeze" | "unfreeze" | "read" | "change-plan";
 }
 
 export interface SubscriptionsOptions extends SubscriptionCallbacks {

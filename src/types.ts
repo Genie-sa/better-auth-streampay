@@ -171,9 +171,7 @@ export type StreamPayPlugin =
 
 export type StreamPayPlugins = readonly StreamPayPlugin[];
 
-export type StreamPayEndpoints = UnionToIntersection<
-	ReturnType<StreamPayPlugin>["endpoints"]
->;
+export type StreamPayEndpoints = UnionToIntersection<ReturnType<StreamPayPlugin>["endpoints"]>;
 
 export interface ConsumerCreateOverrides {
 	phone_number?: string;

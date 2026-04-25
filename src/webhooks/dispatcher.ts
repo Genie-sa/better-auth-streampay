@@ -56,10 +56,7 @@ export interface WebhookHandlers {
 	onSubscriptionFreezeCancel?: WebhookHandler<"SUBSCRIPTION_FREEZE_CANCEL", "SUBSCRIPTION">;
 
 	// Payment Link
-	onPaymentLinkPayAttemptFailed?: WebhookHandler<
-		"PAYMENT_LINK_PAY_ATTEMPT_FAILED",
-		"PAYMENT_LINK"
-	>;
+	onPaymentLinkPayAttemptFailed?: WebhookHandler<"PAYMENT_LINK_PAY_ATTEMPT_FAILED", "PAYMENT_LINK">;
 }
 
 export async function dispatchWebhook(

@@ -35,7 +35,9 @@ describe("webhook type narrowing", () => {
 				StreamPaySubscriptionEventType,
 				"SUBSCRIPTION"
 			>;
-			expectTypeOf<AnySubscriptionEvent["event_type"]>().toEqualTypeOf<StreamPaySubscriptionEventType>();
+			expectTypeOf<
+				AnySubscriptionEvent["event_type"]
+			>().toEqualTypeOf<StreamPaySubscriptionEventType>();
 			expectTypeOf<AnySubscriptionEvent["entity_type"]>().toEqualTypeOf<"SUBSCRIPTION">();
 		});
 	});
@@ -157,9 +159,7 @@ describe("webhook type narrowing", () => {
 			// This asserts the documented DX pattern from the README
 			// actually compiles — a single handler function for every
 			// subscription event, fully typed.
-			const handler: WebhookHandler<StreamPaySubscriptionEventType, "SUBSCRIPTION"> = (
-				payload,
-			) => {
+			const handler: WebhookHandler<StreamPaySubscriptionEventType, "SUBSCRIPTION"> = (payload) => {
 				expectTypeOf(payload.event_type).toEqualTypeOf<StreamPaySubscriptionEventType>();
 				expectTypeOf(payload.entity_type).toEqualTypeOf<"SUBSCRIPTION">();
 			};

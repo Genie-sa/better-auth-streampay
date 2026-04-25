@@ -90,8 +90,7 @@ export const createMockStreamPayClient = (): MockedStreamPayClient => ({
 				input: FreezeSubscriptionUpdateRequest,
 			) => Promise<FreezeSubscriptionBase>
 		>(),
-	deleteSubscriptionFreeze:
-		vi.fn<(subscriptionId: string, freezeId: string) => Promise<void>>(),
+	deleteSubscriptionFreeze: vi.fn<(subscriptionId: string, freezeId: string) => Promise<void>>(),
 	listInvoices: vi.fn<(params?: PaginationParams) => Promise<InvoiceListResponse>>(),
 	getInvoice: vi.fn<(invoiceId: string) => Promise<InvoiceDetailed>>(),
 	listPayments:

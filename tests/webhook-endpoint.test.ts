@@ -81,7 +81,9 @@ describe("webhooks plugin", () => {
 				onPaymentSucceeded,
 				onInvoiceCompleted,
 			});
-			handler = unwrapHandler<WebhookResponse>(plugin(createTestStreamPayOptions({ client: mockClient })).endpoints.streampayWebhooks);
+			handler = unwrapHandler<WebhookResponse>(
+				plugin(createTestStreamPayOptions({ client: mockClient })).endpoints.streampayWebhooks,
+			);
 		});
 
 		it("accepts a valid signature and dispatches to the specific handler", async () => {
@@ -209,7 +211,9 @@ describe("webhooks plugin", () => {
 
 		it("refuses to run when the secret is an empty string", async () => {
 			const plugin = webhooks({ secret: "" });
-			const noSecretHandler = unwrapHandler<WebhookResponse>(plugin(createTestStreamPayOptions({ client: mockClient })).endpoints.streampayWebhooks);
+			const noSecretHandler = unwrapHandler<WebhookResponse>(
+				plugin(createTestStreamPayOptions({ client: mockClient })).endpoints.streampayWebhooks,
+			);
 			const body = JSON.stringify({ event_type: "PAYMENT_SUCCEEDED" });
 
 			const ctx = createMockContext({

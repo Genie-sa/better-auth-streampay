@@ -38,9 +38,9 @@ describe("validatePlansShape", () => {
 	});
 
 	it("rejects non-numeric priceHalalat", () => {
-		expect(() =>
-			validatePlansShape([{ ...baseline, priceHalalat: NaN }]),
-		).toThrow(/non-negative numeric `priceHalalat`/);
+		expect(() => validatePlansShape([{ ...baseline, priceHalalat: NaN }])).toThrow(
+			/non-negative numeric `priceHalalat`/,
+		);
 	});
 
 	it("rejects SEMESTER interval (valid for products, invalid for subscriptions)", () => {
@@ -58,18 +58,18 @@ describe("validatePlansShape", () => {
 	});
 
 	it("rejects zero or negative billingIntervalCount", () => {
-		expect(() =>
-			validatePlansShape([{ ...baseline, billingIntervalCount: 0 }]),
-		).toThrow(/invalid `billingIntervalCount`/);
-		expect(() =>
-			validatePlansShape([{ ...baseline, billingIntervalCount: -1 }]),
-		).toThrow(/invalid `billingIntervalCount`/);
+		expect(() => validatePlansShape([{ ...baseline, billingIntervalCount: 0 }])).toThrow(
+			/invalid `billingIntervalCount`/,
+		);
+		expect(() => validatePlansShape([{ ...baseline, billingIntervalCount: -1 }])).toThrow(
+			/invalid `billingIntervalCount`/,
+		);
 	});
 
 	it("rejects non-integer billingIntervalCount", () => {
-		expect(() =>
-			validatePlansShape([{ ...baseline, billingIntervalCount: 1.5 }]),
-		).toThrow(/invalid `billingIntervalCount`/);
+		expect(() => validatePlansShape([{ ...baseline, billingIntervalCount: 1.5 }])).toThrow(
+			/invalid `billingIntervalCount`/,
+		);
 	});
 });
 

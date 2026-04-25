@@ -31,8 +31,7 @@ export const createTestStreamPayOptions = (
  */
 export const createEagerTestStreamPayOptions = (
 	overrides: Partial<Omit<StreamPayOptions, "use">> & { use?: StreamPayPlugins } = {},
-): StreamPayOptions =>
-	createTestStreamPayOptions({ createConsumerOnSignUp: true, ...overrides });
+): StreamPayOptions => createTestStreamPayOptions({ createConsumerOnSignUp: true, ...overrides });
 
 /**
  * Build an `Error` that mimics the `StreamSDKError` shape the real SDK

@@ -97,9 +97,7 @@ export const webhooks =
 								await registry.subscriptionWebhookSync(ctx, payload);
 							} catch (err: unknown) {
 								const message = err instanceof Error ? err.message : String(err);
-								ctx.context.logger.error(
-									`StreamPay subscription sync failed: ${message}`,
-								);
+								ctx.context.logger.error(`StreamPay subscription sync failed: ${message}`);
 								throw new APIError("INTERNAL_SERVER_ERROR", {
 									message: "Webhook sync failed. See server logs.",
 								});

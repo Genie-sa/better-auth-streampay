@@ -4,10 +4,7 @@ import type { StreamPayClient } from "../../types";
 import { StreamPayAmount } from "../../utils/amount";
 import { readSdkErrorFields } from "../../utils/error-envelope";
 import { asSessionUser, type StreamPaySessionUser } from "../../utils/session";
-import type {
-	StreamPayWebhookData,
-	StreamPayWebhookPayload,
-} from "../../webhooks/events";
+import type { StreamPayWebhookData, StreamPayWebhookPayload } from "../../webhooks/events";
 import type { ResolvedPlans } from "./plans";
 import {
 	PLAN_NAME_METADATA_KEY,
@@ -315,8 +312,7 @@ async function reconcileFromStreamPay(
 	// No row keyed by streampaySubscriptionId yet. Fall back to the
 	// incomplete row pre-created at /upgrade if metadata is present.
 	const planName =
-		readMetadataString(payload.data, PLAN_NAME_METADATA_KEY) ??
-		inferPlanFromItems(stream, plans);
+		readMetadataString(payload.data, PLAN_NAME_METADATA_KEY) ?? inferPlanFromItems(stream, plans);
 	const referenceId = readMetadataString(payload.data, REFERENCE_ID_METADATA_KEY);
 
 	if (!planName || !referenceId) {

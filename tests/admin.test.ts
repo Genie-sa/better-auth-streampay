@@ -113,9 +113,10 @@ describe("admin() plugin", () => {
 			mockClient.listPayments.mockResolvedValue({ data: [], pagination: {} });
 
 			await expect(
-				adminHandler(mockClient, "adminListPayments")(
-					createMockContext({ user: createAdminUser({ role: "editor, admin" }) }),
-				),
+				adminHandler(
+					mockClient,
+					"adminListPayments",
+				)(createMockContext({ user: createAdminUser({ role: "editor, admin" }) })),
 			).resolves.toEqual({ data: [], pagination: {} });
 
 			const options = createTestStreamPayOptions({ client: mockClient });
@@ -196,7 +197,9 @@ describe("admin() plugin", () => {
 			mockClient.getSubscription.mockResolvedValue(current);
 			mockClient.updateSubscription.mockResolvedValue({ ...current, amount: "20.00" });
 			const options = createTestStreamPayOptions({ client: mockClient });
-			const handler = unwrapHandler(admin({ onPlanChange })(options).endpoints.adminUpdateSubscription);
+			const handler = unwrapHandler(
+				admin({ onPlanChange })(options).endpoints.adminUpdateSubscription,
+			);
 			const ctx = createMockContext({ user: createAdminUser({ id: "admin-7" }) });
 			ctx.params = { id: "sub_42" };
 			ctx.body = { amount: "20.00" };
