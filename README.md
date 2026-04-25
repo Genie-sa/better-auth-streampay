@@ -23,6 +23,15 @@ pnpm add better-auth-streampay @streamsdk/typescript better-auth zod
 
 Peers: `better-auth ^1.4`, `@streamsdk/typescript ^1.0.6`, `zod ^3.24 || ^4`.
 
+### Preview releases
+
+Every push to `main` and every PR is published as an installable tarball
+via [pkg.pr.new](https://github.com/stackblitz-labs/pkg.pr.new):
+
+```bash
+pnpm add https://pkg.pr.new/better-auth-streampay@<sha-or-pr-number>
+```
+
 ## Env
 
 ```bash
