@@ -78,6 +78,7 @@
     "better-auth": "^1.6.5",
     "lefthook": "^2.1.6",
     "msw": "^2.13.3",
+    "pkg-pr-new": "^0.0.66",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
     "vite": "^8.0.8",
