@@ -1,0 +1,15 @@
+node_modules
+dist
+coverage
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example
+.vitest-cache
+codedb.snapshot
+examples/**/.data
+examples/**/node_modules
+examples/**/.output
+examples/**/.tanstack
+examples/**/dist
