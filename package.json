@@ -1,6 +1,6 @@
 {
   "name": "better-auth-streampay",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Community Better Auth plugin for StreamPay — consumers, checkout, portal, subscriptions, and signed webhooks. Not affiliated with Stream.",
   "license": "MIT",
   "type": "module",
@@ -54,7 +54,7 @@
   },
   "scripts": {
     "build": "tsup",
-    "prepublishOnly": "bun run build && bun run typecheck",
+    "prepublishOnly": "pnpm run build && pnpm run typecheck",
     "dev": "tsup --watch",
     "test": "vitest run --exclude tests/live/**/*.test.ts",
     "test:live": "STREAMPAY_LIVE=1 vitest run tests/live/**/*.test.ts",
