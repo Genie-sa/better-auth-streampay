@@ -103,6 +103,28 @@ export async function claimWebhookEvent(
 	}
 }
 
+/** Inverse of `claimWebhookEvent`. Best-effort: a failed delete is
+ *  logged loudly so the operator knows a stranded row will silently
+ *  swallow the next retry. */
+export async function releaseWebhookEvent(
+	ctx: SyncContext,
+	payload: StreamPayWebhookPayload,
+): Promise<void> {
+	const eventId = extractEventId(payload);
+	if (!eventId) return;
+	try {
+		await ctx.context.adapter.delete({
+			model: WEBHOOK_EVENT_MODEL,
+			where: [{ field: "eventId", value: eventId }],
+		});
+	} catch (err: unknown) {
+		const msg = err instanceof Error ? err.message : String(err);
+		ctx.context.logger.error(
+			`StreamPay webhook ${payload.event_type} (${eventId}): failed to release dedupe claim after sync error — retry will be skipped: ${msg}`,
+		);
+	}
+}
+
 // StreamPay doesn't guarantee a top-level id on the envelope, so we
 // derive a composite from fields that always exist.
 function extractEventId(payload: StreamPayWebhookPayload): string | null {
@@ -385,29 +407,35 @@ export async function syncWebhookPayload(
 		return;
 	}
 
-	if (options.dedupe !== false) {
+	const dedupe = options.dedupe !== false;
+	if (dedupe) {
 		const claimed = await claimWebhookEvent(ctx, payload);
 		if (!claimed) return;
 	}
 
-	// INVOICE_COMPLETED → renewal inference (no native SUBSCRIPTION_RENEWED event).
-	if (payload.event_type === "INVOICE_COMPLETED") {
-		await handleInvoiceCompleted(ctx, payload, client, plans, callbacks);
-		return;
+	try {
+		// INVOICE_COMPLETED → renewal inference (no native SUBSCRIPTION_RENEWED event).
+		if (payload.event_type === "INVOICE_COMPLETED") {
+			await handleInvoiceCompleted(ctx, payload, client, plans, callbacks);
+			return;
+		}
+
+		const { row, stream } = await reconcileFromStreamPay(ctx, payload, client, plans);
+		if (!row) return;
+
+		const user = await resolveRowUser(ctx, row);
+		const data: SubscriptionCallbackData = {
+			subscription: row,
+			streampaySubscription: stream,
+			user,
+			event: payload,
+		};
+
+		await dispatchSubscriptionCallback(ctx, payload, data, callbacks);
+	} catch (err) {
+		if (dedupe) await releaseWebhookEvent(ctx, payload);
+		throw err;
 	}
-
-	const { row, stream } = await reconcileFromStreamPay(ctx, payload, client, plans);
-	if (!row) return;
-
-	const user = await resolveRowUser(ctx, row);
-	const data: SubscriptionCallbackData = {
-		subscription: row,
-		streampaySubscription: stream,
-		user,
-		event: payload,
-	};
-
-	await dispatchSubscriptionCallback(ctx, payload, data, callbacks);
 }
 
 async function handleInvoiceCompleted(

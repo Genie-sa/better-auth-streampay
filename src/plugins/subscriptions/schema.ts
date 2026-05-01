@@ -1,9 +1,9 @@
 /**
  * Tables contributed by `subscriptions()`:
  *   - `subscription` — one row per (referenceId, plan).
- *   - `streampayWebhookEvent` — dedupe table. A successful unique insert
- *     is the gate for processing a webhook; a conflict → 200 so
- *     StreamPay stops retrying.
+ *   - `streampayWebhookEvent` — dedupe table. Unique insert gates
+ *     processing; conflict → skip. Released on downstream failure
+ *     so the next StreamPay retry can reprocess.
  */
 export const subscriptionTable = {
 	subscription: {
