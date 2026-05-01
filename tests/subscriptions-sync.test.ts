@@ -70,6 +70,44 @@ describe("syncWebhookPayload", () => {
 			expect(client.getSubscription).toHaveBeenCalledTimes(1); // unchanged — skipped
 			expect(ctx.logs.info.some((m) => m.includes("already processed"))).toBe(true);
 		});
+
+		it("releases the claim when downstream sync throws so the next retry can proceed", async () => {
+			const ctx = createMockSyncContext();
+			const payload = createMockWebhookPayload({
+				event_type: "SUBSCRIPTION_ACTIVATED",
+				entity_id: "sub_release",
+				timestamp: "2026-01-01T00:00:00.000Z",
+			});
+
+			client.getSubscription.mockRejectedValueOnce(new Error("upstream 503"));
+
+			await expect(
+				syncWebhookPayload(ctx, payload, client, resolvedPlans(), {} as SubscriptionCallbacks),
+			).rejects.toThrow("upstream 503");
+
+			expect(ctx.adapter.tables.streampayWebhookEvent ?? []).toHaveLength(0);
+
+			client.getSubscription.mockResolvedValueOnce({
+				id: "sub_release",
+				status: "ACTIVE",
+				amount: "99.00",
+				current_period_start: "2026-01-01T00:00:00Z",
+				current_period_end: "2026-02-01T00:00:00Z",
+				organization_consumer_id: "cons_1",
+				recurring_interval: "MONTH",
+				recurring_interval_count: 1,
+			});
+			await ctx.adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					streampaySubscriptionId: "sub_release",
+					status: "incomplete",
+				}),
+			});
+
+			await syncWebhookPayload(ctx, payload, client, resolvedPlans(), {} as SubscriptionCallbacks);
+			expect(ctx.adapter.tables.streampayWebhookEvent ?? []).toHaveLength(1);
+		});
 	});
 
 	describe("SUBSCRIPTION_CREATED", () => {
