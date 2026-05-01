@@ -34,17 +34,10 @@ describe("syncWebhookPayload", () => {
 		vi.clearAllMocks();
 	});
 
-	describe("dedupe via streampayWebhookEvent table", () => {
-		it("skips a duplicate event (already processed)", async () => {
-			const ctx = createMockSyncContext();
-			const payload = createMockWebhookPayload({
-				event_type: "SUBSCRIPTION_ACTIVATED",
-				entity_id: "sub_abc",
-				timestamp: "2026-01-01T00:00:00.000Z",
-			});
-
+	describe("event lifecycle via streampayWebhookEvent state machine", () => {
+		const seedActiveSub = async (ctx: ReturnType<typeof createMockSyncContext>, subId: string) => {
 			client.getSubscription.mockResolvedValue({
-				id: "sub_abc",
+				id: subId,
 				status: "ACTIVE",
 				amount: "99.00",
 				current_period_start: "2026-01-01T00:00:00Z",
@@ -53,60 +46,150 @@ describe("syncWebhookPayload", () => {
 				recurring_interval: "MONTH",
 				recurring_interval_count: 1,
 			});
-
-			// Seed an existing row so the second call has work to elide.
 			await ctx.adapter.create({
 				model: "subscription",
 				data: createMockSubscriptionRow({
-					streampaySubscriptionId: "sub_abc",
+					streampaySubscriptionId: subId,
 					status: "incomplete",
 				}),
+			});
+		};
+
+		it("first delivery → status=completed, attemptCount=1", async () => {
+			const ctx = createMockSyncContext();
+			await seedActiveSub(ctx, "sub_a");
+			const payload = createMockWebhookPayload({
+				event_type: "SUBSCRIPTION_ACTIVATED",
+				entity_id: "sub_a",
+				timestamp: "2026-01-01T00:00:00.000Z",
+			});
+
+			await syncWebhookPayload(ctx, payload, client, resolvedPlans(), {} as SubscriptionCallbacks);
+
+			const rows = ctx.adapter.tables.streampayWebhookEvent ?? [];
+			expect(rows).toHaveLength(1);
+			expect(rows[0]).toMatchObject({ status: "completed", attemptCount: 1 });
+		});
+
+		it("re-delivery of completed event is skipped silently", async () => {
+			const ctx = createMockSyncContext();
+			await seedActiveSub(ctx, "sub_b");
+			const payload = createMockWebhookPayload({
+				event_type: "SUBSCRIPTION_ACTIVATED",
+				entity_id: "sub_b",
+				timestamp: "2026-01-01T00:00:00.000Z",
 			});
 
 			await syncWebhookPayload(ctx, payload, client, resolvedPlans(), {} as SubscriptionCallbacks);
 			expect(client.getSubscription).toHaveBeenCalledTimes(1);
 
 			await syncWebhookPayload(ctx, payload, client, resolvedPlans(), {} as SubscriptionCallbacks);
-			expect(client.getSubscription).toHaveBeenCalledTimes(1); // unchanged — skipped
-			expect(ctx.logs.info.some((m) => m.includes("already processed"))).toBe(true);
+			expect(client.getSubscription).toHaveBeenCalledTimes(1);
+			expect(ctx.logs.info.some((m) => m.includes("already completed"))).toBe(true);
 		});
 
-		it("releases the claim when downstream sync throws so the next retry can proceed", async () => {
+		it("transient failure leaves row pending so the next retry can advance", async () => {
 			const ctx = createMockSyncContext();
 			const payload = createMockWebhookPayload({
 				event_type: "SUBSCRIPTION_ACTIVATED",
-				entity_id: "sub_release",
+				entity_id: "sub_c",
 				timestamp: "2026-01-01T00:00:00.000Z",
 			});
 
 			client.getSubscription.mockRejectedValueOnce(new Error("upstream 503"));
-
 			await expect(
-				syncWebhookPayload(ctx, payload, client, resolvedPlans(), {} as SubscriptionCallbacks),
+				syncWebhookPayload(ctx, payload, client, resolvedPlans(), {} as SubscriptionCallbacks, {
+					rawBody: '{"event_type":"SUBSCRIPTION_ACTIVATED"}',
+					signatureHeader: "t=1,v1=abc",
+				}),
 			).rejects.toThrow("upstream 503");
 
-			expect(ctx.adapter.tables.streampayWebhookEvent ?? []).toHaveLength(0);
-
-			client.getSubscription.mockResolvedValueOnce({
-				id: "sub_release",
-				status: "ACTIVE",
-				amount: "99.00",
-				current_period_start: "2026-01-01T00:00:00Z",
-				current_period_end: "2026-02-01T00:00:00Z",
-				organization_consumer_id: "cons_1",
-				recurring_interval: "MONTH",
-				recurring_interval_count: 1,
-			});
-			await ctx.adapter.create({
-				model: "subscription",
-				data: createMockSubscriptionRow({
-					streampaySubscriptionId: "sub_release",
-					status: "incomplete",
-				}),
+			const rows = ctx.adapter.tables.streampayWebhookEvent ?? [];
+			expect(rows).toHaveLength(1);
+			expect(rows[0]).toMatchObject({
+				status: "pending",
+				attemptCount: 1,
+				lastError: "upstream 503",
+				rawPayload: '{"event_type":"SUBSCRIPTION_ACTIVATED"}',
 			});
 
+			// Next delivery: upstream recovers → row flips to completed.
+			await seedActiveSub(ctx, "sub_c");
 			await syncWebhookPayload(ctx, payload, client, resolvedPlans(), {} as SubscriptionCallbacks);
-			expect(ctx.adapter.tables.streampayWebhookEvent ?? []).toHaveLength(1);
+			expect(rows[0]).toMatchObject({ status: "completed", attemptCount: 2 });
+		});
+
+		it("reaches dead_letter after maxAttempts, persists payload, returns 200", async () => {
+			const ctx = createMockSyncContext();
+			const payload = createMockWebhookPayload({
+				event_type: "SUBSCRIPTION_ACTIVATED",
+				entity_id: "sub_dlq",
+				timestamp: "2026-01-01T00:00:00.000Z",
+			});
+			const rawBody = '{"raw":"payload"}';
+			const signatureHeader = "t=2,v1=def";
+
+			client.getSubscription.mockRejectedValue(new Error("upstream down"));
+
+			const opts = { rawBody, signatureHeader, maxAttempts: 3 } as const;
+			// Deliveries 1-3 throw + record failure; delivery 4 dead-letters and returns silently.
+			await expect(
+				syncWebhookPayload(
+					ctx,
+					payload,
+					client,
+					resolvedPlans(),
+					{} as SubscriptionCallbacks,
+					opts,
+				),
+			).rejects.toThrow();
+			await expect(
+				syncWebhookPayload(
+					ctx,
+					payload,
+					client,
+					resolvedPlans(),
+					{} as SubscriptionCallbacks,
+					opts,
+				),
+			).rejects.toThrow();
+			await expect(
+				syncWebhookPayload(
+					ctx,
+					payload,
+					client,
+					resolvedPlans(),
+					{} as SubscriptionCallbacks,
+					opts,
+				),
+			).rejects.toThrow();
+			await syncWebhookPayload(
+				ctx,
+				payload,
+				client,
+				resolvedPlans(),
+				{} as SubscriptionCallbacks,
+				opts,
+			);
+
+			const row = (ctx.adapter.tables.streampayWebhookEvent ?? [])[0];
+			expect(row).toMatchObject({
+				status: "dead_letter",
+				attemptCount: 4,
+				rawPayload: rawBody,
+				signatureHeader,
+			});
+
+			// Subsequent delivery is a no-op (we own retries now).
+			await syncWebhookPayload(
+				ctx,
+				payload,
+				client,
+				resolvedPlans(),
+				{} as SubscriptionCallbacks,
+				opts,
+			);
+			expect(ctx.logs.warn.some((m) => m.includes("already dead-lettered"))).toBe(true);
 		});
 	});
 

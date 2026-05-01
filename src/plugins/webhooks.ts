@@ -94,7 +94,10 @@ export const webhooks =
 						// permanent failures are swallowed inside the sync wrapper.
 						if (registry?.subscriptionWebhookSync) {
 							try {
-								await registry.subscriptionWebhookSync(ctx, payload);
+								await registry.subscriptionWebhookSync(ctx, payload, {
+									rawBody,
+									signatureHeader,
+								});
 							} catch (err: unknown) {
 								const message = err instanceof Error ? err.message : String(err);
 								ctx.context.logger.error(`StreamPay subscription sync failed: ${message}`);

@@ -152,6 +152,14 @@ export interface SubscriptionsOptions extends SubscriptionCallbacks {
 	 * StreamPay retries delivery, so duplicates WILL arrive.
 	 */
 	enableWebhookEventTable?: boolean;
+
+	/**
+	 * Per-event delivery attempt cap before the row is parked as
+	 * `dead_letter` and StreamPay is told to stop retrying. Default 10.
+	 * Tune lower for faster surfacing of persistent bugs, higher to
+	 * absorb longer transient outages.
+	 */
+	maxWebhookAttempts?: number;
 }
 
 // Window during which a duplicate /upgrade reuses the existing `incomplete`

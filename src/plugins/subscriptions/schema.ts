@@ -1,9 +1,10 @@
 /**
  * Tables contributed by `subscriptions()`:
  *   - `subscription` — one row per (referenceId, plan).
- *   - `streampayWebhookEvent` — dedupe table. Unique insert gates
- *     processing; conflict → skip. Released on downstream failure
- *     so the next StreamPay retry can reprocess.
+ *   - `streampayWebhookEvent` — event lifecycle: `pending` → `completed`
+ *     or `pending` → `dead_letter` after `attemptCount` reaches the
+ *     configured maximum. Dead-lettered rows preserve `rawPayload` and
+ *     `signatureHeader` so an operator can replay them after a fix.
  */
 export const subscriptionTable = {
 	subscription: {
@@ -99,6 +100,36 @@ export const webhookEventTable = {
 			processedAt: {
 				type: "date",
 				required: true,
+			},
+
+			status: {
+				type: "string",
+				required: false,
+				/**
+				 * Backfilled to "completed" for rows from older versions so
+				 */
+				defaultValue: "completed",
+			},
+			attemptCount: {
+				type: "number",
+				required: false,
+				defaultValue: 1,
+			},
+			firstSeenAt: {
+				type: "date",
+				required: false,
+			},
+			rawPayload: {
+				type: "string",
+				required: false,
+			},
+			signatureHeader: {
+				type: "string",
+				required: false,
+			},
+			lastError: {
+				type: "string",
+				required: false,
 			},
 		},
 	},

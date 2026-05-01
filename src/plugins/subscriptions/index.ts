@@ -4,7 +4,15 @@ import type { StreamPayWebhookPayload } from "../../webhooks/events";
 import { buildSubscriptionEndpoints } from "./endpoints";
 import { createPlanResolver, validatePlansShape } from "./plans";
 import { subscriptionTable, webhookEventTable } from "./schema";
-import { classifyWebhookFailure, type SyncContext, syncWebhookPayload } from "./sync";
+import {
+	classifyWebhookFailure,
+	markWebhookEventCompleted,
+	recordWebhookEventFailure,
+	type SyncContext,
+	syncWebhookPayload,
+	WEBHOOK_EVENT_MODEL,
+	type WebhookEventRow,
+} from "./sync";
 import type { StreamPayPlanLike, SubscriptionsOptions } from "./types";
 
 export { checkLimit, hasFeature, type LimitCheckResult, type ResolvedPlans } from "./plans";
@@ -42,7 +50,19 @@ export interface StreamPayPluginRegistry {
 	subscriptionWebhookSync?: (
 		ctx: GenericEndpointContext,
 		payload: StreamPayWebhookPayload,
+		meta?: { rawBody?: string; signatureHeader?: string | null },
 	) => Promise<void>;
+
+	/**
+	 * Replay a previously persisted webhook event (typically `dead_letter`
+	 * or stuck `pending`) by re-running the sync pipeline against its
+	 * stored `rawPayload`. Bypasses the dedupe gate — the row IS the
+	 * dedupe — and updates it to `completed` on success.
+	 */
+	replayWebhookEvent?: (
+		ctx: GenericEndpointContext,
+		eventId: string,
+	) => Promise<{ replayed: true; eventId: string }>;
 }
 
 export function subscriptions(subsOptions: SubscriptionsOptions) {
@@ -62,6 +82,7 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 			registry.subscriptionWebhookSync = async (
 				ctx: GenericEndpointContext,
 				payload: StreamPayWebhookPayload,
+				meta?: { rawBody?: string; signatureHeader?: string | null },
 			) => {
 				const syncCtx: SyncContext = {
 					context: ctx.context as SyncContext["context"],
@@ -70,6 +91,11 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 				try {
 					await syncWebhookPayload(syncCtx, payload, options.client, plans, subsOptions, {
 						dedupe: dedupeEnabled,
+						rawBody: meta?.rawBody ?? null,
+						signatureHeader: meta?.signatureHeader ?? null,
+						...(subsOptions.maxWebhookAttempts !== undefined && {
+							maxAttempts: subsOptions.maxWebhookAttempts,
+						}),
 					});
 				} catch (err) {
 					if (classifyWebhookFailure(err) === "PERMANENT") {
@@ -82,6 +108,40 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 					throw err;
 				}
 			};
+
+			if (dedupeEnabled) {
+				registry.replayWebhookEvent = async (ctx, eventId) => {
+					const syncCtx: SyncContext = {
+						context: ctx.context as SyncContext["context"],
+					};
+					const row = await syncCtx.context.adapter.findOne<WebhookEventRow>({
+						model: WEBHOOK_EVENT_MODEL,
+						where: [{ field: "eventId", value: eventId }],
+					});
+					if (!row) {
+						throw new Error(`Webhook event ${eventId} not found.`);
+					}
+					if (!row.rawPayload) {
+						throw new Error(
+							`Webhook event ${eventId} has no rawPayload — nothing to replay (already completed cleanly?).`,
+						);
+					}
+
+					const payload = JSON.parse(row.rawPayload) as StreamPayWebhookPayload;
+					const plans = await resolvePlans();
+
+					try {
+						await syncWebhookPayload(syncCtx, payload, options.client, plans, subsOptions, {
+							dedupe: false,
+						});
+						await markWebhookEventCompleted(syncCtx, row.id);
+						return { replayed: true, eventId };
+					} catch (err) {
+						await recordWebhookEventFailure(syncCtx, row.id, null, null, err);
+						throw err;
+					}
+				};
+			}
 		}
 
 		const schema = {
