@@ -124,6 +124,14 @@ export function createMockAdapter(): PluginAdapter & {
 			const end = args.limit !== undefined ? start + args.limit : undefined;
 			return rows.slice(start, end) as T[];
 		},
+		async count(args: {
+			model: string;
+			where?: Array<{ field: string; value: unknown }>;
+		}): Promise<number> {
+			const table = tables[args.model] ?? [];
+			if (!args.where || args.where.length === 0) return table.length;
+			return table.filter((r) => matches(r, args.where ?? [])).length;
+		},
 		async delete(args: {
 			model: string;
 			where: Array<{ field: string; value: unknown }>;

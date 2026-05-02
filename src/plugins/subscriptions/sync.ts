@@ -41,6 +41,10 @@ export interface PluginAdapter {
 		model: string;
 		where: Array<{ field: string; value: unknown }>;
 	}) => Promise<void>;
+	count: (args: {
+		model: string;
+		where?: Array<{ field: string; value: unknown }>;
+	}) => Promise<number>;
 }
 
 export interface SyncContext {

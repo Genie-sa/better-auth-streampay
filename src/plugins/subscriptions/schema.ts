@@ -102,12 +102,14 @@ export const webhookEventTable = {
 			processedAt: {
 				type: "date",
 				required: true,
+				index: true,
 			},
 			/** Defaults to `completed` so pre-state-machine rows still dedupe. */
 			status: {
 				type: "string",
 				required: false,
 				defaultValue: "completed",
+				index: true,
 			},
 			attemptCount: {
 				type: "number",

@@ -992,14 +992,20 @@ function buildWebhookEventsEndpoints(
 				if (ctx.query.eventType) where.push({ field: "eventType", value: ctx.query.eventType });
 				const page = ctx.query.page ?? 1;
 				const size = ctx.query.size ?? 50;
-				const items = await adapter.findMany<WebhookEventRow>({
-					model: WEBHOOK_EVENT_MODEL,
-					...(where.length > 0 ? { where } : {}),
-					limit: size,
-					offset: (page - 1) * size,
-					sortBy: { field: "processedAt", direction: "desc" },
-				});
-				return ctx.json({ items, page, size });
+				const [items, total] = await Promise.all([
+					adapter.findMany<WebhookEventRow>({
+						model: WEBHOOK_EVENT_MODEL,
+						...(where.length > 0 ? { where } : {}),
+						limit: size,
+						offset: (page - 1) * size,
+						sortBy: { field: "processedAt", direction: "desc" },
+					}),
+					adapter.count({
+						model: WEBHOOK_EVENT_MODEL,
+						...(where.length > 0 ? { where } : {}),
+					}),
+				]);
+				return ctx.json({ items, total, page, size });
 			},
 		),
 
