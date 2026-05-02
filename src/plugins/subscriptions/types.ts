@@ -116,7 +116,7 @@ export interface AuthorizeReferenceContext {
 	action: "upgrade" | "cancel" | "freeze" | "unfreeze" | "read" | "change-plan";
 }
 
-export interface SubscriptionsOptions extends SubscriptionCallbacks {
+interface SubscriptionsOptionsBase extends SubscriptionCallbacks {
 	/**
 	 * Subscribable plans — static array or async factory. Shape is
 	 * validated at plugin init; productId existence is checked on first
@@ -135,32 +135,30 @@ export interface SubscriptionsOptions extends SubscriptionCallbacks {
 	) => boolean | Promise<boolean>;
 
 	/**
-	 * Default `true`. Set `false` to BYO state via `webhooks({ on* })`:
-	 * the plugin skips registering the `subscription` schema and the
-	 * webhook auto-sync. `subscriptions({ on* })` callbacks won't fire
-	 * (they live in the sync path); customer-side stateful endpoints
-	 * still register but assume the table exists.
-	 */
-	enableSubscriptionTable?: boolean;
-
-	/**
-	 * Default `true`. Set `false` if you handle webhook idempotency in
-	 * your own infra (Redis SETNX, idempotency middleware, …): the
-	 * plugin skips registering the `streampayWebhookEvent` table and
-	 * skips its unique-insert dedupe before dispatching webhook events.
-	 * If false, you MUST guarantee at-most-once handling yourself —
-	 * StreamPay retries delivery, so duplicates WILL arrive.
-	 */
-	enableWebhookEventTable?: boolean;
-
-	/**
 	 * Per-event delivery attempt cap before the row is parked as
-	 * `dead_letter` and StreamPay is told to stop retrying. Default 10.
-	 * Tune lower for faster surfacing of persistent bugs, higher to
-	 * absorb longer transient outages.
+	 * `dead_letter` and StreamPay is told to stop retrying. Default 10,
+	 * minimum 1 (values <1 are clamped). Tune lower for faster
+	 * surfacing of persistent bugs, higher to absorb longer transient
+	 * outages.
 	 */
 	maxWebhookAttempts?: number;
 }
+
+/** `enableWebhookEventTable: true` requires `enableSubscriptionTable: true`. */
+type WebhookTablingOptions =
+	| {
+			/** Default `true`. Set `false` to BYO state via `webhooks({ on* })`. */
+			enableSubscriptionTable?: true;
+			/** Default `true`. Set `false` if you handle webhook idempotency yourself
+			 *  (Redis SETNX, etc.). StreamPay retries — you MUST dedupe externally. */
+			enableWebhookEventTable?: boolean;
+	  }
+	| {
+			enableSubscriptionTable: false;
+			enableWebhookEventTable?: false;
+	  };
+
+export type SubscriptionsOptions = SubscriptionsOptionsBase & WebhookTablingOptions;
 
 // Window during which a duplicate /upgrade reuses the existing `incomplete`
 // row instead of creating a new payment link. Guards against double-clicks.

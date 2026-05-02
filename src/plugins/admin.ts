@@ -990,22 +990,16 @@ function buildWebhookEventsEndpoints(
 				const where: Array<{ field: string; value: unknown }> = [];
 				if (ctx.query.status) where.push({ field: "status", value: ctx.query.status });
 				if (ctx.query.eventType) where.push({ field: "eventType", value: ctx.query.eventType });
-				const all = await adapter.findMany<WebhookEventRow>({
-					model: WEBHOOK_EVENT_MODEL,
-					...(where.length > 0 ? { where } : {}),
-				});
 				const page = ctx.query.page ?? 1;
 				const size = ctx.query.size ?? 50;
-				const sorted = [...all].sort(
-					(a, b) => new Date(b.processedAt).getTime() - new Date(a.processedAt).getTime(),
-				);
-				const start = (page - 1) * size;
-				return ctx.json({
-					items: sorted.slice(start, start + size),
-					total: sorted.length,
-					page,
-					size,
+				const items = await adapter.findMany<WebhookEventRow>({
+					model: WEBHOOK_EVENT_MODEL,
+					...(where.length > 0 ? { where } : {}),
+					limit: size,
+					offset: (page - 1) * size,
+					sortBy: { field: "processedAt", direction: "desc" },
 				});
+				return ctx.json({ items, page, size });
 			},
 		),
 
@@ -1036,6 +1030,7 @@ function buildWebhookEventsEndpoints(
 			"/admin/streampay/webhook-events/:eventId/replay",
 			{
 				method: "POST",
+				disableBody: true,
 				use: [sessionMiddleware],
 			},
 			async (ctx) => {
@@ -1064,6 +1059,7 @@ function buildWebhookEventsEndpoints(
 			"/admin/streampay/webhook-events/:eventId",
 			{
 				method: "DELETE",
+				disableBody: true,
 				use: [sessionMiddleware],
 			},
 			async (ctx) => {

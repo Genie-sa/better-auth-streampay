@@ -101,10 +101,28 @@ export function createMockAdapter(): PluginAdapter & {
 		async findMany<T>(args: {
 			model: string;
 			where?: Array<{ field: string; value: unknown }>;
+			limit?: number;
+			offset?: number;
+			sortBy?: { field: string; direction: "asc" | "desc" };
 		}): Promise<T[]> {
 			const table = tables[args.model] ?? [];
-			if (!args.where || args.where.length === 0) return [...(table as T[])];
-			return table.filter((r) => matches(r, args.where ?? [])) as T[];
+			let rows: Record<string, unknown>[] =
+				!args.where || args.where.length === 0
+					? [...table]
+					: table.filter((r) => matches(r, args.where ?? []));
+			if (args.sortBy) {
+				const { field, direction } = args.sortBy;
+				const sign = direction === "asc" ? 1 : -1;
+				rows = [...rows].sort((a, b) => {
+					const av = a[field] as number | string | Date;
+					const bv = b[field] as number | string | Date;
+					if (av === bv) return 0;
+					return av > bv ? sign : -sign;
+				});
+			}
+			const start = args.offset ?? 0;
+			const end = args.limit !== undefined ? start + args.limit : undefined;
+			return rows.slice(start, end) as T[];
 		},
 		async delete(args: {
 			model: string;

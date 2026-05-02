@@ -97,17 +97,16 @@ export const webhookEventTable = {
 				type: "string",
 				required: true,
 			},
+			/** Last activity (insert/retry/completion/dead-letter).
+			 *  For `completed` = finished-at; for `pending` = last attempt. */
 			processedAt: {
 				type: "date",
 				required: true,
 			},
-
+			/** Defaults to `completed` so pre-state-machine rows still dedupe. */
 			status: {
 				type: "string",
 				required: false,
-				/**
-				 * Backfilled to "completed" for rows from older versions so
-				 */
 				defaultValue: "completed",
 			},
 			attemptCount: {

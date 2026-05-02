@@ -1,4 +1,6 @@
 import type { GenericEndpointContext } from "better-auth";
+import { APIError } from "better-auth/api";
+import { $ERROR_CODES } from "../../error-codes";
 import type { StreamPayOptions } from "../../types";
 import type { StreamPayWebhookPayload } from "../../webhooks/events";
 import { buildSubscriptionEndpoints } from "./endpoints";
@@ -72,6 +74,15 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 		throw new TypeError("subscriptions(): `plans` must be an array or an async factory function.");
 	}
 
+	const flags = subsOptions as {
+		enableSubscriptionTable?: boolean;
+		enableWebhookEventTable?: boolean;
+	};
+	if (flags.enableSubscriptionTable === false && flags.enableWebhookEventTable === true) {
+		throw new TypeError(
+			"subscriptions(): `enableWebhookEventTable: true` requires `enableSubscriptionTable: true` — the event lifecycle table is part of the subscription sync pipeline.",
+		);
+	}
 	const tableEnabled = subsOptions.enableSubscriptionTable !== false;
 	const dedupeEnabled = subsOptions.enableWebhookEventTable !== false;
 
@@ -119,12 +130,15 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 						where: [{ field: "eventId", value: eventId }],
 					});
 					if (!row) {
-						throw new Error(`Webhook event ${eventId} not found.`);
+						throw new APIError("NOT_FOUND", {
+							code: $ERROR_CODES.NOT_FOUND.code,
+							message: `Webhook event ${eventId} not found.`,
+						});
 					}
 					if (!row.rawPayload) {
-						throw new Error(
-							`Webhook event ${eventId} has no rawPayload — nothing to replay (already completed cleanly?).`,
-						);
+						throw new APIError("BAD_REQUEST", {
+							message: `Webhook event ${eventId} has no rawPayload — nothing to replay (already completed cleanly?).`,
+						});
 					}
 
 					const payload = JSON.parse(row.rawPayload) as StreamPayWebhookPayload;

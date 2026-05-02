@@ -33,6 +33,9 @@ export interface PluginAdapter {
 	findMany: <T = unknown>(args: {
 		model: string;
 		where?: Array<{ field: string; value: unknown }>;
+		limit?: number;
+		offset?: number;
+		sortBy?: { field: string; direction: "asc" | "desc" };
 	}) => Promise<T[]>;
 	delete: (args: {
 		model: string;
@@ -114,8 +117,8 @@ export type ClaimAdvanceResult =
  * (already completed / dead-lettered), increments attemptCount, or
  * flips to `dead_letter` once the next attempt would exceed the cap.
  *
- * Replaces the older "insert-only claim" pattern: failure no longer
- * needs a separate `release` step because the row IS the state.
+ * Not a mutex: concurrent deliveries of the same event id can both
+ * pass through `pending`. Userland callbacks must be idempotent.
  */
 export async function claimOrAdvanceWebhookEvent(
 	ctx: SyncContext,
@@ -541,7 +544,7 @@ export async function syncWebhookPayload(
 	const dedupe = options.dedupe !== false;
 	const rawBody = options.rawBody ?? null;
 	const signatureHeader = options.signatureHeader ?? null;
-	const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_WEBHOOK_ATTEMPTS;
+	const maxAttempts = Math.max(1, options.maxAttempts ?? DEFAULT_MAX_WEBHOOK_ATTEMPTS);
 
 	let claim: ClaimAdvanceResult = { action: "process", row: null };
 	if (dedupe) {
