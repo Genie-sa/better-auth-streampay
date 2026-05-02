@@ -1,6 +1,6 @@
 {
   "name": "better-auth-streampay",
-  "version": "1.1.6",
+  "version": "1.2.0",
   "description": "Community Better Auth plugin for StreamPay — consumers, checkout, portal, subscriptions, and signed webhooks. Not affiliated with Stream.",
   "license": "MIT",
   "type": "module",
