@@ -33,11 +33,18 @@ export interface PluginAdapter {
 	findMany: <T = unknown>(args: {
 		model: string;
 		where?: Array<{ field: string; value: unknown }>;
+		limit?: number;
+		offset?: number;
+		sortBy?: { field: string; direction: "asc" | "desc" };
 	}) => Promise<T[]>;
 	delete: (args: {
 		model: string;
 		where: Array<{ field: string; value: unknown }>;
 	}) => Promise<void>;
+	count: (args: {
+		model: string;
+		where?: Array<{ field: string; value: unknown }>;
+	}) => Promise<number>;
 }
 
 export interface SyncContext {
@@ -57,7 +64,31 @@ export interface SyncContext {
 }
 
 const SUBSCRIPTION_MODEL = "subscription";
-const WEBHOOK_EVENT_MODEL = "streampayWebhookEvent";
+export const WEBHOOK_EVENT_MODEL = "streampayWebhookEvent";
+
+/**
+ * Default cap on per-event delivery attempts before the row is parked
+ * as `dead_letter`. Tuned for StreamPay's at-least-once retry budget
+ * (~3-7 days of exponential backoff) — 10 attempts is enough headroom
+ * for a transient outage but bounded enough that a persistent bug
+ * doesn't generate a retry storm.
+ */
+export const DEFAULT_MAX_WEBHOOK_ATTEMPTS = 10;
+
+export type WebhookEventStatus = "pending" | "completed" | "dead_letter";
+
+export interface WebhookEventRow {
+	id: string;
+	eventId: string;
+	eventType: string;
+	status: WebhookEventStatus;
+	attemptCount: number;
+	processedAt: Date;
+	firstSeenAt: Date | null;
+	rawPayload: string | null;
+	signatureHeader: string | null;
+	lastError: string | null;
+}
 
 // Adapters emit different shapes: Prisma P2002, Postgres 23505,
 // better-sqlite3 SQLITE_CONSTRAINT_UNIQUE. Check a few known markers.
@@ -70,59 +101,155 @@ function isUniqueConstraintError(err: unknown): boolean {
 }
 
 /**
- * Claim a webhook event id via unique insert into the dedupe table.
- * Returns `true` if the claim succeeded (first delivery), `false` if
- * already processed. Protects every sync path — not just subscription-
- * row mutations — so events like INVOICE_COMPLETED can't double-fire.
+ * Outcome of a delivery attempt against the event lifecycle table.
+ *  - `process` → caller does the work; `row` is the in-flight `pending`
+ *    row whose `id` is needed to mark `completed` or record a failure.
+ *    `row: null` means dedupe is disabled or no `eventId` is available.
+ *  - `skip` → another delivery already finished or was dead-lettered;
+ *    caller returns 200 without doing work.
+ *  - `dead_letter` → attempt budget is exhausted, payload+signature
+ *    persisted, caller returns 200 so StreamPay stops retrying.
  */
-export async function claimWebhookEvent(
+export type ClaimAdvanceResult =
+	| { action: "process"; row: WebhookEventRow | null }
+	| { action: "skip"; reason: "completed" | "dead_letter" }
+	| { action: "dead_letter"; row: WebhookEventRow };
+
+/**
+ * Atomic state-machine entry. Inserts a `pending` row on first
+ * delivery; on conflict, reads the existing row and either skips
+ * (already completed / dead-lettered), increments attemptCount, or
+ * flips to `dead_letter` once the next attempt would exceed the cap.
+ *
+ * Not a mutex: concurrent deliveries of the same event id can both
+ * pass through `pending`. Userland callbacks must be idempotent.
+ */
+export async function claimOrAdvanceWebhookEvent(
 	ctx: SyncContext,
 	payload: StreamPayWebhookPayload,
-): Promise<boolean> {
+	rawBody: string | null,
+	signatureHeader: string | null,
+	maxAttempts: number,
+): Promise<ClaimAdvanceResult> {
 	const eventId = extractEventId(payload);
-	// No composite key available — process without dedupe. Caller logs.
-	if (!eventId) return true;
+	if (!eventId) {
+		ctx.context.logger.warn(
+			`StreamPay webhook ${payload.event_type}: missing entity_id/timestamp — processing without dedupe.`,
+		);
+		return { action: "process", row: null };
+	}
+
+	const now = new Date();
+
 	try {
-		await ctx.context.adapter.create({
+		const inserted = await ctx.context.adapter.create<WebhookEventRow>({
 			model: WEBHOOK_EVENT_MODEL,
 			data: {
 				eventId,
 				eventType: payload.event_type,
-				processedAt: new Date(),
+				status: "pending",
+				attemptCount: 1,
+				processedAt: now,
+				firstSeenAt: now,
 			},
 		});
-		return true;
-	} catch (err: unknown) {
-		if (isUniqueConstraintError(err)) {
-			ctx.context.logger.info(
-				`StreamPay webhook ${payload.event_type} (${eventId}) already processed — skipping.`,
-			);
-			return false;
-		}
-		throw err;
+		return { action: "process", row: inserted };
+	} catch (err) {
+		if (!isUniqueConstraintError(err)) throw err;
 	}
+
+	const existing = await ctx.context.adapter.findOne<WebhookEventRow>({
+		model: WEBHOOK_EVENT_MODEL,
+		where: [{ field: "eventId", value: eventId }],
+	});
+	if (!existing) {
+		// Conflict but row vanished — race with a concurrent prune. Treat as fresh.
+		ctx.context.logger.warn(
+			`StreamPay webhook ${payload.event_type} (${eventId}): unique conflict but row missing, processing without tracking.`,
+		);
+		return { action: "process", row: null };
+	}
+
+	if (existing.status === "completed") {
+		ctx.context.logger.info(
+			`StreamPay webhook ${payload.event_type} (${eventId}) already completed — skipping.`,
+		);
+		return { action: "skip", reason: "completed" };
+	}
+	if (existing.status === "dead_letter") {
+		ctx.context.logger.warn(
+			`StreamPay webhook ${payload.event_type} (${eventId}) already dead-lettered — skipping (replay manually).`,
+		);
+		return { action: "skip", reason: "dead_letter" };
+	}
+
+	const nextAttempt = (existing.attemptCount ?? 0) + 1;
+	if (nextAttempt > maxAttempts) {
+		const updated = await ctx.context.adapter.update<WebhookEventRow>({
+			model: WEBHOOK_EVENT_MODEL,
+			update: {
+				status: "dead_letter",
+				attemptCount: nextAttempt,
+				processedAt: now,
+				rawPayload: rawBody,
+				signatureHeader,
+			},
+			where: [{ field: "id", value: existing.id }],
+		});
+		return { action: "dead_letter", row: updated ?? existing };
+	}
+
+	const updated = await ctx.context.adapter.update<WebhookEventRow>({
+		model: WEBHOOK_EVENT_MODEL,
+		update: {
+			attemptCount: nextAttempt,
+			processedAt: now,
+		},
+		where: [{ field: "id", value: existing.id }],
+	});
+	return { action: "process", row: updated ?? existing };
 }
 
-/** Inverse of `claimWebhookEvent`. Best-effort: a failed delete is
- *  logged loudly so the operator knows a stranded row will silently
- *  swallow the next retry. */
-export async function releaseWebhookEvent(
-	ctx: SyncContext,
-	payload: StreamPayWebhookPayload,
+/** Mark a tracked event row as `completed`. NULLs out the persisted
+ *  payload to save storage on the happy path — only failed/dead-lettered
+ *  rows keep `rawPayload` and `signatureHeader`. */
+export async function markWebhookEventCompleted(
+	ctx: { context: { adapter: PluginAdapter } },
+	rowId: string,
 ): Promise<void> {
-	const eventId = extractEventId(payload);
-	if (!eventId) return;
-	try {
-		await ctx.context.adapter.delete({
-			model: WEBHOOK_EVENT_MODEL,
-			where: [{ field: "eventId", value: eventId }],
-		});
-	} catch (err: unknown) {
-		const msg = err instanceof Error ? err.message : String(err);
-		ctx.context.logger.error(
-			`StreamPay webhook ${payload.event_type} (${eventId}): failed to release dedupe claim after sync error — retry will be skipped: ${msg}`,
-		);
-	}
+	await ctx.context.adapter.update({
+		model: WEBHOOK_EVENT_MODEL,
+		update: {
+			status: "completed",
+			processedAt: new Date(),
+			rawPayload: null,
+			signatureHeader: null,
+			lastError: null,
+		},
+		where: [{ field: "id", value: rowId }],
+	});
+}
+
+/** Stamp the row with the latest failure details. Keeps status as
+ *  `pending` so the next delivery can either retry or dead-letter. */
+export async function recordWebhookEventFailure(
+	ctx: { context: { adapter: PluginAdapter } },
+	rowId: string,
+	rawBody: string | null,
+	signatureHeader: string | null,
+	err: unknown,
+): Promise<void> {
+	const lastError = err instanceof Error ? err.message : String(err);
+	await ctx.context.adapter.update({
+		model: WEBHOOK_EVENT_MODEL,
+		update: {
+			processedAt: new Date(),
+			lastError,
+			...(rawBody !== null ? { rawPayload: rawBody } : {}),
+			...(signatureHeader !== null ? { signatureHeader } : {}),
+		},
+		where: [{ field: "id", value: rowId }],
+	});
 }
 
 // StreamPay doesn't guarantee a top-level id on the envelope, so we
@@ -392,7 +519,13 @@ function inferPlanFromItems(sub: SubscriptionDetailed, plans: ResolvedPlans): st
 
 /**
  * Webhook sync entry. Called before userland handlers for every
- * payload. Must be idempotent. Only throws on transient failures —
+ * payload. Idempotent via the `streampayWebhookEvent` state machine:
+ * first delivery inserts a `pending` row, success flips it to
+ * `completed`, repeated failure increments `attemptCount` and
+ * eventually parks the row as `dead_letter` (caller returns 200 so
+ * StreamPay stops retrying — replay is owned by the operator).
+ *
+ * Throws only on transient failures *while a row is still retryable*;
  * permanent bad-data modes log and return so StreamPay stops retrying.
  */
 export async function syncWebhookPayload(
@@ -401,39 +534,58 @@ export async function syncWebhookPayload(
 	client: StreamPayClient,
 	plans: ResolvedPlans,
 	callbacks: SubscriptionCallbacks,
-	options: { dedupe?: boolean } = {},
+	options: {
+		dedupe?: boolean;
+		rawBody?: string | null;
+		signatureHeader?: string | null;
+		maxAttempts?: number;
+	} = {},
 ): Promise<void> {
 	if (payload.entity_type !== "SUBSCRIPTION" && payload.event_type !== "INVOICE_COMPLETED") {
 		return;
 	}
 
 	const dedupe = options.dedupe !== false;
+	const rawBody = options.rawBody ?? null;
+	const signatureHeader = options.signatureHeader ?? null;
+	const maxAttempts = Math.max(1, options.maxAttempts ?? DEFAULT_MAX_WEBHOOK_ATTEMPTS);
+
+	let claim: ClaimAdvanceResult = { action: "process", row: null };
 	if (dedupe) {
-		const claimed = await claimWebhookEvent(ctx, payload);
-		if (!claimed) return;
+		claim = await claimOrAdvanceWebhookEvent(ctx, payload, rawBody, signatureHeader, maxAttempts);
+		if (claim.action === "skip") return;
+		if (claim.action === "dead_letter") {
+			ctx.context.logger.warn(
+				`StreamPay webhook ${payload.event_type} (${claim.row.eventId}) dead-lettered after ${claim.row.attemptCount} attempts. Replay manually.`,
+			);
+			return;
+		}
 	}
+	const trackedRowId = claim.row?.id ?? null;
 
 	try {
 		// INVOICE_COMPLETED → renewal inference (no native SUBSCRIPTION_RENEWED event).
 		if (payload.event_type === "INVOICE_COMPLETED") {
 			await handleInvoiceCompleted(ctx, payload, client, plans, callbacks);
-			return;
+		} else {
+			const { row, stream } = await reconcileFromStreamPay(ctx, payload, client, plans);
+			if (row) {
+				const user = await resolveRowUser(ctx, row);
+				const data: SubscriptionCallbackData = {
+					subscription: row,
+					streampaySubscription: stream,
+					user,
+					event: payload,
+				};
+				await dispatchSubscriptionCallback(ctx, payload, data, callbacks);
+			}
 		}
 
-		const { row, stream } = await reconcileFromStreamPay(ctx, payload, client, plans);
-		if (!row) return;
-
-		const user = await resolveRowUser(ctx, row);
-		const data: SubscriptionCallbackData = {
-			subscription: row,
-			streampaySubscription: stream,
-			user,
-			event: payload,
-		};
-
-		await dispatchSubscriptionCallback(ctx, payload, data, callbacks);
+		if (trackedRowId) await markWebhookEventCompleted(ctx, trackedRowId);
 	} catch (err) {
-		if (dedupe) await releaseWebhookEvent(ctx, payload);
+		if (trackedRowId) {
+			await recordWebhookEventFailure(ctx, trackedRowId, rawBody, signatureHeader, err);
+		}
 		throw err;
 	}
 }

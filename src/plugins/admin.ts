@@ -21,10 +21,14 @@ import { isNotFoundError } from "../utils/ensure-consumer";
 import { toAPIError } from "../utils/errors";
 import { formatStreamPayError } from "../utils/format-error";
 import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
+import type { StreamPayPluginRegistry } from "./subscriptions";
 import {
 	applySubscriptionProjection,
+	markWebhookEventCompleted,
 	type PluginAdapter,
 	syncSubscriptionFromUpstream,
+	WEBHOOK_EVENT_MODEL,
+	type WebhookEventRow,
 } from "./subscriptions/sync";
 
 // Declared structurally (not imported from `better-auth/plugins/admin`)
@@ -959,9 +963,136 @@ function buildPaymentLinksEndpoints(client: StreamPayClient, adminOptions: Admin
 	};
 }
 
+const WebhookEventsListQuery = z
+	.object({
+		status: z.enum(["pending", "completed", "dead_letter"]).optional(),
+		eventType: z.string().optional(),
+		page: z.coerce.number().int().positive().optional(),
+		size: z.coerce.number().int().positive().max(100).optional(),
+	})
+	.passthrough();
+
+function buildWebhookEventsEndpoints(
+	adminOptions: AdminOptions,
+	registry: StreamPayPluginRegistry | undefined,
+) {
+	return {
+		adminListWebhookEvents: createAuthEndpoint(
+			"/admin/streampay/webhook-events",
+			{
+				method: "GET",
+				query: WebhookEventsListQuery,
+				use: [sessionMiddleware],
+			},
+			async (ctx) => {
+				await requireAdmin(ctx, adminOptions);
+				const adapter = getAdapter(ctx);
+				const where: Array<{ field: string; value: unknown }> = [];
+				if (ctx.query.status) where.push({ field: "status", value: ctx.query.status });
+				if (ctx.query.eventType) where.push({ field: "eventType", value: ctx.query.eventType });
+				const page = ctx.query.page ?? 1;
+				const size = ctx.query.size ?? 50;
+				const [items, total] = await Promise.all([
+					adapter.findMany<WebhookEventRow>({
+						model: WEBHOOK_EVENT_MODEL,
+						...(where.length > 0 ? { where } : {}),
+						limit: size,
+						offset: (page - 1) * size,
+						sortBy: { field: "processedAt", direction: "desc" },
+					}),
+					adapter.count({
+						model: WEBHOOK_EVENT_MODEL,
+						...(where.length > 0 ? { where } : {}),
+					}),
+				]);
+				return ctx.json({ items, total, page, size });
+			},
+		),
+
+		adminGetWebhookEvent: createAuthEndpoint(
+			"/admin/streampay/webhook-events/:eventId",
+			{
+				method: "GET",
+				use: [sessionMiddleware],
+			},
+			async (ctx) => {
+				await requireAdmin(ctx, adminOptions);
+				const adapter = getAdapter(ctx);
+				const row = await adapter.findOne({
+					model: WEBHOOK_EVENT_MODEL,
+					where: [{ field: "eventId", value: ctx.params.eventId }],
+				});
+				if (!row) {
+					throw new APIError("NOT_FOUND", {
+						code: $ERROR_CODES.NOT_FOUND.code,
+						message: `Webhook event ${ctx.params.eventId} not found.`,
+					});
+				}
+				return ctx.json(row);
+			},
+		),
+
+		adminReplayWebhookEvent: createAuthEndpoint(
+			"/admin/streampay/webhook-events/:eventId/replay",
+			{
+				method: "POST",
+				disableBody: true,
+				use: [sessionMiddleware],
+			},
+			async (ctx) => {
+				await requireAdmin(ctx, adminOptions);
+				if (!registry?.replayWebhookEvent) {
+					throw new APIError("BAD_REQUEST", {
+						message:
+							"Replay unavailable — `subscriptions()` plugin must be in `use` and `enableWebhookEventTable` left enabled.",
+					});
+				}
+				try {
+					const result = await registry.replayWebhookEvent(ctx, ctx.params.eventId);
+					return ctx.json(result);
+				} catch (err) {
+					if (err instanceof APIError) throw err;
+					toAPIError(
+						`StreamPay replayWebhookEvent failed for event=${ctx.params.eventId}:`,
+						err,
+						ctx.context.logger,
+					);
+				}
+			},
+		),
+
+		adminDiscardWebhookEvent: createAuthEndpoint(
+			"/admin/streampay/webhook-events/:eventId",
+			{
+				method: "DELETE",
+				disableBody: true,
+				use: [sessionMiddleware],
+			},
+			async (ctx) => {
+				await requireAdmin(ctx, adminOptions);
+				const adapter = getAdapter(ctx);
+				const row = await adapter.findOne<{ id: string }>({
+					model: WEBHOOK_EVENT_MODEL,
+					where: [{ field: "eventId", value: ctx.params.eventId }],
+				});
+				if (!row) {
+					throw new APIError("NOT_FOUND", {
+						code: $ERROR_CODES.NOT_FOUND.code,
+						message: `Webhook event ${ctx.params.eventId} not found.`,
+					});
+				}
+				// Flip to `completed` (instead of deleting) so the dedupe gate
+				// still no-ops any future StreamPay re-deliveries.
+				await markWebhookEventCompleted({ context: { adapter } }, row.id);
+				return ctx.json({ discarded: true, eventId: ctx.params.eventId });
+			},
+		),
+	};
+}
+
 export const admin =
 	(adminOptions: AdminOptions = {}) =>
-	(options: StreamPayOptions) => {
+	(options: StreamPayOptions, registry?: StreamPayPluginRegistry) => {
 		const client = options.client;
 		return {
 			endpoints: {
@@ -972,6 +1103,7 @@ export const admin =
 				...buildProductsEndpoints(client, adminOptions),
 				...buildCouponsEndpoints(client, adminOptions),
 				...buildPaymentLinksEndpoints(client, adminOptions),
+				...buildWebhookEventsEndpoints(adminOptions, registry),
 			},
 		};
 	};
