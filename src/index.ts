@@ -16,6 +16,7 @@ export {
 	type AuthorizeReferenceContext,
 	checkLimit,
 	classifyWebhookFailure,
+	type FeatureKey,
 	hasFeature,
 	type LimitCheckResult,
 	PLAN_NAME_METADATA_KEY,

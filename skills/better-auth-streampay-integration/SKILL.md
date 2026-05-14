@@ -171,6 +171,16 @@ touched. Wait for "yes" before editing.
 3. Sign up a test user; confirm `streampayConsumerId` populates (or first checkout populates it, in lazy mode).
 4. If webhooks are on: have the user register `https://<their-host>/api/auth/streampay/webhooks` in the StreamPay dashboard, paste the secret into `STREAMPAY_WEBHOOK_SECRET`, then send a test event from the dashboard. Confirm a 200.
 
+**Local webhook testing.** StreamPay can't reach `localhost`. Expose
+the dev server publicly with one of:
+
+- `cloudflared tunnel --url http://localhost:<port>` (no signup; URL rotates per restart)
+- `ngrok http <port>` (account required; stable URLs on paid plan)
+
+Register the public URL + `/api/auth/streampay/webhooks` in the
+dashboard, then paste the dashboard-shown signing secret into
+`STREAMPAY_WEBHOOK_SECRET`.
+
 ### Step 7 — Wrap up
 
 Send a friendly summary. Cover:

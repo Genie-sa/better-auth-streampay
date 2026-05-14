@@ -273,7 +273,7 @@ Each callback receives `{ subscription, user, streampaySubscription, event }`.
 | `/subscription/freeze`                 | POST   |                                                                  |
 | `/subscription/unfreeze`               | POST   | Ends the active freeze early                                     |
 | `/subscription/list`                   | GET    | Local rows + plan config                                         |
-| `/subscription/current?group=...`      | GET    | Active / frozen / past_due, optional group filter                |
+| `/subscription/current?group=...`      | GET    | Returns `active`/`frozen`/`past_due` only (or `null`). See note below. |
 | `/subscription/has-feature?feature=X`  | GET    | Boolean entitlement                                              |
 | `/subscription/check-limit?feature=X&count=N` | GET | `{ allowed, limit, remaining }`                            |
 
@@ -316,6 +316,18 @@ const flag    = await authClient.hasSubscriptionFeature({ feature: "ai_calls" })
 ### Status values
 
 `incomplete | active | inactive | expired | canceled | frozen | past_due`
+
+> **`/subscription/current` filter semantics**
+>
+> `/subscription/current` intentionally returns only rows whose status is
+> `active`, `frozen`, or `past_due` — i.e. live entitlements. **`incomplete`
+> rows are filtered out.**
+>
+> Practical consequence: between `/subscription/upgrade` (which creates an
+> `incomplete` row and a payment link) and the `SUBSCRIPTION_ACTIVATED`
+> webhook landing, `/subscription/current` returns `null`. If you want to
+> render "your subscription is being activated" during that window, call
+> `/subscription/list` and filter for `status === "incomplete"` in your UI.
 
 - `incomplete` — row pre-created at `/upgrade`, webhook not landed yet.
 - `past_due` — renewal failed. StreamPay keeps `ACTIVE` during dunning; we don't.

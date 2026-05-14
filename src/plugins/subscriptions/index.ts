@@ -2,6 +2,7 @@ import type { GenericEndpointContext } from "better-auth";
 import { APIError } from "better-auth/api";
 import { $ERROR_CODES } from "../../error-codes";
 import type { StreamPayOptions } from "../../types";
+import { getLogger } from "../../utils/logger";
 import type { StreamPayWebhookPayload } from "../../webhooks/events";
 import { buildSubscriptionEndpoints } from "./endpoints";
 import { createPlanResolver, validatePlansShape } from "./plans";
@@ -17,7 +18,13 @@ import {
 } from "./sync";
 import type { StreamPayPlanLike, SubscriptionsOptions } from "./types";
 
-export { checkLimit, hasFeature, type LimitCheckResult, type ResolvedPlans } from "./plans";
+export {
+	checkLimit,
+	type FeatureKey,
+	hasFeature,
+	type LimitCheckResult,
+	type ResolvedPlans,
+} from "./plans";
 export { type SubscriptionSchema, subscriptionSchema } from "./schema";
 export {
 	classifyWebhookFailure,
@@ -111,8 +118,8 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 				} catch (err) {
 					if (classifyWebhookFailure(err) === "PERMANENT") {
 						const msg = err instanceof Error ? err.message : String(err);
-						ctx.context.logger.warn(
-							`StreamPay subscription sync: permanent failure on event=${payload.event_type} entity=${payload.entity_id}: ${msg}`,
+						getLogger(ctx).warn(
+							`subscription sync: permanent failure on event=${payload.event_type} entity=${payload.entity_id}: ${msg}`,
 						);
 						return;
 					}

@@ -13,12 +13,16 @@ import {
 } from "./consumer";
 import { readEnvelope, readSdkErrorFields } from "./error-envelope";
 import { formatStreamPayError } from "./format-error";
+import { getLogger } from "./logger";
 import type { StreamPaySessionUser } from "./session";
 
 export interface StreamPayLoggerContext {
 	context: {
 		logger: {
 			error: (message: string) => void;
+			warn: (message: string) => void;
+			info: (message: string) => void;
+			debug: (message: string) => void;
 		};
 	};
 }
@@ -95,8 +99,8 @@ export async function resolveDuplicateConsumer(
 			return existing.id;
 		}
 
-		context.context.logger.error(
-			`StreamPay duplicate: consumer ${existing.id} is already linked to external_id=${existing.external_id}`,
+		getLogger(context).error(
+			`duplicate: consumer ${existing.id} is already linked to external_id=${existing.external_id}`,
 		);
 		throw new APIError("CONFLICT", {
 			code: "CONSUMER_DUPLICATE_LINKED",
@@ -171,8 +175,8 @@ export async function ensureConsumerForUser(
 				try {
 					await options.client.updateConsumer(reusedId, { external_id: user.id });
 				} catch (backfillErr: unknown) {
-					ctx.context.logger.error(
-						`StreamPay consumer external_id backfill failed for user=${user.id} consumer=${reusedId}: ${formatStreamPayError(backfillErr)}`,
+					getLogger(ctx).error(
+						`consumer external_id backfill failed for user=${user.id} consumer=${reusedId}: ${formatStreamPayError(backfillErr)}`,
 					);
 				}
 				await persistConsumerId(ctx, user.id, reusedId);
@@ -182,8 +186,8 @@ export async function ensureConsumerForUser(
 
 		// Generic user-facing message — SDK strings can carry other users'
 		// identifiers via DUPLICATE_CONSUMER.additional_info.
-		ctx.context.logger.error(
-			`StreamPay consumer creation failed for user=${user.id}: ${formatStreamPayError(err)}`,
+		getLogger(ctx).error(
+			`consumer creation failed for user=${user.id}: ${formatStreamPayError(err)}`,
 		);
 		throw new APIError("INTERNAL_SERVER_ERROR", {
 			message: "StreamPay consumer provisioning failed. Please try again.",
@@ -202,8 +206,8 @@ async function persistConsumerId(
 		});
 	} catch (err: unknown) {
 		// Consumer is live in StreamPay; next call recovers via findByExternalId.
-		ctx.context.logger.error(
-			`StreamPay consumer link write failed for user=${userId}: ${formatStreamPayError(err)}`,
+		getLogger(ctx).error(
+			`consumer link write failed for user=${userId}: ${formatStreamPayError(err)}`,
 		);
 	}
 }

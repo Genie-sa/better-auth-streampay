@@ -43,6 +43,9 @@ function createHookContext(): StreamPayHookContext {
 		context: {
 			logger: {
 				error: () => {},
+				warn: () => {},
+				info: () => {},
+				debug: () => {},
 			},
 		},
 	};

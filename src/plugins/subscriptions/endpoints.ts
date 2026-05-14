@@ -13,6 +13,7 @@ import type { StreamPayOptions } from "../../types";
 import { StreamPayAmount } from "../../utils/amount";
 import { ensureConsumerForUser } from "../../utils/ensure-consumer";
 import { toAPIError } from "../../utils/errors";
+import { getLogger } from "../../utils/logger";
 import { asSessionUser, type StreamPaySessionUser } from "../../utils/session";
 import { checkLimit, hasFeature, type ResolvedPlans } from "./plans";
 import { type PluginAdapter, syncSubscriptionFromUpstream } from "./sync";
@@ -301,18 +302,16 @@ export function buildSubscriptionEndpoints(
 				} catch (err) {
 					toAPIError(
 						{
-							logPrefix: `StreamPay upgradeSubscription failed for plan=${plan.name} ref=${referenceId}:`,
+							logPrefix: `upgradeSubscription failed for plan=${plan.name} ref=${referenceId}:`,
 							userMessage: "Failed to start subscription checkout.",
 						},
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 
 				if (!url) {
-					ctx.context.logger.error(
-						`StreamPay createPaymentLink returned link=${paymentLinkId} with no url.`,
-					);
+					getLogger(ctx).error(`createPaymentLink returned link=${paymentLinkId} with no url.`);
 					throw new APIError("INTERNAL_SERVER_ERROR", {
 						message: "Payment link was created but no URL was returned.",
 					});
@@ -433,9 +432,9 @@ export function buildSubscriptionEndpoints(
 					return ctx.json({ subscription: updated ?? row, synced: true });
 				} catch (err) {
 					toAPIError(
-						`StreamPay subscriptionSuccess fallback sync failed for row=${row.id}:`,
+						`subscriptionSuccess fallback sync failed for row=${row.id}:`,
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -502,11 +501,11 @@ export function buildSubscriptionEndpoints(
 					} catch (err) {
 						toAPIError(
 							{
-								logPrefix: `StreamPay cancelAtPeriodEnd failed for row=${row.id}:`,
+								logPrefix: `cancelAtPeriodEnd failed for row=${row.id}:`,
 								userMessage: "Subscription cancel-at-period-end failed.",
 							},
 							err,
-							ctx.context.logger,
+							getLogger(ctx),
 						);
 					}
 				}
@@ -521,18 +520,18 @@ export function buildSubscriptionEndpoints(
 						client,
 						adapter,
 						row.streampaySubscriptionId,
-						ctx.context.logger,
+						getLogger(ctx),
 						"cancelSubscription",
 					);
 					return ctx.json(result);
 				} catch (err) {
 					toAPIError(
 						{
-							logPrefix: `StreamPay cancelSubscription failed for row=${row.id}:`,
+							logPrefix: `cancelSubscription failed for row=${row.id}:`,
 							userMessage: "Subscription cancellation failed.",
 						},
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -625,7 +624,7 @@ export function buildSubscriptionEndpoints(
 							client,
 							adapter,
 							row.streampaySubscriptionId,
-							ctx.context.logger,
+							getLogger(ctx),
 							"changeSubscriptionPlan",
 						);
 						return ctx.json({
@@ -636,11 +635,11 @@ export function buildSubscriptionEndpoints(
 					} catch (err) {
 						toAPIError(
 							{
-								logPrefix: `StreamPay change-plan (immediate) failed for row=${row.id}:`,
+								logPrefix: `change-plan (immediate) failed for row=${row.id}:`,
 								userMessage: "Plan change failed.",
 							},
 							err,
-							ctx.context.logger,
+							getLogger(ctx),
 						);
 					}
 				}
@@ -721,11 +720,11 @@ export function buildSubscriptionEndpoints(
 				} catch (err) {
 					toAPIError(
 						{
-							logPrefix: `StreamPay change-plan (at_period_end) failed for row=${row.id}:`,
+							logPrefix: `change-plan (at_period_end) failed for row=${row.id}:`,
 							userMessage: "Plan change scheduling failed.",
 						},
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -777,18 +776,18 @@ export function buildSubscriptionEndpoints(
 						client,
 						adapter,
 						row.streampaySubscriptionId,
-						ctx.context.logger,
+						getLogger(ctx),
 						"freezeSubscription",
 					);
 					return ctx.json(freeze);
 				} catch (err) {
 					toAPIError(
 						{
-							logPrefix: `StreamPay freezeSubscription failed for row=${row.id}:`,
+							logPrefix: `freezeSubscription failed for row=${row.id}:`,
 							userMessage: "Subscription freeze failed.",
 						},
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -856,18 +855,18 @@ export function buildSubscriptionEndpoints(
 						client,
 						adapter,
 						row.streampaySubscriptionId,
-						ctx.context.logger,
+						getLogger(ctx),
 						"unfreezeSubscription",
 					);
 					return ctx.json({ unfrozen: true });
 				} catch (err) {
 					toAPIError(
 						{
-							logPrefix: `StreamPay unfreezeSubscription failed for row=${row.id}:`,
+							logPrefix: `unfreezeSubscription failed for row=${row.id}:`,
 							userMessage: "Subscription unfreeze failed.",
 						},
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -896,6 +895,23 @@ export function buildSubscriptionEndpoints(
 			},
 		),
 
+		/**
+		 * Returns the user's current billable subscription, or `null` if
+		 * none. **Intentionally filters out `incomplete`, `canceled`,
+		 * `expired`, and `inactive` rows** — only `active | frozen |
+		 * past_due` are surfaced, since those are the statuses that
+		 * represent a *live* entitlement.
+		 *
+		 * Notable consequence: between `/subscription/upgrade` (creates
+		 * an `incomplete` row + payment link) and the
+		 * `SUBSCRIPTION_ACTIVATED` webhook landing, this endpoint
+		 * returns `null`. If you want to render "your subscription is
+		 * being activated" during that window, call `/subscription/list`
+		 * and filter for `status === "incomplete"` yourself.
+		 *
+		 * Pass `?group=<name>` to scope to a single plan group when the
+		 * app declares multiple concurrent subscriptions per user.
+		 */
 		currentSubscription: createAuthEndpoint(
 			"/subscription/current",
 			{
