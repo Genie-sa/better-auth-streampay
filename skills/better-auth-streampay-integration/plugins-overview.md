@@ -60,6 +60,30 @@ startup and throws on duplicates or missing fields.
 **Skip it when**: subs are handled outside the app and you only need
 to react to webhook events.
 
+**Important — `mode: "immediate"` on `/subscription/change-plan` does
+NOT bill immediately.** It swaps the StreamPay subscription's items
+NOW but generates no proration invoice. The customer keeps paying
+the old price for the current cycle; the new price kicks in at the
+next renewal. If the user cancels-at-period-end before that
+renewal, the upgrade is effectively free. Wire the literal
+`"immediate"` only when this behavior is what you actually want —
+otherwise default to `"at_period_end"`.
+
+**Typed feature gates**: declare your plan's `limits` shape and
+`hasFeature` / `checkLimit` narrow the `feature` argument to the
+literal keys you defined — typos fail at compile time.
+
+```ts
+type Limits = { maxSeats: number; aiAccess: boolean }
+const plans = [
+  { name: "pro", productId, priceHalalat, billingInterval: "MONTH",
+    limits: { maxSeats: 5, aiAccess: true } satisfies Limits },
+] as const satisfies readonly StreamPayPlan<Limits>[]
+
+hasFeature(sub, plan, "aiAccess")     // ok
+hasFeature(sub, plan, "aiAcess")      // compile error
+```
+
 ## Admin / back-office — `admin()`
 
 **Plain English**: "Internal-only endpoints for support staff and ops

@@ -20,6 +20,7 @@ import type { StreamPayClient, StreamPayOptions } from "../types";
 import { isNotFoundError } from "../utils/ensure-consumer";
 import { toAPIError } from "../utils/errors";
 import { formatStreamPayError } from "../utils/format-error";
+import { getLogger } from "../utils/logger";
 import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
 import type { StreamPayPluginRegistry } from "./subscriptions";
 import {
@@ -168,7 +169,7 @@ function buildPaymentsEndpoints(client: StreamPayClient, adminOptions: AdminOpti
 							userMessage: "StreamPay refund failed.",
 						},
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -191,7 +192,7 @@ function buildPaymentsEndpoints(client: StreamPayClient, adminOptions: AdminOpti
 					const response = await client.listPayments(params);
 					return ctx.json(response);
 				} catch (err) {
-					toAPIError("StreamPay listPayments failed.", err, ctx.context.logger);
+					toAPIError("StreamPay listPayments failed.", err, getLogger(ctx));
 				}
 			},
 		),
@@ -211,7 +212,7 @@ function buildPaymentsEndpoints(client: StreamPayClient, adminOptions: AdminOpti
 					toAPIError(
 						`StreamPay getPayment failed for payment=${ctx.params.id}:`,
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -235,7 +236,7 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 					const subscription = await client.createSubscription(input);
 					return ctx.json(subscription);
 				} catch (err) {
-					toAPIError("StreamPay createSubscription failed.", err, ctx.context.logger);
+					toAPIError("StreamPay createSubscription failed.", err, getLogger(ctx));
 				}
 			},
 		),
@@ -260,7 +261,7 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 						toAPIError(
 							`StreamPay getSubscription failed for subscription=${subscriptionId}:`,
 							err,
-							ctx.context.logger,
+							getLogger(ctx),
 						);
 					}
 					await adminOptions.onPlanChange({ user, subscriptionId, current, patch });
@@ -271,7 +272,7 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 					await applySubscriptionProjection(
 						getAdapter(ctx),
 						subscription,
-						ctx.context.logger,
+						getLogger(ctx),
 						"adminUpdateSubscription",
 					);
 					return ctx.json(subscription);
@@ -279,7 +280,7 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 					toAPIError(
 						`StreamPay updateSubscription failed for subscription=${subscriptionId}:`,
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -301,7 +302,7 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 					const response = await client.listSubscriptions(params);
 					return ctx.json(response);
 				} catch (err) {
-					toAPIError("StreamPay listSubscriptions failed.", err, ctx.context.logger);
+					toAPIError("StreamPay listSubscriptions failed.", err, getLogger(ctx));
 				}
 			},
 		),
@@ -321,7 +322,7 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 					toAPIError(
 						`StreamPay getSubscription failed for subscription=${ctx.params.id}:`,
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -351,7 +352,7 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 					await applySubscriptionProjection(
 						getAdapter(ctx),
 						result,
-						ctx.context.logger,
+						getLogger(ctx),
 						"adminCancelSubscription",
 					);
 					return ctx.json(result);
@@ -362,7 +363,7 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 							userMessage: "StreamPay subscription cancellation failed.",
 						},
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -390,7 +391,7 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 						client,
 						getAdapter(ctx),
 						subscriptionId,
-						ctx.context.logger,
+						getLogger(ctx),
 						"adminFreezeSubscription",
 					);
 					return ctx.json(freeze);
@@ -401,7 +402,7 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 							userMessage: "StreamPay subscription freeze failed.",
 						},
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -428,7 +429,7 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 					toAPIError(
 						`StreamPay listSubscriptionFreezes failed for subscription=${ctx.params.id}:`,
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -458,7 +459,7 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 						client,
 						getAdapter(ctx),
 						subscriptionId,
-						ctx.context.logger,
+						getLogger(ctx),
 						"adminUpdateSubscriptionFreeze",
 					);
 					return ctx.json(freeze);
@@ -469,7 +470,7 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 							userMessage: "StreamPay freeze update failed.",
 						},
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -500,7 +501,7 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 						client,
 						getAdapter(ctx),
 						subscriptionId,
-						ctx.context.logger,
+						getLogger(ctx),
 						"adminDeleteSubscriptionFreeze",
 					);
 					return ctx.json({ deleted: true });
@@ -511,7 +512,7 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 							userMessage: "StreamPay freeze delete failed.",
 						},
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -538,7 +539,7 @@ function buildConsumersEndpoints(client: StreamPayClient, adminOptions: AdminOpt
 					const response = await client.listConsumers(params);
 					return ctx.json(response);
 				} catch (err) {
-					toAPIError("StreamPay listConsumers failed.", err, ctx.context.logger);
+					toAPIError("StreamPay listConsumers failed.", err, getLogger(ctx));
 				}
 			},
 		),
@@ -558,7 +559,7 @@ function buildConsumersEndpoints(client: StreamPayClient, adminOptions: AdminOpt
 					toAPIError(
 						`StreamPay getConsumer failed for consumer=${ctx.params.id}:`,
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -582,7 +583,7 @@ function buildConsumersEndpoints(client: StreamPayClient, adminOptions: AdminOpt
 					toAPIError(
 						`StreamPay updateConsumer failed for consumer=${consumerId}:`,
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -612,7 +613,7 @@ function buildConsumersEndpoints(client: StreamPayClient, adminOptions: AdminOpt
 					toAPIError(
 						`StreamPay getConsumer failed for consumer=${consumerId}:`,
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 
@@ -624,7 +625,7 @@ function buildConsumersEndpoints(client: StreamPayClient, adminOptions: AdminOpt
 						toAPIError(
 							`StreamPay deleteConsumer failed for consumer=${consumerId}:`,
 							err,
-							ctx.context.logger,
+							getLogger(ctx),
 						);
 					}
 				}
@@ -637,7 +638,7 @@ function buildConsumersEndpoints(client: StreamPayClient, adminOptions: AdminOpt
 					} catch (err: unknown) {
 						// User row gone / DB write failed. Don't surface as 500
 						// — the StreamPay delete already succeeded.
-						ctx.context.logger.error(
+						getLogger(ctx).error(
 							`StreamPay admin delete: link clear failed for user=${externalId} consumer=${consumerId}: ${formatStreamPayError(err)}`,
 						);
 					}
@@ -667,7 +668,7 @@ function buildInvoicesEndpoints(client: StreamPayClient, adminOptions: AdminOpti
 					const response = await client.listInvoices(params);
 					return ctx.json(response);
 				} catch (err) {
-					toAPIError("StreamPay listInvoices failed.", err, ctx.context.logger);
+					toAPIError("StreamPay listInvoices failed.", err, getLogger(ctx));
 				}
 			},
 		),
@@ -687,7 +688,7 @@ function buildInvoicesEndpoints(client: StreamPayClient, adminOptions: AdminOpti
 					toAPIError(
 						`StreamPay getInvoice failed for invoice=${ctx.params.id}:`,
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -711,7 +712,7 @@ function buildProductsEndpoints(client: StreamPayClient, adminOptions: AdminOpti
 					const product = await client.createProduct(input);
 					return ctx.json(product);
 				} catch (err) {
-					toAPIError("StreamPay createProduct failed.", err, ctx.context.logger);
+					toAPIError("StreamPay createProduct failed.", err, getLogger(ctx));
 				}
 			},
 		),
@@ -732,7 +733,7 @@ function buildProductsEndpoints(client: StreamPayClient, adminOptions: AdminOpti
 					const response = await client.listProducts(params);
 					return ctx.json(response);
 				} catch (err) {
-					toAPIError("StreamPay listProducts failed.", err, ctx.context.logger);
+					toAPIError("StreamPay listProducts failed.", err, getLogger(ctx));
 				}
 			},
 		),
@@ -752,7 +753,7 @@ function buildProductsEndpoints(client: StreamPayClient, adminOptions: AdminOpti
 					toAPIError(
 						`StreamPay getProduct failed for product=${ctx.params.id}:`,
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -776,7 +777,7 @@ function buildProductsEndpoints(client: StreamPayClient, adminOptions: AdminOpti
 					toAPIError(
 						`StreamPay updateProduct failed for product=${productId}:`,
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -798,7 +799,7 @@ function buildProductsEndpoints(client: StreamPayClient, adminOptions: AdminOpti
 					toAPIError(
 						`StreamPay deleteProduct failed for product=${ctx.params.id}:`,
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -822,7 +823,7 @@ function buildCouponsEndpoints(client: StreamPayClient, adminOptions: AdminOptio
 					const coupon = await client.createCoupon(input);
 					return ctx.json(coupon);
 				} catch (err) {
-					toAPIError("StreamPay createCoupon failed.", err, ctx.context.logger);
+					toAPIError("StreamPay createCoupon failed.", err, getLogger(ctx));
 				}
 			},
 		),
@@ -843,7 +844,7 @@ function buildCouponsEndpoints(client: StreamPayClient, adminOptions: AdminOptio
 					const response = await client.listCoupons(params);
 					return ctx.json(response);
 				} catch (err) {
-					toAPIError("StreamPay listCoupons failed.", err, ctx.context.logger);
+					toAPIError("StreamPay listCoupons failed.", err, getLogger(ctx));
 				}
 			},
 		),
@@ -863,7 +864,7 @@ function buildCouponsEndpoints(client: StreamPayClient, adminOptions: AdminOptio
 					toAPIError(
 						`StreamPay getCoupon failed for coupon=${ctx.params.id}:`,
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -884,11 +885,7 @@ function buildCouponsEndpoints(client: StreamPayClient, adminOptions: AdminOptio
 					const coupon = await client.updateCoupon(couponId, patch);
 					return ctx.json(coupon);
 				} catch (err) {
-					toAPIError(
-						`StreamPay updateCoupon failed for coupon=${couponId}:`,
-						err,
-						ctx.context.logger,
-					);
+					toAPIError(`StreamPay updateCoupon failed for coupon=${couponId}:`, err, getLogger(ctx));
 				}
 			},
 		),
@@ -909,7 +906,7 @@ function buildCouponsEndpoints(client: StreamPayClient, adminOptions: AdminOptio
 					toAPIError(
 						`StreamPay deleteCoupon failed for coupon=${ctx.params.id}:`,
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -935,7 +932,7 @@ function buildPaymentLinksEndpoints(client: StreamPayClient, adminOptions: Admin
 					const response = await client.listPaymentLinks(params);
 					return ctx.json(response);
 				} catch (err) {
-					toAPIError("StreamPay listPaymentLinks failed.", err, ctx.context.logger);
+					toAPIError("StreamPay listPaymentLinks failed.", err, getLogger(ctx));
 				}
 			},
 		),
@@ -955,7 +952,7 @@ function buildPaymentLinksEndpoints(client: StreamPayClient, adminOptions: Admin
 					toAPIError(
 						`StreamPay getPaymentLink failed for payment_link=${ctx.params.id}:`,
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},
@@ -1055,7 +1052,7 @@ function buildWebhookEventsEndpoints(
 					toAPIError(
 						`StreamPay replayWebhookEvent failed for event=${ctx.params.eventId}:`,
 						err,
-						ctx.context.logger,
+						getLogger(ctx),
 					);
 				}
 			},

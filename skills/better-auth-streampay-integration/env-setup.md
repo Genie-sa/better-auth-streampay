@@ -56,6 +56,23 @@ provider.
 - Rotate from the dashboard when teammates leave
 - Use a different API key for sandbox and production (and pair sandbox with `STREAMPAY_BASE_URL` if your environment requires it)
 
+## Loading env before `@better-auth/cli generate`
+
+The CLI imports the auth file, which usually validates env at
+module-load time (via `@t3-oss/env-core`, `envsafe`, or similar). If
+the env isn't in the process when the CLI runs, the import throws
+before the CLI can even read the config.
+
+Source the env file into the shell first:
+
+```
+set -a; source apps/server/.env; set +a
+npx @better-auth/cli generate --config apps/server/src/auth.ts
+```
+
+Same trick works for `migrate`. Skip this only when the auth file
+has no env validator.
+
 ## Quick sanity check
 
 After setting the API key:

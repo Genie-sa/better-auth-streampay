@@ -9,6 +9,7 @@ import {
 	type StreamPayLoggerContext,
 } from "../utils/ensure-consumer";
 import { formatStreamPayError } from "../utils/format-error";
+import { getLogger } from "../utils/logger";
 import { asSessionUser } from "../utils/session";
 
 export type StreamPayHookContext = StreamPayLoggerContext;
@@ -89,8 +90,8 @@ export const onBeforeUserCreate =
 
 			// Generic user-facing message — SDK strings can contain other
 			// users' identifiers via DUPLICATE_CONSUMER.additional_info.
-			context.context.logger.error(
-				`StreamPay consumer creation failed for user=${user.id ?? "<pre-insert>"}: ${formatStreamPayError(err)}`,
+			getLogger(context).error(
+				`consumer creation failed for user=${user.id ?? "<pre-insert>"}: ${formatStreamPayError(err)}`,
 			);
 			throw new APIError("INTERNAL_SERVER_ERROR", {
 				message: "StreamPay consumer provisioning failed. Please try again.",
@@ -112,8 +113,8 @@ export const onAfterUserCreate =
 				external_id: sessionUser.id,
 			});
 		} catch (err: unknown) {
-			context.context.logger.error(
-				`StreamPay consumer external_id link failed for user=${sessionUser.id} consumer=${sessionUser.streampayConsumerId}: ${formatStreamPayError(err)}`,
+			getLogger(context).error(
+				`consumer external_id link failed for user=${sessionUser.id} consumer=${sessionUser.streampayConsumerId}: ${formatStreamPayError(err)}`,
 			);
 		}
 	};
@@ -153,8 +154,8 @@ export const onUserUpdate =
 			await options.client.updateConsumer(sessionUser.streampayConsumerId, patch);
 		} catch (err: unknown) {
 			if (isNotFoundError(err)) {
-				context.context.logger.error(
-					`StreamPay consumer ${sessionUser.streampayConsumerId} not found for user=${sessionUser.id}; clearing stale link for re-provisioning.`,
+				getLogger(context).error(
+					`consumer ${sessionUser.streampayConsumerId} not found for user=${sessionUser.id}; clearing stale link for re-provisioning.`,
 				);
 				if (hasInternalAdapter(context)) {
 					try {
@@ -162,15 +163,15 @@ export const onUserUpdate =
 							streampayConsumerId: null,
 						});
 					} catch (clearErr: unknown) {
-						context.context.logger.error(
-							`StreamPay stale-link clear failed for user=${sessionUser.id}: ${formatStreamPayError(clearErr)}`,
+						getLogger(context).error(
+							`stale-link clear failed for user=${sessionUser.id}: ${formatStreamPayError(clearErr)}`,
 						);
 					}
 				}
 				return;
 			}
-			context.context.logger.error(
-				`StreamPay consumer update failed for user=${sessionUser.id} consumer=${sessionUser.streampayConsumerId}: ${formatStreamPayError(err)}`,
+			getLogger(context).error(
+				`consumer update failed for user=${sessionUser.id} consumer=${sessionUser.streampayConsumerId}: ${formatStreamPayError(err)}`,
 			);
 		}
 	};
@@ -189,8 +190,8 @@ export const onUserDelete =
 		} catch (err: unknown) {
 			// 404 = already gone; desired end state reached.
 			if (isNotFoundError(err)) return;
-			context.context.logger.error(
-				`StreamPay consumer delete failed for user=${sessionUser.id} consumer=${sessionUser.streampayConsumerId}: ${formatStreamPayError(err)}`,
+			getLogger(context).error(
+				`consumer delete failed for user=${sessionUser.id} consumer=${sessionUser.streampayConsumerId}: ${formatStreamPayError(err)}`,
 			);
 		}
 	};

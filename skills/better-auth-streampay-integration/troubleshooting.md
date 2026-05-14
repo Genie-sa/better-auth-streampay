@@ -133,3 +133,51 @@ StreamPay redelivers on timeout AND on some transient errors.
 Plugin needs `better-auth ^1.4.0` and `zod ^3.24 || ^4.0`. Older
 `better-auth` will break — ask the user to upgrade Better Auth
 first.
+
+## `/subscription/current` returns `null` right after upgrade
+
+**What's happening**: the endpoint intentionally filters to live
+entitlements — only `active | frozen | past_due`. Between
+`/subscription/upgrade` (creates the `incomplete` row + payment link)
+and the `SUBSCRIPTION_ACTIVATED` webhook landing, the row is
+`incomplete` and is hidden from `/subscription/current`.
+
+**Fix**: if the UI needs to render "your subscription is being
+activated" during the gap, call `/subscription/list` and filter for
+`status === "incomplete"` yourself. Don't change the
+`/subscription/current` shape.
+
+## Known sandbox quirks
+
+These bite every new integrator on StreamPay's sandbox. Mention them
+proactively when the user is setting up dev.
+
+- **Consumer email lock**: sandbox refuses consumer creation for
+  emails that don't match the org-owner's email. Symptom: `400
+  DUPLICATE_CONSUMER` or `CONSUMER_CREATE_FAILED` on signup with
+  arbitrary test emails. Fix: sign up with the org-owner email for
+  the first happy-path test, OR run `claimExistingConsumerBy:
+  ["email"]` if a stranded sandbox consumer is in the way.
+- **Stranded consumers persist across test sessions**: deleting the
+  Better Auth user does NOT delete the StreamPay consumer. Retrying
+  signup with the same email hits `DUPLICATE_CONSUMER`. Either delete
+  the consumer from the StreamPay dashboard or enable
+  `claimExistingConsumerBy`.
+- **`cancel_at_period_end` is a one-way door**: StreamPay's API
+  doesn't expose an "unschedule" action. Once a sub is scheduled to
+  cancel at period end, you can't promote it back to "renew" via API
+  — the only escape is letting it expire then re-upgrading. Set
+  expectations with the user before they wire a cancel UI.
+- **Sandbox subscription state survives restarts**: don't assume a
+  fresh DB means a fresh upstream. Always query StreamPay
+  (`listSubscriptions`) for the consumer when debugging "why is my
+  signup blocked".
+
+## Filtering plugin logs
+
+Every line the plugin emits is prefixed with `[streampay]` (inside
+Better Auth's outer `[Better Auth]:` wrapper). A single regex on
+`\[streampay\]` catches every plugin log line regardless of level.
+
+Useful when piping dev logs through `grep` or wiring a structured
+log filter in production.

@@ -66,6 +66,13 @@ export const auth = betterAuth({
   plugins: [
     streampay({
       client: streamPayClient,
+      // Leaving `createConsumerOnSignUp` unset means the consumer is
+      // created lazily on the user's first paid action (checkout /
+      // upgrade). Set `true` ONLY when your org's consumer-creation
+      // path is reliable AND you accept that signup will fail if
+      // StreamPay rejects the create call — sandbox email lock,
+      // regional policy, or a transient outage will then block
+      // account creation entirely.
       // createConsumerOnSignUp: true,
       // claimExistingConsumerBy: ["email"],
       // getConsumerCreateParams: async ({ user }, request) => ({ /* ... */ }),

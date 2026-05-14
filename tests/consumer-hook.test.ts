@@ -407,7 +407,7 @@ describe("consumer hooks", () => {
 			await expect(invokeHook(onAfterUserCreate(options), user, ctx)).resolves.toBeUndefined();
 
 			expect(ctx.context.logger.error).toHaveBeenCalledWith(
-				expect.stringContaining("StreamPay consumer external_id link failed"),
+				expect.stringContaining("[streampay] consumer external_id link failed"),
 			);
 		});
 
@@ -557,7 +557,7 @@ describe("consumer hooks", () => {
 
 			await expect(invokeHook(onUserUpdate(options), user, ctx)).resolves.toBeUndefined();
 			expect(ctx.context.logger.error).toHaveBeenCalledWith(
-				expect.stringContaining("StreamPay consumer update failed"),
+				expect.stringContaining("[streampay] consumer update failed"),
 			);
 			expect(mockClient.updateConsumer).not.toHaveBeenCalled();
 			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
@@ -630,7 +630,7 @@ describe("consumer hooks", () => {
 
 			await expect(invokeHook(onUserDelete(options), user, ctx)).resolves.toBeUndefined();
 			expect(ctx.context.logger.error).toHaveBeenCalledWith(
-				expect.stringContaining("StreamPay consumer delete failed"),
+				expect.stringContaining("[streampay] consumer delete failed"),
 			);
 		});
 

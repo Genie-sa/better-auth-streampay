@@ -97,11 +97,23 @@ export function createPlanResolver(plans: PlansInput | undefined): () => Promise
 	};
 }
 
+/**
+ * Narrow `feature` to the literal keys of `plan.limits` when the caller
+ * passes a typed plan (e.g. `StreamPayPlan<{ maxEvents: number }>`).
+ * Falls back to `string` for the widened `StreamPayPlanLike` so existing
+ * call sites keep compiling without changes.
+ */
+export type FeatureKey<P> = P extends { limits?: infer L }
+	? L extends Record<string, unknown>
+		? Extract<keyof L, string>
+		: string
+	: string;
+
 /** Returns `false` for non-active/frozen subs so expired plans can't leak entitlements. */
-export function hasFeature(
+export function hasFeature<P extends StreamPayPlanLike>(
 	subscription: Subscription,
-	plan: StreamPayPlanLike | undefined,
-	feature: string,
+	plan: P | undefined,
+	feature: FeatureKey<P>,
 ): boolean {
 	if (!plan?.limits) return false;
 	if (subscription.status !== "active" && subscription.status !== "frozen") return false;
@@ -118,10 +130,10 @@ export interface LimitCheckResult {
 }
 
 /** Numeric-only quota check. Use `hasFeature` for binary gates. */
-export function checkLimit(
+export function checkLimit<P extends StreamPayPlanLike>(
 	subscription: Subscription,
-	plan: StreamPayPlanLike | undefined,
-	feature: string,
+	plan: P | undefined,
+	feature: FeatureKey<P>,
 	requested: number,
 ): LimitCheckResult {
 	if (!plan?.limits || (subscription.status !== "active" && subscription.status !== "frozen")) {

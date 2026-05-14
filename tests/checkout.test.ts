@@ -199,7 +199,7 @@ describe("checkout plugin", () => {
 
 			await expect(handler(ctx)).rejects.toThrow(/StreamPay checkout creation failed/);
 			expect(ctx.context.logger.error).toHaveBeenCalledWith(
-				expect.stringContaining("StreamPay checkout creation failed"),
+				expect.stringContaining("[streampay] checkout creation failed"),
 			);
 		});
 

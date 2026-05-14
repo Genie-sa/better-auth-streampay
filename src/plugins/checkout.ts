@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { StreamPayOptions, StreamPayProduct } from "../types";
 import { type EnsureConsumerContext, ensureConsumerForUser } from "../utils/ensure-consumer";
 import { toAPIError } from "../utils/errors";
+import { getLogger } from "../utils/logger";
 import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
 
 export interface CheckoutOptions {
@@ -214,11 +215,11 @@ export const checkout =
 						} catch (err) {
 							toAPIError(
 								{
-									logPrefix: "StreamPay checkout creation failed:",
+									logPrefix: "checkout creation failed:",
 									userMessage: "StreamPay checkout creation failed.",
 								},
 								err,
-								ctx.context.logger,
+								getLogger(ctx),
 							);
 						}
 					},

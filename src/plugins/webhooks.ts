@@ -1,5 +1,6 @@
 import { APIError, createAuthEndpoint } from "better-auth/api";
 import type { StreamPayOptions } from "../types";
+import { getLogger } from "../utils/logger";
 import { dispatchWebhook, type WebhookHandlers } from "../webhooks/dispatcher";
 import type { StreamPayWebhookPayload } from "../webhooks/events";
 import { StreamPayWebhookError, verifyWebhookOrThrow } from "../webhooks/verify";
@@ -41,10 +42,11 @@ export const webhooks =
 						cloneRequest: true,
 					},
 					async (ctx) => {
+						const logger = getLogger(ctx);
 						const hasSecret =
 							typeof secret === "string" ? secret.length > 0 : secret.some((s) => s.length > 0);
 						if (!hasSecret) {
-							ctx.context.logger.error("StreamPay webhook secret is not configured.");
+							logger.error("webhook secret is not configured.");
 							throw new APIError("INTERNAL_SERVER_ERROR", {
 								message: "StreamPay webhook secret is not configured.",
 							});
@@ -65,7 +67,7 @@ export const webhooks =
 							});
 						} catch (err: unknown) {
 							if (err instanceof StreamPayWebhookError) {
-								ctx.context.logger.warn(`StreamPay webhook rejected: ${err.reason}`);
+								logger.warn(`webhook rejected: ${err.reason}`);
 								throw new APIError(toErrorCode(err.reason), {
 									message: `Webhook verification failed: ${err.reason}`,
 								});
@@ -100,7 +102,7 @@ export const webhooks =
 								});
 							} catch (err: unknown) {
 								const message = err instanceof Error ? err.message : String(err);
-								ctx.context.logger.error(`StreamPay subscription sync failed: ${message}`);
+								logger.error(`subscription sync failed: ${message}`);
 								throw new APIError("INTERNAL_SERVER_ERROR", {
 									message: "Webhook sync failed. See server logs.",
 								});
@@ -111,7 +113,7 @@ export const webhooks =
 							await dispatchWebhook(payload, handlers);
 						} catch (err: unknown) {
 							const message = err instanceof Error ? err.message : String(err);
-							ctx.context.logger.error(`StreamPay webhook handler failed: ${message}`);
+							logger.error(`webhook handler failed: ${message}`);
 							throw new APIError("INTERNAL_SERVER_ERROR", {
 								message: "Webhook handler failed. See server logs.",
 							});

@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { StreamPayClient } from "../../types";
 import { StreamPayAmount } from "../../utils/amount";
 import { readSdkErrorFields } from "../../utils/error-envelope";
+import { type ScopedLogger, scopedLogger } from "../../utils/logger";
 import { asSessionUser, type StreamPaySessionUser } from "../../utils/session";
 import type { StreamPayWebhookData, StreamPayWebhookPayload } from "../../webhooks/events";
 import type { ResolvedPlans } from "./plans";
@@ -66,6 +67,10 @@ export interface SyncContext {
 const SUBSCRIPTION_MODEL = "subscription";
 export const WEBHOOK_EVENT_MODEL = "streampayWebhookEvent";
 
+function logger(ctx: SyncContext): ScopedLogger {
+	return scopedLogger(ctx.context.logger);
+}
+
 /**
  * Default cap on per-event delivery attempts before the row is parked
  * as `dead_letter`. Tuned for StreamPay's at-least-once retry budget
@@ -91,13 +96,28 @@ export interface WebhookEventRow {
 }
 
 // Adapters emit different shapes: Prisma P2002, Postgres 23505,
-// better-sqlite3 SQLITE_CONSTRAINT_UNIQUE. Check a few known markers.
-function isUniqueConstraintError(err: unknown): boolean {
+// better-sqlite3 / libsql SQLITE_CONSTRAINT_UNIQUE. Drizzle wraps the
+// driver's error in `DrizzleQueryError` and re-emits a generic "Failed
+// query: …" message with `code` undefined on the outer — the real code
+// is on `cause`. Walk the chain so the dedupe path catches it.
+const MAX_CAUSE_DEPTH = 5;
+
+function matchesUniqueMarker(err: unknown): boolean {
 	if (!err || typeof err !== "object") return false;
 	const message = "message" in err && typeof err.message === "string" ? err.message : "";
 	if (/unique/i.test(message) || /duplicate/i.test(message)) return true;
 	const code = "code" in err && typeof err.code === "string" ? err.code : "";
 	return code === "P2002" || code === "23505" || code === "SQLITE_CONSTRAINT_UNIQUE";
+}
+
+function isUniqueConstraintError(err: unknown): boolean {
+	let current: unknown = err;
+	for (let depth = 0; depth <= MAX_CAUSE_DEPTH; depth++) {
+		if (matchesUniqueMarker(current)) return true;
+		if (!current || typeof current !== "object" || !("cause" in current)) return false;
+		current = (current as { cause?: unknown }).cause;
+	}
+	return false;
 }
 
 /**
@@ -133,8 +153,8 @@ export async function claimOrAdvanceWebhookEvent(
 ): Promise<ClaimAdvanceResult> {
 	const eventId = extractEventId(payload);
 	if (!eventId) {
-		ctx.context.logger.warn(
-			`StreamPay webhook ${payload.event_type}: missing entity_id/timestamp — processing without dedupe.`,
+		logger(ctx).warn(
+			`webhook ${payload.event_type}: missing entity_id/timestamp — processing without dedupe.`,
 		);
 		return { action: "process", row: null };
 	}
@@ -164,21 +184,19 @@ export async function claimOrAdvanceWebhookEvent(
 	});
 	if (!existing) {
 		// Conflict but row vanished — race with a concurrent prune. Treat as fresh.
-		ctx.context.logger.warn(
-			`StreamPay webhook ${payload.event_type} (${eventId}): unique conflict but row missing, processing without tracking.`,
+		logger(ctx).warn(
+			`webhook ${payload.event_type} (${eventId}): unique conflict but row missing, processing without tracking.`,
 		);
 		return { action: "process", row: null };
 	}
 
 	if (existing.status === "completed") {
-		ctx.context.logger.info(
-			`StreamPay webhook ${payload.event_type} (${eventId}) already completed — skipping.`,
-		);
+		logger(ctx).info(`webhook ${payload.event_type} (${eventId}) already completed — skipping.`);
 		return { action: "skip", reason: "completed" };
 	}
 	if (existing.status === "dead_letter") {
-		ctx.context.logger.warn(
-			`StreamPay webhook ${payload.event_type} (${eventId}) already dead-lettered — skipping (replay manually).`,
+		logger(ctx).warn(
+			`webhook ${payload.event_type} (${eventId}) already dead-lettered — skipping (replay manually).`,
 		);
 		return { action: "skip", reason: "dead_letter" };
 	}
@@ -283,7 +301,7 @@ async function findSubscriptionByStreampayId(
 export async function applySubscriptionProjection(
 	adapter: PluginAdapter,
 	stream: SubscriptionDetailed | null | undefined,
-	logger: { warn: (msg: string) => void },
+	log: { warn: (msg: string) => void },
 	source: string,
 ): Promise<void> {
 	const streampaySubscriptionId = stream?.id;
@@ -301,8 +319,8 @@ export async function applySubscriptionProjection(
 		});
 	} catch (err: unknown) {
 		const msg = err instanceof Error ? err.message : String(err);
-		logger.warn(
-			`StreamPay ${source}: project for sub=${streampaySubscriptionId} failed (${msg}). Local row will reconcile on next webhook.`,
+		log.warn(
+			`${source}: project for sub=${streampaySubscriptionId} failed (${msg}). Local row will reconcile on next webhook.`,
 		);
 	}
 }
@@ -313,7 +331,7 @@ export async function syncSubscriptionFromUpstream(
 	client: { getSubscription: (id: string) => Promise<SubscriptionDetailed> },
 	adapter: PluginAdapter,
 	streampaySubscriptionId: string,
-	logger: { warn: (msg: string) => void },
+	log: { warn: (msg: string) => void },
 	source: string,
 ): Promise<void> {
 	let stream: SubscriptionDetailed;
@@ -321,12 +339,12 @@ export async function syncSubscriptionFromUpstream(
 		stream = await client.getSubscription(streampaySubscriptionId);
 	} catch (err: unknown) {
 		const msg = err instanceof Error ? err.message : String(err);
-		logger.warn(
-			`StreamPay ${source}: getSubscription(${streampaySubscriptionId}) failed (${msg}). Local row will reconcile on next webhook.`,
+		log.warn(
+			`${source}: getSubscription(${streampaySubscriptionId}) failed (${msg}). Local row will reconcile on next webhook.`,
 		);
 		return;
 	}
-	await applySubscriptionProjection(adapter, stream, logger, source);
+	await applySubscriptionProjection(adapter, stream, log, source);
 }
 
 async function findIncompleteRow(
@@ -415,7 +433,7 @@ async function fireCallback(
 		await callback(data);
 	} catch (err: unknown) {
 		const msg = err instanceof Error ? err.message : String(err);
-		ctx.context.logger.error(`StreamPay subscription callback ${callbackName} failed: ${msg}`);
+		logger(ctx).error(`subscription callback ${callbackName} failed: ${msg}`);
 	}
 }
 
@@ -427,9 +445,7 @@ async function reconcileFromStreamPay(
 ): Promise<{ row: Subscription | null; stream: SubscriptionDetailed | null }> {
 	const streampaySubscriptionId = payload.entity_id;
 	if (!streampaySubscriptionId) {
-		ctx.context.logger.warn(
-			`StreamPay webhook ${payload.event_type} has no entity_id — cannot reconcile.`,
-		);
+		logger(ctx).warn(`webhook ${payload.event_type} has no entity_id — cannot reconcile.`);
 		return { row: null, stream: null };
 	}
 
@@ -438,8 +454,8 @@ async function reconcileFromStreamPay(
 		stream = await client.getSubscription(streampaySubscriptionId);
 	} catch (err: unknown) {
 		const msg = err instanceof Error ? err.message : String(err);
-		ctx.context.logger.error(
-			`StreamPay webhook ${payload.event_type}: getSubscription(${streampaySubscriptionId}) failed: ${msg}`,
+		logger(ctx).error(
+			`webhook ${payload.event_type}: getSubscription(${streampaySubscriptionId}) failed: ${msg}`,
 		);
 		// Throw → 500 → StreamPay retries with backoff. Permanent 404s
 		// stay in the retry loop; operators flag via logs.
@@ -465,8 +481,8 @@ async function reconcileFromStreamPay(
 	const referenceId = readMetadataString(payload.data, REFERENCE_ID_METADATA_KEY);
 
 	if (!planName || !referenceId) {
-		ctx.context.logger.warn(
-			`StreamPay webhook ${payload.event_type}: cannot link sub=${streampaySubscriptionId} — missing plan_name (${planName}) or reference_id (${referenceId}) metadata.`,
+		logger(ctx).warn(
+			`webhook ${payload.event_type}: cannot link sub=${streampaySubscriptionId} — missing plan_name (${planName}) or reference_id (${referenceId}) metadata.`,
 		);
 		return { row: null, stream };
 	}
@@ -555,8 +571,8 @@ export async function syncWebhookPayload(
 		claim = await claimOrAdvanceWebhookEvent(ctx, payload, rawBody, signatureHeader, maxAttempts);
 		if (claim.action === "skip") return;
 		if (claim.action === "dead_letter") {
-			ctx.context.logger.warn(
-				`StreamPay webhook ${payload.event_type} (${claim.row.eventId}) dead-lettered after ${claim.row.attemptCount} attempts. Replay manually.`,
+			logger(ctx).warn(
+				`webhook ${payload.event_type} (${claim.row.eventId}) dead-lettered after ${claim.row.attemptCount} attempts. Replay manually.`,
 			);
 			return;
 		}
@@ -608,9 +624,7 @@ async function handleInvoiceCompleted(
 		}
 	} catch (err: unknown) {
 		const msg = err instanceof Error ? err.message : String(err);
-		ctx.context.logger.error(
-			`StreamPay INVOICE_COMPLETED: getInvoice(${invoiceId}) failed: ${msg}`,
-		);
+		logger(ctx).error(`INVOICE_COMPLETED: getInvoice(${invoiceId}) failed: ${msg}`);
 		throw err;
 	}
 
@@ -621,9 +635,7 @@ async function handleInvoiceCompleted(
 		stream = await client.getSubscription(subscriptionId);
 	} catch (err: unknown) {
 		const msg = err instanceof Error ? err.message : String(err);
-		ctx.context.logger.error(
-			`StreamPay INVOICE_COMPLETED: getSubscription(${subscriptionId}) failed: ${msg}`,
-		);
+		logger(ctx).error(`INVOICE_COMPLETED: getSubscription(${subscriptionId}) failed: ${msg}`);
 		throw err;
 	}
 

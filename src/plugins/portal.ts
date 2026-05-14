@@ -2,6 +2,7 @@ import { createAuthEndpoint, sessionMiddleware } from "better-auth/api";
 import type { StreamPayClient, StreamPayOptions } from "../types";
 import { findConsumerByExternalId } from "../utils/consumer";
 import { rejectUnauthorized, toAPIError } from "../utils/errors";
+import { getLogger } from "../utils/logger";
 import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
 
 export interface PortalOptions {
@@ -41,7 +42,7 @@ export const portal =
 							const consumer = await client.getConsumer(consumerId);
 							return ctx.json({ hasConsumer: true, consumer });
 						} catch (err) {
-							toAPIError("StreamPay getConsumer failed.", err, ctx.context.logger);
+							toAPIError("StreamPay getConsumer failed.", err, getLogger(ctx));
 						}
 					},
 				),
@@ -61,7 +62,7 @@ export const portal =
 							});
 							return ctx.json({ hasConsumer: true, data: response.data ?? [] });
 						} catch (err) {
-							toAPIError("StreamPay listSubscriptions failed.", err, ctx.context.logger);
+							toAPIError("StreamPay listSubscriptions failed.", err, getLogger(ctx));
 						}
 					},
 				),
@@ -81,7 +82,7 @@ export const portal =
 							});
 							return ctx.json({ hasConsumer: true, data: response.data ?? [] });
 						} catch (err) {
-							toAPIError("StreamPay listInvoices failed.", err, ctx.context.logger);
+							toAPIError("StreamPay listInvoices failed.", err, getLogger(ctx));
 						}
 					},
 				),
