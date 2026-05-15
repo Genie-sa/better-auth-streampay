@@ -5,6 +5,23 @@ they made the request, and the repo answers a lot of the rest. Your
 job is to know what's still unknown, and ask just that — in their
 words, not these words.
 
+## Contents
+
+- How to use this file
+- Things to know before installing
+  - Which features the app needs
+  - Eager vs lazy customer creation
+  - Duplicate-customer policy (if eager)
+  - Custom fields when creating customers
+  - The pricing plan catalog (subscriptions only)
+  - Checkout product mapping (checkout only)
+  - Whether checkout is open to guests
+  - How admins are identified (admin only)
+  - Which webhook events to scaffold
+  - Single secret vs rolling rotation
+- Things to confirm before editing
+- Anti-patterns
+
 ## How to use this file
 
 For each "thing to know", you'll see:

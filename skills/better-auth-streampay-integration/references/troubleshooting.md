@@ -9,6 +9,25 @@ When you're explaining a fix to a user, lead with what's happening
 and why before the command — they'll understand the next failure
 better.
 
+## Contents
+
+- "Account cannot be created at this time" on sign-up
+- Webhook returns 401 / `INVALID_SIGNATURE`
+- Webhook returns 401 / `EXPIRED`
+- `user.streampayConsumerId` is still null after sign-up
+- The plugin compiles but inserts fail with "no such column" / "no such table"
+- Where do I point `--config` in a monorepo?
+- `authClient.checkout(...)` returns 404
+- Admin endpoint returns 405 (Method Not Allowed)
+- Subscriptions plugin throws at startup
+- Subscription state slowly drifts from StreamPay
+- Same payment processed twice
+- Peer dependency warning on install
+- Paid successfully but the UI still shows the free tier
+- `/subscription/current` returns `null` right after upgrade
+- Known sandbox quirks
+- Filtering plugin logs
+
 ## "Account cannot be created at this time" on sign-up
 
 **What's happening**: StreamPay already has a customer with this email
@@ -133,6 +152,25 @@ StreamPay redelivers on timeout AND on some transient errors.
 Plugin needs `better-auth ^1.4.0` and `zod ^3.24 || ^4.0`. Older
 `better-auth` will break — ask the user to upgrade Better Auth
 first.
+
+## Paid successfully but the UI still shows the free tier
+
+**What's happening**: the webhook landed (or `/subscription/success`
+ran the fallback sync), the database row is `active`, but the
+client-side cache that backed the UI render is stale. The browser
+never asked again.
+
+**Fix**: on the return URL, call `authClient.subscriptionSuccess({
+subscriptionId })` AND invalidate the client cache the project
+actually uses (TanStack Query / SWR / Next router / etc.). Snippets
+for each stack: [code-templates.md §After checkout — refreshing the
+client](code-templates.md#after-checkout--refreshing-the-client).
+
+If the user has no client cache layer at all and the page is a fresh
+navigation, this isn't the issue — check the row state in the DB
+(`SELECT status FROM subscription WHERE id = ?`) and the webhook
+delivery log (`/admin/streampay/webhook-events` if admin is
+composed).
 
 ## `/subscription/current` returns `null` right after upgrade
 

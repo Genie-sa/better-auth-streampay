@@ -45,6 +45,7 @@ that.
 | `authorizeReference` | `(ctx) => boolean \| Promise<boolean>` | Per-action authorization (upgrade / cancel / freeze / etc.) for cross-account mutations |
 | `enableSubscriptionTable` | `boolean` | Default `true`. `false` skips the `subscription` schema + webhook auto-sync; BYO state via `webhooks({ on* })` |
 | `enableWebhookEventTable` | `boolean` | Default `true`. `false` skips the `streampayWebhookEvent` dedupe table — you must guarantee idempotency (Redis SETNX, idempotency middleware, …) |
+| `maxWebhookAttempts` | `number` | Default 10. Per-event delivery cap before a row is parked as `dead_letter` |
 | `onSubscription{Created,Activated,Canceled,Frozen,Resumed,Renewed,PaymentFailed}` | callbacks | Run after the local row is synced from the matching webhook (skipped when `enableSubscriptionTable=false`) |
 
 `StreamPayPlan`: `name`, `productId`, `priceHalalat`,
@@ -59,6 +60,11 @@ optional `limits`. Plans without `group` share one slot per user.
 | `isAdmin` | `(user, ctx) => boolean \| Promise<boolean>` | Custom check used when role match fails |
 | `onRefund` | hook | Throw to block a refund |
 | `onPlanChange` | hook | Receives current sub + incoming patch |
+
+Mounts back-office endpoints under `/admin/streampay/*` for payments,
+subscriptions, consumers, invoices, products, coupons, and the
+webhook-event lifecycle table (list / get / replay / delete). Read
+`src/plugins/admin.ts` for the exact path list.
 
 ## `webhooks(options)`
 
@@ -80,6 +86,7 @@ optional `limits`. Plans without `group` share one slot per user.
 | `findConsumerByIdentifiers(client, ids)` | Lookup full customer by email / phone / external_id / iban |
 | `parseStreamPayError(err)` / `formatStreamPayError(err)` | Normalize SDK errors for logs |
 | `hasFeature(plans, plan, feature)` / `checkLimit(plans, plan, feature, value)` | Entitlement gating helpers |
+| `FeatureKey<P>` | Type helper that narrows `feature` to `keyof plan.limits` for typed plan generics |
 | `StreamPayAmount` | Halalat ↔ SAR helper |
 
 `VerifyFailureReason`: `MISSING_HEADER` · `MALFORMED_HEADER` ·

@@ -4,6 +4,19 @@ Copy-and-adapt snippets. Always check the option names against the
 plugin source before pasting — these summaries can lag behind the
 real types.
 
+## Contents
+
+- Installing
+- Environment
+- Server (`auth.ts`)
+  - Factory pattern
+- Better Auth CLI
+- Client (`auth-client.ts`)
+- Framework routes (Next App / Next Pages / Hono / Elysia / Express)
+- Migrations
+- After checkout — refreshing the client
+- Verifying webhooks without the plugin
+
 ## Installing
 
 ```
@@ -241,6 +254,26 @@ Once the auth file is updated:
 After migration, confirm `user.streampayConsumerId` exists. If
 `subscriptions()` is enabled, also confirm `subscription` and
 `streampayWebhookEvent` tables exist.
+
+## After checkout — refreshing the client
+
+`webhooks()` updates the server row. Cached client state does not
+update by itself, so the UI keeps rendering the pre-payment tier
+until something asks again.
+
+On the return URL, do two things:
+
+1. Call `authClient.subscriptionSuccess({ subscriptionId })` — this
+   is a fallback sync (in case the webhook is still in flight) AND
+   your cue to invalidate.
+2. Invalidate whatever client-side cache the project already uses
+   for subscription reads. **Read the user's project to find out
+   how** — query keys, router invalidation, server-action
+   revalidation, plain refetch. Don't paste a pattern; mirror theirs.
+
+If `subscriptionSuccess` returns `synced: false`, the webhook hasn't
+landed yet — short-poll `currentSubscription` for a few seconds, or
+just leave the UI in a "activating…" state until the user navigates.
 
 ## Verifying webhooks without the plugin
 
