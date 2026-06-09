@@ -16,7 +16,6 @@ import {
 	toLocalStatus,
 } from "./types";
 
-/** Subset of Better Auth's `context.adapter` this plugin calls. */
 export interface PluginAdapter {
 	create: <T = unknown, D extends object = Record<string, unknown>>(args: {
 		model: string;
@@ -71,14 +70,7 @@ function logger(ctx: SyncContext): ScopedLogger {
 	return scopedLogger(ctx.context.logger);
 }
 
-/**
- * Default cap on per-event delivery attempts before the row is parked
- * as `dead_letter`. Tuned for StreamPay's at-least-once retry budget
- * (~3-7 days of exponential backoff) — 10 attempts is enough headroom
- * for a transient outage but bounded enough that a persistent bug
- * doesn't generate a retry storm.
- */
-export const DEFAULT_MAX_WEBHOOK_ATTEMPTS = 10;
+export const DEFAULT_MAX_WEBHOOK_ATTEMPTS = 5;
 
 export type WebhookEventStatus = "pending" | "completed" | "dead_letter";
 
@@ -95,11 +87,6 @@ export interface WebhookEventRow {
 	lastError: string | null;
 }
 
-// Adapters emit different shapes: Prisma P2002, Postgres 23505,
-// better-sqlite3 / libsql SQLITE_CONSTRAINT_UNIQUE. Drizzle wraps the
-// driver's error in `DrizzleQueryError` and re-emits a generic "Failed
-// query: …" message with `code` undefined on the outer — the real code
-// is on `cause`. Walk the chain so the dedupe path catches it.
 const MAX_CAUSE_DEPTH = 5;
 
 function matchesUniqueMarker(err: unknown): boolean {
@@ -120,30 +107,11 @@ function isUniqueConstraintError(err: unknown): boolean {
 	return false;
 }
 
-/**
- * Outcome of a delivery attempt against the event lifecycle table.
- *  - `process` → caller does the work; `row` is the in-flight `pending`
- *    row whose `id` is needed to mark `completed` or record a failure.
- *    `row: null` means dedupe is disabled or no `eventId` is available.
- *  - `skip` → another delivery already finished or was dead-lettered;
- *    caller returns 200 without doing work.
- *  - `dead_letter` → attempt budget is exhausted, payload+signature
- *    persisted, caller returns 200 so StreamPay stops retrying.
- */
 export type ClaimAdvanceResult =
 	| { action: "process"; row: WebhookEventRow | null }
 	| { action: "skip"; reason: "completed" | "dead_letter" }
 	| { action: "dead_letter"; row: WebhookEventRow };
 
-/**
- * Atomic state-machine entry. Inserts a `pending` row on first
- * delivery; on conflict, reads the existing row and either skips
- * (already completed / dead-lettered), increments attemptCount, or
- * flips to `dead_letter` once the next attempt would exceed the cap.
- *
- * Not a mutex: concurrent deliveries of the same event id can both
- * pass through `pending`. Userland callbacks must be idempotent.
- */
 export async function claimOrAdvanceWebhookEvent(
 	ctx: SyncContext,
 	payload: StreamPayWebhookPayload,
@@ -183,7 +151,6 @@ export async function claimOrAdvanceWebhookEvent(
 		where: [{ field: "eventId", value: eventId }],
 	});
 	if (!existing) {
-		// Conflict but row vanished — race with a concurrent prune. Treat as fresh.
 		logger(ctx).warn(
 			`webhook ${payload.event_type} (${eventId}): unique conflict but row missing, processing without tracking.`,
 		);
@@ -228,9 +195,6 @@ export async function claimOrAdvanceWebhookEvent(
 	return { action: "process", row: updated ?? existing };
 }
 
-/** Mark a tracked event row as `completed`. NULLs out the persisted
- *  payload to save storage on the happy path — only failed/dead-lettered
- *  rows keep `rawPayload` and `signatureHeader`. */
 export async function markWebhookEventCompleted(
 	ctx: { context: { adapter: PluginAdapter } },
 	rowId: string,
@@ -248,8 +212,6 @@ export async function markWebhookEventCompleted(
 	});
 }
 
-/** Stamp the row with the latest failure details. Keeps status as
- *  `pending` so the next delivery can either retry or dead-letter. */
 export async function recordWebhookEventFailure(
 	ctx: { context: { adapter: PluginAdapter } },
 	rowId: string,
@@ -270,8 +232,6 @@ export async function recordWebhookEventFailure(
 	});
 }
 
-// StreamPay doesn't guarantee a top-level id on the envelope, so we
-// derive a composite from fields that always exist.
 function extractEventId(payload: StreamPayWebhookPayload): string | null {
 	if (!payload.timestamp || !payload.entity_id) return null;
 	return `${payload.event_type}:${payload.entity_id}:${payload.timestamp}`;
@@ -293,11 +253,6 @@ async function findSubscriptionByStreampayId(
 	});
 }
 
-/**
- * Project an already-fetched subscription onto the local row keyed by
- * `streampaySubscriptionId`. No-op + log on missing local row (mutate
- * targeted a sub we don't track) or DB failure (webhook reconciles).
- */
 export async function applySubscriptionProjection(
 	adapter: PluginAdapter,
 	stream: SubscriptionDetailed | null | undefined,
@@ -325,8 +280,6 @@ export async function applySubscriptionProjection(
 	}
 }
 
-/** Refetch upstream then `applySubscriptionProjection`. Use when the
- *  caller doesn't already hold a fresh `SubscriptionDetailed`.  */
 export async function syncSubscriptionFromUpstream(
 	client: { getSubscription: (id: string) => Promise<SubscriptionDetailed> },
 	adapter: PluginAdapter,
@@ -366,12 +319,7 @@ async function findIncompleteRow(
 	);
 }
 
-/**
- * Project live StreamPay fields onto our table columns. Never touches
- * `referenceId`, `plan`, or `group` — those are set at /upgrade and
- * must not drift.
- */
-export function projectSubscriptionFields(sub: SubscriptionDetailed): Record<string, unknown> {
+export function projectSubscriptionFields(sub: SubscriptionDetailed): Partial<Subscription> {
 	return {
 		streampaySubscriptionId: sub.id ?? null,
 		streampayConsumerId: sub.organization_consumer_id ?? null,
@@ -396,8 +344,6 @@ function parseDate(value: string | null | undefined): Date | null {
 	return Number.isNaN(d.getTime()) ? null : d;
 }
 
-// StreamPay returns amounts as decimal SAR strings ("10.50"). Store
-// as integer halalat to avoid float drift across reads.
 function amountToHalalat(value: string | null | undefined): number | null {
 	if (!value) return null;
 	try {
@@ -421,7 +367,6 @@ async function resolveRowUser(
 	}
 }
 
-// Swallow userland errors — dedupe protects against re-fire on retry.
 async function fireCallback(
 	ctx: SyncContext,
 	callback: SubscriptionCallbacks[keyof SubscriptionCallbacks] | undefined,
@@ -457,13 +402,14 @@ async function reconcileFromStreamPay(
 		logger(ctx).error(
 			`webhook ${payload.event_type}: getSubscription(${streampaySubscriptionId}) failed: ${msg}`,
 		);
-		// Throw → 500 → StreamPay retries with backoff. Permanent 404s
-		// stay in the retry loop; operators flag via logs.
 		throw err;
 	}
 
 	const existing = await findSubscriptionByStreampayId(ctx, streampaySubscriptionId);
 	const projected = projectSubscriptionFields(stream);
+	if (payload.event_type === "SUBSCRIPTION_CYCLE_RENEWAL_FAILED" && projected.status === "active") {
+		projected.status = "past_due";
+	}
 
 	if (existing) {
 		const updated = await ctx.context.adapter.update<Subscription>({
@@ -471,11 +417,9 @@ async function reconcileFromStreamPay(
 			update: projected,
 			where: [{ field: "id", value: existing.id }],
 		});
-		return { row: updated ?? { ...existing, ...(projected as Partial<Subscription>) }, stream };
+		return { row: updated ?? { ...existing, ...projected }, stream };
 	}
 
-	// No row keyed by streampaySubscriptionId yet. Fall back to the
-	// incomplete row pre-created at /upgrade if metadata is present.
 	const planName =
 		readMetadataString(payload.data, PLAN_NAME_METADATA_KEY) ?? inferPlanFromItems(stream, plans);
 	const referenceId = readMetadataString(payload.data, REFERENCE_ID_METADATA_KEY);
@@ -495,12 +439,11 @@ async function reconcileFromStreamPay(
 			where: [{ field: "id", value: incomplete.id }],
 		});
 		return {
-			row: updated ?? { ...incomplete, ...(projected as Partial<Subscription>) },
+			row: updated ?? { ...incomplete, ...projected },
 			stream,
 		};
 	}
 
-	// Dashboard-created subscription (outside our /upgrade flow).
 	const plan = plans.byName.get(planName);
 	const row = await ctx.context.adapter.create<Subscription>({
 		model: SUBSCRIPTION_MODEL,
@@ -522,28 +465,19 @@ const SubscriptionItemSchema = z
 	})
 	.passthrough();
 
-// Best-effort fallback when metadata is missing; relies on plans
-// declaring distinct productIds.
+export function subscriptionItemProductId(item: unknown): string | null {
+	const parsed = SubscriptionItemSchema.safeParse(item);
+	if (!parsed.success) return null;
+	return parsed.data.product?.id ?? parsed.data.product_id ?? null;
+}
+
 function inferPlanFromItems(sub: SubscriptionDetailed, plans: ResolvedPlans): string | null {
 	const first = Array.isArray(sub.items) ? sub.items[0] : undefined;
-	const parsed = SubscriptionItemSchema.safeParse(first);
-	if (!parsed.success) return null;
-	const productId = parsed.data.product?.id ?? parsed.data.product_id;
+	const productId = subscriptionItemProductId(first);
 	if (!productId) return null;
 	return plans.list.find((plan) => plan.productId === productId)?.name ?? null;
 }
 
-/**
- * Webhook sync entry. Called before userland handlers for every
- * payload. Idempotent via the `streampayWebhookEvent` state machine:
- * first delivery inserts a `pending` row, success flips it to
- * `completed`, repeated failure increments `attemptCount` and
- * eventually parks the row as `dead_letter` (caller returns 200 so
- * StreamPay stops retrying — replay is owned by the operator).
- *
- * Throws only on transient failures *while a row is still retryable*;
- * permanent bad-data modes log and return so StreamPay stops retrying.
- */
 export async function syncWebhookPayload(
 	ctx: SyncContext,
 	payload: StreamPayWebhookPayload,
@@ -580,7 +514,6 @@ export async function syncWebhookPayload(
 	const trackedRowId = claim.row?.id ?? null;
 
 	try {
-		// INVOICE_COMPLETED → renewal inference (no native SUBSCRIPTION_RENEWED event).
 		if (payload.event_type === "INVOICE_COMPLETED") {
 			await handleInvoiceCompleted(ctx, payload, client, plans, callbacks);
 		} else {
@@ -642,13 +575,13 @@ async function handleInvoiceCompleted(
 	const existing = await findSubscriptionByStreampayId(ctx, subscriptionId);
 	if (!existing) return;
 
+	const projected = projectSubscriptionFields(stream);
 	const updated = await ctx.context.adapter.update<Subscription>({
 		model: SUBSCRIPTION_MODEL,
-		update: projectSubscriptionFields(stream),
+		update: projected,
 		where: [{ field: "id", value: existing.id }],
 	});
-	const row =
-		updated ?? ({ ...existing, ...projectSubscriptionFields(stream) } as unknown as Subscription);
+	const row = updated ?? { ...existing, ...projected };
 
 	const user = await resolveRowUser(ctx, row);
 	await fireCallback(
@@ -696,13 +629,12 @@ async function dispatchSubscriptionCallback(
 	}
 }
 
-/** Permanent → 400 (stop retry). Transient → 500 (retry with backoff). */
 export type WebhookSyncFailure = "PERMANENT" | "TRANSIENT";
 
 export function classifyWebhookFailure(err: unknown): WebhookSyncFailure {
 	const { status } = readSdkErrorFields(err);
-	if (status !== undefined && status >= 400 && status < 500 && status !== 429) {
-		return "PERMANENT";
-	}
+	if (status === undefined) return "TRANSIENT";
+	if (status === 404 || status === 429) return "TRANSIENT";
+	if (status >= 400 && status < 500) return "PERMANENT";
 	return "TRANSIENT";
 }

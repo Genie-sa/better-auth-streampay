@@ -6,13 +6,6 @@ import {
 	createMockStreamPayClient,
 } from "./utils/mocks";
 
-/**
- * Regression coverage for the #1 refactor: consumer lookups must use
- * the `search_term` query param and exact-match in memory, not a
- * paginated scan. These tests fail loudly if anyone drops `search_term`
- * or widens the exact-equality filter into a fuzzy match.
- */
-
 describe("findConsumerByExternalId (search_term-based)", () => {
 	it("calls listConsumers with search_term=<externalId> and a capped page size", async () => {
 		const client = createMockStreamPayClient();
@@ -26,15 +19,13 @@ describe("findConsumerByExternalId (search_term-based)", () => {
 		expect(client.listConsumers).toHaveBeenCalledTimes(1);
 		const params = client.listConsumers.mock.calls[0]?.[0];
 		expect(params).toEqual(expect.objectContaining({ search_term: "user-42" }));
-		// Size must be bounded — search_term is fuzzy, so the response
-		// page could carry many unrelated rows that the predicate filters.
+
 		expect(typeof params?.size).toBe("number");
 		expect(params?.size).toBeLessThanOrEqual(100);
 	});
 
 	it("filters out fuzzy-matching consumers whose external_id is not an exact match", async () => {
 		const client = createMockStreamPayClient();
-		// The fuzzy search returns both a prefix hit and the real hit.
 		client.listConsumers.mockResolvedValue(
 			createMockConsumerList([
 				createMockConsumer({ id: "cons_prefix", external_id: "user-4" }),
@@ -60,8 +51,7 @@ describe("findConsumerByExternalId (search_term-based)", () => {
 describe("findConsumerByIdentifiers (search_term-based)", () => {
 	it("issues one search_term call per populated identifier and stops at the first exact hit", async () => {
 		const client = createMockStreamPayClient();
-		// Email call returns a fuzzy-but-not-exact hit → no match, falls
-		// through to phone. Phone call returns the actual exact hit.
+
 		client.listConsumers
 			.mockResolvedValueOnce(
 				createMockConsumerList([
@@ -123,5 +113,15 @@ describe("findConsumerByIdentifiers (search_term-based)", () => {
 		const consumer = await findConsumerByIdentifiers(client, {});
 		expect(consumer).toBeNull();
 		expect(client.listConsumers).not.toHaveBeenCalled();
+	});
+
+	it("matches email case-insensitively — same rule as duplicate resolution", async () => {
+		const client = createMockStreamPayClient();
+		client.listConsumers.mockResolvedValue(
+			createMockConsumerList([createMockConsumer({ id: "cons_case", email: "User@Example.COM" })]),
+		);
+
+		const consumer = await findConsumerByIdentifiers(client, { email: "user@example.com" });
+		expect(consumer?.id).toBe("cons_case");
 	});
 });

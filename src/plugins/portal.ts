@@ -5,11 +5,8 @@ import { rejectUnauthorized, toAPIError } from "../utils/errors";
 import { getLogger } from "../utils/logger";
 import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
 
+/** Options for `portal()`: page size for the billing-portal listings. */
 export interface PortalOptions {
-	/**
-	 * Rows per portal list call. Clamped to StreamPay's 100-row server
-	 * cap. For UIs that need more, add a cursor param later.
-	 */
 	pageSize?: number;
 }
 
@@ -24,6 +21,7 @@ async function getConsumerIdOrNull(
 	return findConsumerByExternalId(client, { externalId: user.id });
 }
 
+/** Billing-portal sub-plugin. Exposes the consumer self-service billing endpoints. */
 export const portal =
 	({ pageSize }: PortalOptions = {}) =>
 	(options: StreamPayOptions) => {

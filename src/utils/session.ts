@@ -6,12 +6,6 @@ export interface StreamPaySessionUser {
 	streampayConsumerId?: string | null;
 }
 
-/**
- * Narrow an unknown user to a `StreamPaySessionUser` via `in` operator
- * only. Better Auth's `User` generic doesn't include our schema
- * extension (`streampayConsumerId`) at plugin-definition time even
- * though it's present at runtime — `in` narrowing reads it safely.
- */
 export function asSessionUser(user: unknown): StreamPaySessionUser | null {
 	if (user === null || typeof user !== "object") return null;
 	if (!("id" in user) || typeof user.id !== "string") return null;

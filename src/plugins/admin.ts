@@ -32,8 +32,6 @@ import {
 	type WebhookEventRow,
 } from "./subscriptions/sync";
 
-// Declared structurally (not imported from `better-auth/plugins/admin`)
-// so the admin plugin stays an optional dependency.
 interface UserWithRole {
 	role?: string | null;
 }
@@ -42,28 +40,18 @@ type SessionUserInput = User | UserWithRole | null | undefined;
 
 const DEFAULT_ADMIN_ROLES = ["admin"] as const;
 
-/**
- * Back-office CRUD for StreamPay. Gated by a dual check: matches an
- * `adminRoles` entry on `user.role`, OR the optional `isAdmin` callback
- * returns true. Both absent ⇒ endpoint unreachable. `onRefund` and
- * `onPlanChange` hooks run BEFORE the SDK call — throw from them to
- * block an action.
- */
+/** Options for `admin()`: role gating and back-office mutation hooks. */
 export interface AdminOptions {
-	/** Role values that grant admin access. Comma-split like Better Auth. Default `["admin"]`. */
 	adminRoles?: readonly string[];
 
-	/** Secondary check, called when `role` matching fails. */
 	isAdmin?: (user: StreamPaySessionUser, ctx: GenericEndpointContext) => boolean | Promise<boolean>;
 
-	/** Pre-refund hook. Throw to block. */
 	onRefund?: (ctx: {
 		user: StreamPaySessionUser;
 		paymentId: string;
 		request: PaymentRefundRequest;
 	}) => void | Promise<void>;
 
-	/** Pre-update hook. Receives current sub + incoming patch. */
 	onPlanChange?: (ctx: {
 		user: StreamPaySessionUser;
 		subscriptionId: string;
@@ -72,8 +60,6 @@ export interface AdminOptions {
 	}) => void | Promise<void>;
 }
 
-// Reads `role` off the RAW session user because `asSessionUser` narrows
-// to the plugin's own fields and doesn't know about admin-plugin fields.
 async function requireAdmin(
 	ctx: GenericEndpointContext,
 	options: AdminOptions,
@@ -114,8 +100,6 @@ function getAdapter(ctx: GenericEndpointContext): PluginAdapter {
 	return adapter as unknown as PluginAdapter;
 }
 
-// Admin bodies forward to the SDK verbatim. The SDK's generated types
-// own validation; don't add plugin-level body validation here.
 const ForwardedBody = z.object({}).passthrough();
 
 const PaymentsListQuery = z
@@ -328,14 +312,6 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 			},
 		),
 
-		/**
-		 * Immediate cancel from admin. Unlike the consumer `/subscription/cancel`,
-		 * this one bypasses the local ownership check — an admin can cancel
-		 * any subscription by StreamPay id. Mirrors the SDK's
-		 * `SubscriptionCancel` body shape verbatim (only
-		 * `cancel_related_invoices`; no period-end flag — StreamPay doesn't
-		 * expose one on this endpoint).
-		 */
 		adminCancelSubscription: createAuthEndpoint(
 			"/admin/streampay/subscriptions/:id/cancel",
 			{
@@ -369,11 +345,6 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 			},
 		),
 
-		/**
-		 * Admin-initiated freeze. Creates a new freeze window on a
-		 * subscription. Body matches `FreezeSubscriptionCreateRequest`
-		 * from the SDK. Returns the created `FreezeSubscriptionBase`.
-		 */
 		adminFreezeSubscription: createAuthEndpoint(
 			"/admin/streampay/subscriptions/:id/freeze",
 			{
@@ -408,12 +379,6 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 			},
 		),
 
-		/**
-		 * List all freeze windows attached to a subscription. Useful for
-		 * UIs that show "this sub is frozen X times" or for the
-		 * adminDeleteFreeze / adminUpdateFreeze flows below that need a
-		 * freeze id.
-		 */
 		adminListSubscriptionFreezes: createAuthEndpoint(
 			"/admin/streampay/subscriptions/:id/freeze",
 			{
@@ -435,13 +400,6 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 			},
 		),
 
-		/**
-		 * Update an existing freeze window (shift start/end, change notes).
-		 * Matches SDK's `updateSubscriptionFreeze` which takes
-		 * `FreezeSubscriptionUpdateRequest` — note that
-		 * `freeze_start_datetime` is REQUIRED on update even if it doesn't
-		 * change (per OpenAPI schema).
-		 */
 		adminUpdateSubscriptionFreeze: createAuthEndpoint(
 			"/admin/streampay/subscriptions/:id/freeze/:freezeId",
 			{
@@ -476,15 +434,6 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 			},
 		),
 
-		/**
-		 * Delete (unfreeze) a specific freeze window. This is how you
-		 * "unfreeze" as an admin: find the active freeze id via
-		 * adminListSubscriptionFreezes, then DELETE it.
-		 *
-		 * Returns `{ deleted: true }` on success — the SDK's
-		 * `deleteSubscriptionFreeze` returns `void`, so we synthesize a
-		 * response body for client feedback.
-		 */
 		adminDeleteSubscriptionFreeze: createAuthEndpoint(
 			"/admin/streampay/subscriptions/:id/freeze/:freezeId",
 			{
@@ -589,9 +538,6 @@ function buildConsumersEndpoints(client: StreamPayClient, adminOptions: AdminOpt
 			},
 		),
 
-		// Delete on StreamPay AND clear the `streampayConsumerId` link so
-		// the next checkout lazy-creates instead of 404'ing. deleteConsumer
-		// 404 is treated as success (race); a failed link-clear only logs.
 		adminDeleteConsumer: createAuthEndpoint(
 			"/admin/streampay/consumers/:id",
 			{
@@ -620,7 +566,6 @@ function buildConsumersEndpoints(client: StreamPayClient, adminOptions: AdminOpt
 				try {
 					await client.deleteConsumer(consumerId);
 				} catch (err) {
-					// 404 race — already gone, still sync the user row below.
 					if (!isNotFoundError(err)) {
 						toAPIError(
 							`StreamPay deleteConsumer failed for consumer=${consumerId}:`,
@@ -636,8 +581,6 @@ function buildConsumersEndpoints(client: StreamPayClient, adminOptions: AdminOpt
 							streampayConsumerId: null,
 						});
 					} catch (err: unknown) {
-						// User row gone / DB write failed. Don't surface as 500
-						// — the StreamPay delete already succeeded.
 						getLogger(ctx).error(
 							`StreamPay admin delete: link clear failed for user=${externalId} consumer=${consumerId}: ${formatStreamPayError(err)}`,
 						);
@@ -1078,8 +1021,6 @@ function buildWebhookEventsEndpoints(
 						message: `Webhook event ${ctx.params.eventId} not found.`,
 					});
 				}
-				// Flip to `completed` (instead of deleting) so the dedupe gate
-				// still no-ops any future StreamPay re-deliveries.
 				await markWebhookEventCompleted({ context: { adapter } }, row.id);
 				return ctx.json({ discarded: true, eventId: ctx.params.eventId });
 			},
@@ -1087,6 +1028,7 @@ function buildWebhookEventsEndpoints(
 	};
 }
 
+/** Admin back-office sub-plugin. Exposes role-gated refund and subscription-management endpoints. */
 export const admin =
 	(adminOptions: AdminOptions = {}) =>
 	(options: StreamPayOptions, registry?: StreamPayPluginRegistry) => {

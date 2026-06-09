@@ -51,8 +51,7 @@ describe("checkout plugin", () => {
 	beforeEach(() => {
 		mockClient = createMockStreamPayClient();
 		vi.clearAllMocks();
-		// Default stub: `getPaymentUrl` reads the `url` field off whatever
-		// payment link the test programs, matching the real SDK.
+
 		mockClient.getPaymentUrl.mockImplementation((link) => link.url ?? null);
 	});
 
@@ -175,19 +174,17 @@ describe("checkout plugin", () => {
 			);
 		});
 
-		it("passes body.consumerId through verbatim when provided", async () => {
+		it("ignores a client-supplied consumerId — the consumer is resolved from the session only", async () => {
+			mockedGetSessionFromCtx.mockResolvedValue({
+				user: createMockUser({ id: "user-owner", streampayConsumerId: "cons_mine" }),
+			});
 			const ctx = createMockContext({
-				body: {
-					products: PRODUCT_ID,
-					consumerId: "cons_explicit_override",
-				},
+				body: { products: PRODUCT_ID, consumerId: "cons_theirs" },
 			});
 			await handler(ctx);
 
 			expect(mockClient.createPaymentLink).toHaveBeenCalledWith(
-				expect.objectContaining({
-					organization_consumer_id: "cons_explicit_override",
-				}),
+				expect.objectContaining({ organization_consumer_id: "cons_mine" }),
 			);
 		});
 

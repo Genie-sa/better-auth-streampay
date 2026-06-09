@@ -1,22 +1,10 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-/**
- * StreamPay signs webhooks via `X-Webhook-Signature: t=<unix>,v1=<hex>`
- * where the hex is `HMAC_SHA256(secret, "${t}.${rawBody}")`.
- * https://docs.streampay.sa/webhooks#verifying-webhook-authenticity
- */
-
 export interface VerifyWebhookInput {
-	/**
-	 * Shared secret — or array of secrets for rolling rotation (signature
-	 * passes if ANY matches). Empty array rejects everything.
-	 */
 	secret: string | readonly string[];
 	rawBody: string;
 	signatureHeader: string | null | undefined;
-	/** Max signature age (seconds). Defaults to 300s (5 min). */
 	toleranceSeconds?: number;
-	/** Clock hook for tests. */
 	now?: () => number;
 }
 
@@ -40,7 +28,6 @@ export class StreamPayWebhookError extends Error {
 	}
 }
 
-// Tolerates extra fields (e.g. a future `v2=`) and ignores them.
 function parseSignatureHeader(header: string): { timestamp: string; signature: string } | null {
 	const parts = header.split(",");
 	let timestamp: string | undefined;
@@ -61,6 +48,7 @@ function hexDecode(hex: string): Buffer | null {
 	return Buffer.from(hex, "hex");
 }
 
+/** Verify a StreamPay webhook signature against the raw body. Returns a result object; never throws. */
 export function verifyWebhook(input: VerifyWebhookInput): VerifyWebhookResult {
 	const { rawBody, signatureHeader } = input;
 	const toleranceSeconds = input.toleranceSeconds ?? 300;
@@ -91,6 +79,7 @@ export function verifyWebhook(input: VerifyWebhookInput): VerifyWebhookResult {
 	return { ok: false, reason: "INVALID_SIGNATURE" };
 }
 
+/** Like `verifyWebhook` but throws `StreamPayWebhookError` on failure; returns the signed timestamp on success. */
 export function verifyWebhookOrThrow(input: VerifyWebhookInput): number {
 	const result = verifyWebhook(input);
 	if (!result.ok) throw new StreamPayWebhookError(result.reason);

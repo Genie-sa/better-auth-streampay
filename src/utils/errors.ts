@@ -34,10 +34,6 @@ function statusToAPIErrorStatus(status: number | undefined): APIErrorStatus {
 	}
 }
 
-/**
- * Translate an unknown SDK error into `APIError`. Re-throws existing
- * `APIError` as-is. Upstream 4xx propagates; network/5xx → 500.
- */
 export function toAPIError(
 	messageOrConfig: string | { logPrefix: string; userMessage: string },
 	err: unknown,
@@ -70,10 +66,6 @@ export function toAPIError(
 	});
 }
 
-/**
- * Assert caller is authenticated and non-anonymous. `anonymousMessage`
- * is parameterized so each endpoint can read naturally at its surface.
- */
 export function rejectUnauthorized(
 	user: StreamPaySessionUser | null,
 	anonymousMessage: string,

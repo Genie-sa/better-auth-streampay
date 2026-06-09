@@ -44,11 +44,6 @@ const PlansSchema = z
 		}
 	});
 
-/**
- * Structural validation at plugin init so misconfiguration fails at the
- * `subscriptions()` call site. Deep checks (productId exists, interval
- * matches the product) run lazily at /upgrade since they need the SDK.
- */
 export function validatePlansShape(plans: readonly StreamPayPlanLike[]): void {
 	const result = PlansSchema.safeParse(plans);
 	if (result.success) return;
@@ -68,10 +63,6 @@ function buildIndex(list: readonly StreamPayPlanLike[]): ResolvedPlans {
 	return { list, byName };
 }
 
-/**
- * Resolve plans once, then cache. Supports static arrays or async
- * factories (CMS / feature-flag integrations).
- */
 export function createPlanResolver(plans: PlansInput | undefined): () => Promise<ResolvedPlans> {
 	let cached: ResolvedPlans | null = null;
 	let inFlight: Promise<ResolvedPlans> | null = null;
@@ -97,19 +88,13 @@ export function createPlanResolver(plans: PlansInput | undefined): () => Promise
 	};
 }
 
-/**
- * Narrow `feature` to the literal keys of `plan.limits` when the caller
- * passes a typed plan (e.g. `StreamPayPlan<{ maxEvents: number }>`).
- * Falls back to `string` for the widened `StreamPayPlanLike` so existing
- * call sites keep compiling without changes.
- */
 export type FeatureKey<P> = P extends { limits?: infer L }
 	? L extends Record<string, unknown>
 		? Extract<keyof L, string>
 		: string
 	: string;
 
-/** Returns `false` for non-active/frozen subs so expired plans can't leak entitlements. */
+/** Whether the subscription's plan grants `feature`. Returns false for non-live (expired/canceled) subscriptions. */
 export function hasFeature<P extends StreamPayPlanLike>(
 	subscription: Subscription,
 	plan: P | undefined,
@@ -129,7 +114,7 @@ export interface LimitCheckResult {
 	remaining: number;
 }
 
-/** Numeric-only quota check. Use `hasFeature` for binary gates. */
+/** Check a numeric quota (`feature`) on the subscription's plan against `count`. */
 export function checkLimit<P extends StreamPayPlanLike>(
 	subscription: Subscription,
 	plan: P | undefined,

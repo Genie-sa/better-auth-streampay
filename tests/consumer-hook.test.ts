@@ -1,8 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// Install the better-auth/api mock at hoist time. vi.hoisted runs
-// above every import so APIError can be defined and referenced by
-// vi.mock's factory without TDZ issues.
 const { MockAPIError } = vi.hoisted(() => {
 	class MockAPIError extends Error {
 		public readonly code: string;
@@ -49,8 +46,7 @@ describe("consumer hooks", () => {
 
 	beforeEach(() => {
 		mockClient = createMockStreamPayClient();
-		// Default: empty consumer list so the fallback scan terminates fast
-		// and `createConsumer` is the path most tests want to exercise.
+
 		mockClient.listConsumers.mockResolvedValue(createMockConsumerList());
 	});
 
@@ -67,9 +63,6 @@ describe("consumer hooks", () => {
 
 			const result = await invokeHook(onBeforeUserCreate(options), user, ctx);
 
-			// The consumer is created without external_id at this stage,
-			// because Better Auth generates user.id inside adapter.create()
-			// after this hook runs. The link step happens in onAfterUserCreate.
 			expect(mockClient.createConsumer).toHaveBeenCalledWith(
 				expect.objectContaining({
 					name: "Fresh User",
@@ -79,9 +72,7 @@ describe("consumer hooks", () => {
 			expect(mockClient.createConsumer).toHaveBeenCalledWith(
 				expect.not.objectContaining({ external_id: expect.anything() }),
 			);
-			// Return value shape: Better Auth's hook contract merges `.data`
-			// into the insert payload — this is how `streampayConsumerId`
-			// lands on the row atomically with the user insert.
+
 			expect(result).toEqual({ data: { streampayConsumerId: "cons_fresh" } });
 		});
 
@@ -136,12 +127,6 @@ describe("consumer hooks", () => {
 		});
 
 		it("throws generic message and logs detail when StreamPay rejects createConsumer — orphan-row fix", async () => {
-			// Critical regression guard: when the before-hook throws, Better
-			// Auth's createWithHooks aborts the insert, so no user row is
-			// persisted. The thrown message is a generic user-facing string
-			// to avoid leaking upstream SDK error details (which may include
-			// other users' identifiers via DUPLICATE_CONSUMER); the detail
-			// goes to the server log instead.
 			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			mockClient.createConsumer.mockRejectedValue(
 				mockApiError(403, {
@@ -165,10 +150,6 @@ describe("consumer hooks", () => {
 		});
 
 		describe("DUPLICATE_CONSUMER reuse path", () => {
-			// Shared fixture: StreamPay rejects create with DUPLICATE_CONSUMER.
-			// The hook should then call listConsumers and decide whether to
-			// reuse, refuse, or re-throw based on the existing consumer's
-			// external_id.
 			const duplicateError = mockApiError(400, {
 				error: {
 					code: "DUPLICATE_CONSUMER",
@@ -180,8 +161,7 @@ describe("consumer hooks", () => {
 			it("reuses a STRANDED consumer (no external_id) on DUPLICATE_CONSUMER", async () => {
 				const options = createEagerTestStreamPayOptions({ client: mockClient });
 				mockClient.createConsumer.mockRejectedValue(duplicateError);
-				// Stranded: external_id is null — this consumer belongs to
-				// nobody, so linking it to the new user is safe.
+
 				mockClient.listConsumers.mockResolvedValue(
 					createMockConsumerList([
 						createMockConsumer({
@@ -206,9 +186,7 @@ describe("consumer hooks", () => {
 			it("REFUSES to reuse a consumer that is already linked to another user", async () => {
 				const options = createEagerTestStreamPayOptions({ client: mockClient });
 				mockClient.createConsumer.mockRejectedValue(duplicateError);
-				// Linked: external_id points to some other Better Auth user.
-				// Reusing it would hand this user access to that other user's
-				// billing history. The hook must refuse.
+
 				mockClient.listConsumers.mockResolvedValue(
 					createMockConsumerList([
 						createMockConsumer({
@@ -225,9 +203,7 @@ describe("consumer hooks", () => {
 				await expect(invokeHook(onBeforeUserCreate(options), user, ctx)).rejects.toBeInstanceOf(
 					MockAPIError,
 				);
-				// The logger must record enough context for ops to debug,
-				// but the message thrown to the user must NOT expose the
-				// fact that another account exists (user-enumeration leak).
+
 				expect(ctx.context.logger.error).toHaveBeenCalledWith(
 					expect.stringContaining("already linked to external_id"),
 				);
@@ -292,11 +268,7 @@ describe("consumer hooks", () => {
 			it("falls through to a generic error when the scan cannot find the duplicate (detail logged server-side)", async () => {
 				const options = createEagerTestStreamPayOptions({ client: mockClient });
 				mockClient.createConsumer.mockRejectedValue(duplicateError);
-				// StreamPay said duplicate but the scan is empty — could be
-				// pagination gap, race, or soft-delete. We log the upstream
-				// detail (which includes the colliding identifier) and surface
-				// a generic message to the client so the identifier cannot
-				// leak into the response body.
+
 				mockClient.listConsumers.mockResolvedValue(createMockConsumerList());
 
 				const user = createMockUser();
@@ -311,9 +283,6 @@ describe("consumer hooks", () => {
 			});
 
 			it("matches on phone_number, not just email", async () => {
-				// If the integrator uses getConsumerCreateParams to set a
-				// phone number and StreamPay rejects because of a phone
-				// duplicate, the reuse path must find the match by phone.
 				const options = createEagerTestStreamPayOptions({
 					client: mockClient,
 					getConsumerCreateParams: async () => ({
@@ -374,8 +343,6 @@ describe("consumer hooks", () => {
 			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			mockClient.updateConsumer.mockResolvedValue(createMockConsumer());
 
-			// By the time this hook runs, the before-hook has already created
-			// the consumer and its id lives on the row.
 			const user = createMockUser({
 				id: "user-fresh",
 				streampayConsumerId: "cons_fresh",
@@ -390,10 +357,6 @@ describe("consumer hooks", () => {
 		});
 
 		it("logs but does NOT throw when the back-link update fails", async () => {
-			// The user row is already committed by the time the after-hook
-			// runs. Throwing would surface as a 500 after a successful
-			// sign-up — worse UX than leaving the consumer temporarily
-			// unlinked (it can still be resolved via its id on the row).
 			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			mockClient.updateConsumer.mockRejectedValue(
 				mockApiError(500, { error: { message: "streampay down" } }),
@@ -450,9 +413,6 @@ describe("consumer hooks", () => {
 		});
 
 		it("skips updateConsumer entirely when remote matches local (no-op update)", async () => {
-			// The core win of fetch+diff: a user row update that didn't
-			// touch name/email (avatar change, emailVerified flip, etc.)
-			// should not result in any StreamPay write.
 			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			mockClient.getConsumer.mockResolvedValue(
 				createMockConsumer({
@@ -475,10 +435,6 @@ describe("consumer hooks", () => {
 		});
 
 		it("short-circuits without calling getConsumer when streampayConsumerId is not stored", async () => {
-			// Legacy users without the column (pre-schema-migration) are
-			// skipped cheaply. No getConsumer, no updateConsumer. They get
-			// linked on their next ensureConsumerForUser call (first
-			// checkout), after which sync resumes normally.
 			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			const user = createMockUser({ streampayConsumerId: null });
 			const ctx = createMockContext({ user });
@@ -490,10 +446,6 @@ describe("consumer hooks", () => {
 		});
 
 		it("skips the PATCH when the remote consumer is soft-deleted (does not clear the link)", async () => {
-			// is_deleted rows may be restored by StreamPay's admin flow;
-			// re-provisioning here would orphan the original billing
-			// history. Safer to no-op and leave the stale link for a
-			// manual reconciliation decision.
 			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			mockClient.getConsumer.mockResolvedValue(
 				createMockConsumer({
@@ -517,11 +469,6 @@ describe("consumer hooks", () => {
 		});
 
 		it("self-heals on getConsumer 404 by clearing streampayConsumerId for re-provisioning", async () => {
-			// The consumer was deleted out-of-band (admin action, test
-			// cleanup). Without a self-heal the stale id sticks on the
-			// user row forever and every profile edit re-404s. The hook
-			// clears the link instead so the next checkout re-provisions
-			// via the lazy path.
 			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			mockClient.getConsumer.mockRejectedValue(
 				mockApiError(404, { error: { message: "not found" } }),
@@ -542,11 +489,6 @@ describe("consumer hooks", () => {
 		});
 
 		it("logs but never throws when getConsumer fails with a non-404 error", async () => {
-			// Any upstream failure that isn't a 404 (StreamPay down, auth,
-			// transient 5xx) must be swallowed — the Better Auth user
-			// update has already committed, so throwing would desync.
-			// Unlike the 404 self-heal, the stale link is preserved —
-			// StreamPay might just be flaking, not missing the consumer.
 			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			mockClient.getConsumer.mockRejectedValue(
 				mockApiError(503, { error: { message: "unavailable" } }),
@@ -564,9 +506,6 @@ describe("consumer hooks", () => {
 		});
 
 		it("syncs lazy-linked consumers even when createConsumerOnSignUp is false", async () => {
-			// The hook is gated on streampayConsumerId presence, NOT on
-			// the flag. Any user with a linked consumer (eager or lazy)
-			// gets their updates synced.
 			const options = createEagerTestStreamPayOptions({
 				client: mockClient,
 				createConsumerOnSignUp: false,

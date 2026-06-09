@@ -1,15 +1,3 @@
-/**
- * Better Auth's logger wraps every message with `[Better Auth]: …`. Every
- * line that originates in this plugin should additionally carry a
- * `[streampay]` token so operators can filter the plugin's output with
- * a single regex regardless of Better Auth's outer formatting.
- *
- * Wire it once at the top of any code path that owns a `ctx.context.logger`
- * (endpoint handler, sync function, hook). The shape mirrors the subset
- * of Better Auth's logger the plugin actually calls — keeping the surface
- * minimal avoids tight-coupling to logger features we don't depend on.
- */
-
 export interface ScopedLogger {
 	error: (message: string) => void;
 	warn: (message: string) => void;
@@ -35,11 +23,6 @@ export function scopedLogger(logger: UnderlyingLogger): ScopedLogger {
 	};
 }
 
-/**
- * Pulls Better Auth's request logger from any context shape that has one
- * and wraps it with the plugin prefix. Use at the top of every endpoint
- * handler, webhook callback, or hook body that emits log lines.
- */
 export function getLogger(ctx: { context: { logger: UnderlyingLogger } }): ScopedLogger {
 	return scopedLogger(ctx.context.logger);
 }

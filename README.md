@@ -193,7 +193,6 @@ await authClient.checkout({
 | `slug`                | `string`                                   | Resolved server-side via `products`    |
 | `products`            | `string \| string[] \| { productId, quantity? }[]` | UUID(s)                        |
 | `referenceId`         | `string`                                   | Stored in `custom_metadata`            |
-| `consumerId`          | `string` (uuid)                            | Override the resolved consumer         |
 | `name`                | `string`                                   | Payment link display name              |
 | `description`         | `string`                                   |                                        |
 | `metadata`            | `Record<string, string \| number \| boolean>` |                                     |

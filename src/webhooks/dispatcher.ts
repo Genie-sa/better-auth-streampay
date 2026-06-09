@@ -5,11 +5,6 @@ import type {
 	StreamPayWebhookPayload,
 } from "./events";
 
-/**
- * Generic webhook handler. Parameterized on `event_type` and
- * `entity_type` so per-event slots (`onPaymentSucceeded`, …) receive a
- * payload narrowed to the exact literal StreamPay sent.
- */
 export type WebhookHandler<
 	TEvent extends StreamPayEventType = StreamPayEventType,
 	TEntity extends StreamPayEntityType = StreamPayEntityType,
@@ -17,17 +12,14 @@ export type WebhookHandler<
 > = (payload: StreamPayWebhookPayload<TEvent, TEntity, TData>) => Promise<void> | void;
 
 export interface WebhookHandlers {
-	/** Catch-all. Runs BEFORE the specific handler. Wide payload. */
 	onPayload?: WebhookHandler;
 
-	// Payment
 	onPaymentSucceeded?: WebhookHandler<"PAYMENT_SUCCEEDED", "PAYMENT">;
 	onPaymentFailed?: WebhookHandler<"PAYMENT_FAILED", "PAYMENT">;
 	onPaymentCanceled?: WebhookHandler<"PAYMENT_CANCELED", "PAYMENT">;
 	onPaymentRefunded?: WebhookHandler<"PAYMENT_REFUNDED", "PAYMENT">;
 	onPaymentMarkedAsPaid?: WebhookHandler<"PAYMENT_MARKED_AS_PAID", "PAYMENT">;
 
-	// Invoice
 	onInvoiceCreated?: WebhookHandler<"INVOICE_CREATED", "INVOICE">;
 	onInvoiceSent?: WebhookHandler<"INVOICE_SENT", "INVOICE">;
 	onInvoiceAccepted?: WebhookHandler<"INVOICE_ACCEPTED", "INVOICE">;
@@ -36,7 +28,6 @@ export interface WebhookHandlers {
 	onInvoiceCanceled?: WebhookHandler<"INVOICE_CANCELED", "INVOICE">;
 	onInvoiceUpdated?: WebhookHandler<"INVOICE_UPDATED", "INVOICE">;
 
-	// Subscription
 	onSubscriptionCreated?: WebhookHandler<"SUBSCRIPTION_CREATED", "SUBSCRIPTION">;
 	onSubscriptionActivated?: WebhookHandler<"SUBSCRIPTION_ACTIVATED", "SUBSCRIPTION">;
 	onSubscriptionInactivated?: WebhookHandler<"SUBSCRIPTION_INACTIVATED", "SUBSCRIPTION">;
@@ -55,7 +46,6 @@ export interface WebhookHandlers {
 	onSubscriptionUnfreezeFuture?: WebhookHandler<"SUBSCRIPTION_UNFREEZE_FUTURE", "SUBSCRIPTION">;
 	onSubscriptionFreezeCancel?: WebhookHandler<"SUBSCRIPTION_FREEZE_CANCEL", "SUBSCRIPTION">;
 
-	// Payment Link
 	onPaymentLinkPayAttemptFailed?: WebhookHandler<"PAYMENT_LINK_PAY_ATTEMPT_FAILED", "PAYMENT_LINK">;
 }
 
@@ -66,7 +56,6 @@ export async function dispatchWebhook(
 	if (handlers.onPayload) await handlers.onPayload(payload);
 
 	switch (payload.event_type) {
-		// Payment
 		case "PAYMENT_SUCCEEDED":
 			await handlers.onPaymentSucceeded?.(payload);
 			return;
@@ -83,7 +72,6 @@ export async function dispatchWebhook(
 			await handlers.onPaymentMarkedAsPaid?.(payload);
 			return;
 
-		// Invoice
 		case "INVOICE_CREATED":
 			await handlers.onInvoiceCreated?.(payload);
 			return;
@@ -106,7 +94,6 @@ export async function dispatchWebhook(
 			await handlers.onInvoiceUpdated?.(payload);
 			return;
 
-		// Subscription
 		case "SUBSCRIPTION_CREATED":
 			await handlers.onSubscriptionCreated?.(payload);
 			return;
@@ -141,14 +128,11 @@ export async function dispatchWebhook(
 			await handlers.onSubscriptionFreezeCancel?.(payload);
 			return;
 
-		// Payment Link
 		case "PAYMENT_LINK_PAY_ATTEMPT_FAILED":
 			await handlers.onPaymentLinkPayAttemptFailed?.(payload);
 			return;
 
 		default: {
-			// Exhaustiveness guard — fails typecheck if a new event is
-			// added to StreamPayWebhookPayload without a case here.
 			const _exhaustive: never = payload;
 			void _exhaustive;
 			return;

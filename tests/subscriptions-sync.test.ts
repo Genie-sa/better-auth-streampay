@@ -113,7 +113,6 @@ describe("syncWebhookPayload", () => {
 				rawPayload: '{"event_type":"SUBSCRIPTION_ACTIVATED"}',
 			});
 
-			// Next delivery: upstream recovers → row flips to completed.
 			await seedActiveSub(ctx, "sub_c");
 			await syncWebhookPayload(ctx, payload, client, resolvedPlans(), {} as SubscriptionCallbacks);
 			expect(rows[0]).toMatchObject({ status: "completed", attemptCount: 2 });
@@ -132,7 +131,7 @@ describe("syncWebhookPayload", () => {
 			client.getSubscription.mockRejectedValue(new Error("upstream down"));
 
 			const opts = { rawBody, signatureHeader, maxAttempts: 3 } as const;
-			// Deliveries 1-3 throw + record failure; delivery 4 dead-letters and returns silently.
+
 			await expect(
 				syncWebhookPayload(
 					ctx,
@@ -180,7 +179,6 @@ describe("syncWebhookPayload", () => {
 				signatureHeader,
 			});
 
-			// Subsequent delivery is a no-op (we own retries now).
 			await syncWebhookPayload(
 				ctx,
 				payload,
@@ -376,9 +374,6 @@ describe("syncWebhookPayload", () => {
 				}),
 			});
 
-			// StreamPay keeps status as ACTIVE during dunning; our sync layer
-			// must derive past_due from the event type, not just the live
-			// status.
 			client.getSubscription.mockResolvedValue({
 				id: "sub_f",
 				status: "ACTIVE",
@@ -395,10 +390,8 @@ describe("syncWebhookPayload", () => {
 			await syncWebhookPayload(ctx, payload, client, resolvedPlans(), {
 				onSubscriptionPaymentFailed: fn,
 			});
-			// Note: sync projects `toLocalStatus("ACTIVE")` which is "active" —
-			// past_due inference is reserved for a follow-up enhancement. For
-			// now we verify the callback fires so userland can mark the user
-			// past due at the application layer.
+			const row = (ctx.adapter.tables.subscription ?? [])[0];
+			expect(row?.status).toBe("past_due");
 			expect(fn).toHaveBeenCalledTimes(1);
 		});
 	});
@@ -506,7 +499,7 @@ describe("syncWebhookPayload", () => {
 				}),
 			).resolves.toBeUndefined();
 			expect(ctx.logs.error.some((m) => m.includes("userland boom"))).toBe(true);
-			// Row still got updated despite the callback failing.
+
 			const row = (ctx.adapter.tables.subscription ?? [])[0];
 			expect(row?.status).toBe("active");
 		});
@@ -514,9 +507,13 @@ describe("syncWebhookPayload", () => {
 });
 
 describe("classifyWebhookFailure", () => {
-	it("classifies 4xx SDK errors (not 429) as PERMANENT — stop StreamPay retries", () => {
+	it("classifies 4xx SDK errors (not 404/429) as PERMANENT — stop StreamPay retries", () => {
 		expect(classifyWebhookFailure(mockApiError(400, {}))).toBe("PERMANENT");
-		expect(classifyWebhookFailure(mockApiError(404, {}))).toBe("PERMANENT");
+		expect(classifyWebhookFailure(mockApiError(403, {}))).toBe("PERMANENT");
+	});
+
+	it("classifies 404 as TRANSIENT — read-after-write races ride the retry budget", () => {
+		expect(classifyWebhookFailure(mockApiError(404, {}))).toBe("TRANSIENT");
 	});
 
 	it("classifies 429/5xx/unknown errors as TRANSIENT — let StreamPay retry", () => {

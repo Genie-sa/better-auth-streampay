@@ -9,13 +9,6 @@ import type { StreamPayWebhookPayload } from "../../src/webhooks/events";
 
 let nextId = 0;
 
-/**
- * In-memory Better Auth adapter stub. Stores rows keyed by `model`
- * name, supports find/findMany/create/update/delete with the query
- * predicate shape our plugin actually uses. Throws a unique-
- * constraint-shaped error on duplicate inserts into columns that the
- * real schema marks as `unique`, mirroring how Drizzle/Prisma behave.
- */
 export function createMockAdapter(): PluginAdapter & {
 	tables: Record<string, Record<string, unknown>[]>;
 	resetIdCounter: (seed?: number) => void;
@@ -143,11 +136,6 @@ export function createMockAdapter(): PluginAdapter & {
 	};
 }
 
-/**
- * Build a minimal `SyncContext` — just an adapter + a logger. Used by
- * direct-unit tests of `syncWebhookPayload` that bypass the HTTP
- * endpoint entirely.
- */
 export function createMockSyncContext<
 	A extends PluginAdapter = ReturnType<typeof createMockAdapter>,
 >(
@@ -177,10 +165,6 @@ export function createMockSyncContext<
 	};
 }
 
-/**
- * Build a local `subscription` row with sensible defaults. Every
- * field is overridable via the partial arg.
- */
 export function createMockSubscriptionRow(overrides: Partial<Subscription> = {}): Subscription {
 	const now = new Date();
 	return {
@@ -206,11 +190,6 @@ export function createMockSubscriptionRow(overrides: Partial<Subscription> = {})
 	};
 }
 
-/**
- * Build a webhook payload — defaults to a SUBSCRIPTION_CREATED event.
- * Override `event_type`, `entity_id`, and `data.metadata` to target
- * specific sync paths.
- */
 export function createMockWebhookPayload<E extends StreamPayWebhookPayload["event_type"]>(
 	overrides: {
 		event_type?: E;
@@ -233,16 +212,8 @@ export function createMockWebhookPayload<E extends StreamPayWebhookPayload["even
 	};
 }
 
-/**
- * Silence the reference to `nextId` being otherwise used only for id
- * generation — keeps the bundler happy without an `_unused` prefix.
- */
 export const __nextId = () => nextId;
 
-/**
- * Convenience assertion builder — produces a `vi.fn` wrapper that
- * records call order without requiring tests to thread counters.
- */
 export function trackedCallback<T extends (...args: unknown[]) => unknown>(impl?: T) {
 	return vi.fn(impl ?? (() => undefined));
 }

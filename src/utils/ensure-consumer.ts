@@ -10,6 +10,8 @@ import {
 	type ConsumerIdentifiers,
 	findConsumerByExternalId,
 	findConsumerByIdentifiers,
+	sameEmail,
+	samePhone,
 } from "./consumer";
 import { readEnvelope, readSdkErrorFields } from "./error-envelope";
 import { formatStreamPayError } from "./format-error";
@@ -35,16 +37,6 @@ export interface EnsureConsumerContext extends StreamPayLoggerContext {
 	};
 }
 
-export function sameEmail(a: string | null | undefined, b: string | null | undefined): boolean {
-	if (!a || !b) return false;
-	return a.trim().toLowerCase() === b.trim().toLowerCase();
-}
-
-export function samePhone(a: string | null | undefined, b: string | null | undefined): boolean {
-	if (!a || !b) return false;
-	return a.trim() === b.trim();
-}
-
 export function canClaimBy(
 	mode: ClaimExistingConsumerBy | undefined,
 	identifier: ClaimExistingConsumerIdentifier,
@@ -61,13 +53,6 @@ export function isNotFoundError(err: unknown): boolean {
 	return readSdkErrorFields(err).status === 404;
 }
 
-/**
- * On `DUPLICATE_CONSUMER`, find the existing consumer and decide whether
- * reuse is safe. Stranded consumers (no `external_id`) are always safe;
- * same-user is idempotent; a linked consumer for a different user is
- * refused unless claimExistingConsumerBy opts in — silently reusing would
- * hand one account access to another's billing history.
- */
 export async function resolveDuplicateConsumer(
 	options: StreamPayOptions,
 	createPayload: ConsumerCreate,
@@ -112,11 +97,6 @@ export async function resolveDuplicateConsumer(
 	return existing.id;
 }
 
-/**
- * Lazy/on-demand consumer provisioning. Race-safe: two concurrent
- * callers race through `createConsumer`; the loser gets DUPLICATE_CONSUMER,
- * resolves to the winner's consumer, and both writers converge.
- */
 export async function ensureConsumerForUser(
 	options: StreamPayOptions,
 	ctx: EnsureConsumerContext,
@@ -169,9 +149,6 @@ export async function ensureConsumerForUser(
 		if (isDuplicateConsumerError(err)) {
 			const reusedId = await resolveDuplicateConsumer(options, payload, ctx);
 			if (reusedId) {
-				// Back-fill external_id so subsequent recovery scans hit
-				// findConsumerByExternalId and skip the create round-trip.
-				// Failure is non-fatal — we pay the scan cost next time.
 				try {
 					await options.client.updateConsumer(reusedId, { external_id: user.id });
 				} catch (backfillErr: unknown) {
@@ -184,8 +161,6 @@ export async function ensureConsumerForUser(
 			}
 		}
 
-		// Generic user-facing message — SDK strings can carry other users'
-		// identifiers via DUPLICATE_CONSUMER.additional_info.
 		getLogger(ctx).error(
 			`consumer creation failed for user=${user.id}: ${formatStreamPayError(err)}`,
 		);
@@ -205,7 +180,6 @@ async function persistConsumerId(
 			streampayConsumerId: consumerId,
 		});
 	} catch (err: unknown) {
-		// Consumer is live in StreamPay; next call recovers via findByExternalId.
 		getLogger(ctx).error(
 			`consumer link write failed for user=${userId}: ${formatStreamPayError(err)}`,
 		);

@@ -35,15 +35,6 @@ function hasInternalAdapter(ctx: StreamPayHookContext): ctx is StreamPayMutableH
 	);
 }
 
-/**
- * Create the StreamPay consumer before Better Auth writes the user row
- * and inject the consumer id via `{ data }`. If creation throws, the
- * sign-up aborts before any user row is committed — the only way to make
- * two-system sign-up atomic without a cross-system transaction.
- *
- * `external_id` is patched on in `onAfterUserCreate` because Better Auth
- * generates `user.id` inside `adapter.create()`, which runs after this.
- */
 export const onBeforeUserCreate =
 	(options: StreamPayOptions) =>
 	async (
@@ -63,7 +54,6 @@ export const onBeforeUserCreate =
 			? await options.getConsumerCreateParams({ user })
 			: {};
 
-		// `||` so empty-string name falls through to email.
 		const createPayload: ConsumerCreate = {
 			name: user.name || user.email,
 			email: user.email,
@@ -88,8 +78,6 @@ export const onBeforeUserCreate =
 				}
 			}
 
-			// Generic user-facing message — SDK strings can contain other
-			// users' identifiers via DUPLICATE_CONSUMER.additional_info.
 			getLogger(context).error(
 				`consumer creation failed for user=${user.id ?? "<pre-insert>"}: ${formatStreamPayError(err)}`,
 			);
@@ -119,12 +107,6 @@ export const onAfterUserCreate =
 		}
 	};
 
-/**
- * Sync profile changes to the linked StreamPay consumer. Fetch-diff-update:
- * Better Auth fires this on every row mutation (image, emailVerified, …),
- * so a blind PATCH would generate no-op remote writes. On 404 we clear
- * the stale link so the lazy path re-provisions.
- */
 export const onUserUpdate =
 	(options: StreamPayOptions) =>
 	async (user: User, context: StreamPayHookContext | null): Promise<void> => {
@@ -137,8 +119,6 @@ export const onUserUpdate =
 		try {
 			const remote = await options.client.getConsumer(sessionUser.streampayConsumerId);
 
-			// Soft-delete may be reversible on StreamPay's side; don't
-			// clear the link or a reversal would orphan it.
 			if (remote.is_deleted === true) return;
 
 			const patch: ConsumerUpdate = {};
@@ -188,7 +168,6 @@ export const onUserDelete =
 		try {
 			await options.client.deleteConsumer(sessionUser.streampayConsumerId);
 		} catch (err: unknown) {
-			// 404 = already gone; desired end state reached.
 			if (isNotFoundError(err)) return;
 			getLogger(context).error(
 				`consumer delete failed for user=${sessionUser.id} consumer=${sessionUser.streampayConsumerId}: ${formatStreamPayError(err)}`,

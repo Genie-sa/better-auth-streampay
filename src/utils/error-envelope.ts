@@ -1,13 +1,5 @@
 import { z } from "zod";
 
-/**
- * Shared zod parsers for the StreamPay error envelope. The SDK throws
- * `StreamSDKError` (subclass of `Error`) whose `.body` carries the
- * actual API response. This module centralizes the shape checks so
- * `parseStreamPayError`, `formatStreamPayError`, `isDuplicateConsumerError`,
- * `isNotFoundError`, and `classifyWebhookFailure` all parse the same way.
- */
-
 const ErrorShape = z.object({
 	code: z.string().optional(),
 	message: z.string().optional(),
@@ -56,11 +48,6 @@ export interface SdkErrorFields {
 	message: string;
 }
 
-/**
- * Pull the standard `status` / `requestId` / `body` off an SDK-thrown
- * error without requiring the SDK's non-exported error class.
- * Non-`Error` inputs come back as an empty-fields shape.
- */
 export function readSdkErrorFields(err: unknown): SdkErrorFields {
 	if (!(err instanceof Error)) {
 		return { status: undefined, requestId: undefined, body: undefined, message: String(err) };
@@ -75,11 +62,6 @@ export function readSdkErrorFields(err: unknown): SdkErrorFields {
 	};
 }
 
-/**
- * Parse the `{ error: { code, message, additional_info } }` envelope.
- * Returns `null` when the body has no recognizable envelope fields so
- * callers can fall back to validation-detail or raw-message handling.
- */
 export function readEnvelope(body: unknown): StreamPayErrorEnvelope | null {
 	const parsed = StreamPayErrorBodySchema.safeParse(body);
 	if (!parsed.success || !parsed.data.error) return null;
@@ -88,11 +70,6 @@ export function readEnvelope(body: unknown): StreamPayErrorEnvelope | null {
 	return { code, message, additionalInfo: additional_info };
 }
 
-/**
- * Parse FastAPI's 422 validation detail array. Empty entries are
- * dropped; every entry that survives has at least one of `loc`, `msg`,
- * or `type` populated.
- */
 export function readValidationDetails(body: unknown): StreamPayValidationDetail[] {
 	const parsed = StreamPayErrorBodySchema.safeParse(body);
 	if (!parsed.success || !parsed.data.detail) return [];

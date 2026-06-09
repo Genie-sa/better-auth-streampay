@@ -80,7 +80,6 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 		});
 
 		it("recovers an existing consumer by external_id without creating a new one", async () => {
-			// Covers the "consumer was created previously but updateUser failed" case.
 			mockClient.listConsumers.mockResolvedValue(
 				createMockConsumerList([createMockConsumer({ id: "cons_prior", external_id: "user-1" })]),
 			);
@@ -137,7 +136,6 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 			);
 			mockClient.listConsumers.mockResolvedValue(
 				createMockConsumerList([
-					// stranded consumer — no external_id → safe to reuse
 					createMockConsumer({ id: "cons_stranded", email: "a@b.com", external_id: "" }),
 				]),
 			);
@@ -193,8 +191,6 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 			const options = createTestStreamPayOptions({ client: mockClient });
 			const ctx = createMockContext();
 
-			// Destructure the HTTP status + structured body so a future
-			// refactor can't silently drop either.
 			await expect(
 				ensureConsumerForUser(options, ctx, { id: "user-1", email: "a@b.com" }),
 			).rejects.toMatchObject({
@@ -223,10 +219,6 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 
 	describe("checkout lazy path", () => {
 		it("race safety: concurrent ensure calls converge on the same consumer via DUPLICATE_CONSUMER resolution", async () => {
-			// Simulate the race: both callers arrive before either has
-			// written streampayConsumerId back. listConsumers is empty
-			// until the winner creates — after that, a scan sees the
-			// winner's consumer and the loser's resolve path reuses it.
 			const winner = createMockConsumer({ id: "cons_winner", external_id: "user-race" });
 			let consumerExists = false;
 			mockClient.listConsumers.mockImplementation(async () => {
@@ -258,10 +250,9 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 
 			expect(a.consumerId).toBe("cons_winner");
 			expect(b.consumerId).toBe("cons_winner");
-			expect(createCalls).toBe(2); // both tried create; loser got DUPLICATE_CONSUMER
+			expect(createCalls).toBe(2);
 		});
 	});
 
-	// Keep MockAPIError referenced so the vi.mock replacement is not GC'd.
 	void MockAPIError;
 });

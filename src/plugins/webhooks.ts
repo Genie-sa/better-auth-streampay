@@ -6,13 +6,9 @@ import type { StreamPayWebhookPayload } from "../webhooks/events";
 import { StreamPayWebhookError, verifyWebhookOrThrow } from "../webhooks/verify";
 import type { StreamPayPluginRegistry } from "./subscriptions";
 
+/** Options for `webhooks()`: the signing `secret` (single or rotated), freshness `toleranceSeconds`, and per-event handlers. */
 export interface WebhooksOptions extends WebhookHandlers {
-	/**
-	 * Shared secret configured in the StreamPay dashboard. Accepts a
-	 * single value or an array of secrets for rolling rotation.
-	 */
 	secret: string | readonly string[];
-	/** Maximum age (seconds) a signed payload is considered fresh. */
 	toleranceSeconds?: number;
 }
 
@@ -27,6 +23,7 @@ function toErrorCode(reason: StreamPayWebhookError["reason"]): "UNAUTHORIZED" | 
 		: "BAD_REQUEST";
 }
 
+/** Signed-webhook sub-plugin. Verifies StreamPay signatures and dispatches `POST /streampay/webhooks` to your handlers. */
 export const webhooks =
 	(webhooksOptions: WebhooksOptions) =>
 	(_options: StreamPayOptions, registry?: StreamPayPluginRegistry) => {
@@ -91,9 +88,6 @@ export const webhooks =
 						}
 						const payload = parsed;
 
-						// Plugin sync runs BEFORE user handlers so userland sees
-						// fresh state. Transient failures → 500 → StreamPay retries;
-						// permanent failures are swallowed inside the sync wrapper.
 						if (registry?.subscriptionWebhookSync) {
 							try {
 								await registry.subscriptionWebhookSync(ctx, payload, {

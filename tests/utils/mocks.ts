@@ -36,13 +36,6 @@ import type { Mock } from "vitest";
 import { vi } from "vitest";
 import type { StreamPayClient } from "../../src/types";
 
-/**
- * Exact shape of a mocked `StreamPayClient`. Each method is a `vi.fn`
- * whose generic is pinned to the real signature, so the object literal
- * below is structurally assignable to `StreamPayClient` without any
- * cast — assertions, `.mockResolvedValue`, and type errors all work as
- * they would on the real class.
- */
 export type MockedStreamPayClient = {
 	[K in keyof StreamPayClient]: ReturnType<typeof vi.fn<StreamPayClient[K]>>;
 };
@@ -106,16 +99,6 @@ export const createMockStreamPayClient = (): MockedStreamPayClient => ({
 		vi.fn<(paymentId: string, input: PaymentRefundRequest) => Promise<PaymentResponse>>(),
 });
 
-/**
- * `MockUser` extends Better Auth's real `User` type and adds the
- * `streampayConsumerId` column the plugin's schema extension injects.
- * Using Better Auth's `User` as the base means:
- *
- *   - Any new field Better Auth adds to `User` flows in automatically.
- *   - The plugin's hook signatures (`(user: User) => ...`) accept a
- *     `MockUser` without coercion.
- *   - TypeScript surfaces any real breaking change at compile time.
- */
 export type MockUser = User & {
 	streampayConsumerId: string | null;
 	isAnonymous?: boolean;
@@ -133,11 +116,6 @@ export const createMockUser = (overrides: Partial<MockUser> = {}): MockUser => (
 	...overrides,
 });
 
-/**
- * Explicit context shape used across tests. Built as a plain object so
- * each test can partially override any branch (session, request, body,
- * query) without TypeScript losing track of the remainder.
- */
 export interface MockCtxOptions {
 	user?: MockUser | undefined;
 	body?: Record<string, unknown>;
@@ -170,8 +148,6 @@ export interface MockCtx {
 }
 
 export const createMockContext = (options: MockCtxOptions = {}): MockCtx => {
-	// Distinguish "no option passed" (use default user) from
-	// "explicitly undefined" (test wants an unauthenticated ctx).
 	const user = "user" in options ? options.user : createMockUser();
 	return {
 		context: {
@@ -202,11 +178,6 @@ export const createMockContext = (options: MockCtxOptions = {}): MockCtx => {
 		json: vi.fn<(value: unknown) => unknown>((value: unknown) => value),
 	};
 };
-
-// ----------------------------------------------------------------------
-// Fixture builders — every field on the target type is optional, so a
-// plain literal with sane defaults is assignable without any cast.
-// ----------------------------------------------------------------------
 
 export const createMockConsumer = (overrides: ConsumerResponse = {}): ConsumerResponse => ({
 	id: "cons_mocked",
@@ -286,11 +257,6 @@ export const createMockInvoiceDetailed = (overrides: InvoiceDetailed = {}): Invo
 	created_at: new Date().toISOString(),
 	...overrides,
 });
-
-// ----------------------------------------------------------------------
-// List-response builders. Every field on `Pagination` is optional, so
-// the object literal is assignable to the real SDK type directly.
-// ----------------------------------------------------------------------
 
 export const createMockConsumerList = (items: ConsumerResponse[] = []): ConsumerListResponse => ({
 	data: items,

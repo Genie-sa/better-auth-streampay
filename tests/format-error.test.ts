@@ -110,7 +110,7 @@ describe("formatStreamPayError", () => {
 			const body: Record<string, unknown> = { circular: null };
 			body.circular = body;
 			const err = mockApiError(500, body);
-			// Should NOT throw; falls back to `err.message`.
+
 			expect(() => formatStreamPayError(err)).not.toThrow();
 			expect(formatStreamPayError(err)).toContain("HTTP 500");
 		});

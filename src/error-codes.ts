@@ -1,15 +1,3 @@
-/**
- * Plugin-level error taxonomy. Collapses StreamPay's raw 63-code enum
- * into billing-focused buckets callers can branch on stably. Raw
- * non-billing codes (MFA_*, SAUDI_ID_*, ORGANIZATION_*, …) fall through
- * to UNKNOWN — they originate from flows this plugin doesn't exercise.
- *
- * Shape follows Better Auth's `defineErrorCodes` so client-side error
- * reflections match the built-in plugins.
- *
- * Raw codes: https://stream-app-service.streampay.sa/openapi.json#/components/schemas/StreamErrorCodes
- */
-
 export interface ErrorCodeEntry<K extends string> {
 	code: K;
 	message: string;
@@ -60,24 +48,18 @@ export const $ERROR_CODES = defineErrorCodes({
 
 export type StreamPayErrorCode = keyof typeof $ERROR_CODES;
 
-// Raw-code → bucket map. Codes missing here fall through to the
-// status-based classifier and ultimately UNKNOWN.
 const RAW_CODE_MAP: Record<string, StreamPayErrorCode> = {
-	// Validation
 	INVALID_PARAMETERS: "VALIDATION_ERROR",
 
-	// Permissions
 	PERMISSION_FORBIDDEN: "FORBIDDEN",
 	BRANCH_ACCESS_DENIED: "FORBIDDEN",
 	BRANCH_NOT_FOUND: "NOT_FOUND",
 
-	// Consumer
 	DUPLICATE_CONSUMER: "CONSUMER_DUPLICATE",
 	DUPLICATE_CARD_TOKEN: "CONSUMER_DUPLICATE",
 	CONSUMER_HAS_ONGOING_INVOICES: "CONSUMER_HAS_ONGOING_ACTIVITY",
 	CONSUMER_HAS_ONGOING_SUBSCRIPTIONS: "CONSUMER_HAS_ONGOING_ACTIVITY",
 
-	// Invoice state
 	INVOICE_FINALISED: "INVOICE_INVALID_STATE",
 	INVOICE_INVALID_STATUS: "INVOICE_INVALID_STATE",
 	INVOICE_CONSENT_CONSUMED: "INVOICE_INVALID_STATE",
@@ -85,18 +67,15 @@ const RAW_CODE_MAP: Record<string, StreamPayErrorCode> = {
 	INVOICE_TOTAL_MISMATCH_PAYMENT_AMOUNT_SUM: "INVOICE_INVALID_STATE",
 	INVOICE_PAYMENT_COUNT_NOT_MATCHED: "INVOICE_INVALID_STATE",
 
-	// Payment state / duplicates
 	DUPLICATE_PAYMENT: "PAYMENT_DUPLICATE",
 	PAYMENT_IN_PROGRESS: "PAYMENT_INVALID_STATE",
 	PAYMENT_FINALIZED: "PAYMENT_INVALID_STATE",
-	PAYMEND_UNPAID: "PAYMENT_INVALID_STATE", // sic — upstream typo we inherit
+	PAYMEND_UNPAID: "PAYMENT_INVALID_STATE",
 	INVALID_STATUS: "PAYMENT_INVALID_STATE",
 
-	// Refund outcomes
 	PAYMENT_REFUNDED_ALREADY: "PAYMENT_ALREADY_REFUNDED",
 	PAYMENT_REFUNDED_FAILED: "PAYMENT_REFUND_FAILED",
 
-	// Gateway — declined (do not auto-retry; user must take action)
 	PAYMENT_GATEWAY_DECLINED: "PAYMENT_GATEWAY_DECLINED",
 	INSUFFICIENT_FUNDS: "PAYMENT_GATEWAY_DECLINED",
 	MOYASAR_PAYMENT_INFO_MISMATCH: "PAYMENT_GATEWAY_DECLINED",
@@ -106,13 +85,11 @@ const RAW_CODE_MAP: Record<string, StreamPayErrorCode> = {
 	MOYASAR_NOT_FOUND: "PAYMENT_GATEWAY_DECLINED",
 	MOYASAR_METHOD_NOT_ALLOWED: "PAYMENT_GATEWAY_DECLINED",
 
-	// Gateway — transient (safe to retry with backoff)
 	MOYASAR_TIMEOUT: "PAYMENT_GATEWAY_UNAVAILABLE",
 	MOYASAR_TOO_MANY_REQUESTS: "PAYMENT_GATEWAY_UNAVAILABLE",
 	MOYASAR_INTERNAL_SERVER_ERROR: "PAYMENT_GATEWAY_UNAVAILABLE",
 	MOYASAR_SERVICE_UNAVAILABLE: "PAYMENT_GATEWAY_UNAVAILABLE",
 
-	// Payment method identity
 	MOYASAR_INVALID_CARD_TOKEN: "PAYMENT_METHOD_INVALID",
 	MANUAL_INVOICE_CARD_ID: "PAYMENT_METHOD_INVALID",
 	ONE_OFF_INVALID_PAYMENT_FLOW: "PAYMENT_METHOD_INVALID",
@@ -120,12 +97,9 @@ const RAW_CODE_MAP: Record<string, StreamPayErrorCode> = {
 	AUTO_INVOICE_MISSING_CARD_ID: "PAYMENT_METHOD_INVALID",
 	PAYMENT_FLOW_NOT_ALLOWED: "PAYMENT_METHOD_INVALID",
 
-	// Catalog
 	PRODUCT_USED_IN_FINALIZED_INVOICE: "PRODUCT_LOCKED",
 	COUPON_USED_IN_FINALIZED_INVOICE: "COUPON_LOCKED",
 
-	// Subscription state — these fire from the upstream API when the
-	// caller attempts an action the current subscription state forbids.
 	SUBSCRIPTION_ALREADY_ACTIVE: "SUBSCRIPTION_ALREADY_ACTIVE",
 	SUBSCRIPTION_NOT_FOUND: "SUBSCRIPTION_NOT_FOUND",
 	SUBSCRIPTION_ALREADY_CANCELED: "SUBSCRIPTION_INVALID_STATE",
@@ -134,7 +108,6 @@ const RAW_CODE_MAP: Record<string, StreamPayErrorCode> = {
 	SUBSCRIPTION_EXPIRED: "SUBSCRIPTION_INVALID_STATE",
 };
 
-/** Priority: RAW_CODE_MAP → status classifier (401/403/404/422) → UNKNOWN. */
 export function mapToErrorCode(
 	rawCode: string | undefined,
 	status: number | undefined,

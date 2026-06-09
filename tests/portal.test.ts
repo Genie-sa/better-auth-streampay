@@ -142,8 +142,6 @@ describe("portal plugin", () => {
 		});
 
 		it("scopes the SDK call to the authenticated consumer and returns the response data", async () => {
-			// Server-side filter: the API receives organization_consumer_id,
-			// so the mock returns only the caller's own subscriptions.
 			mockClient.listSubscriptions.mockResolvedValue(
 				createMockSubscriptionList([
 					createMockSubscription({
@@ -268,7 +266,5 @@ describe("portal plugin", () => {
 		});
 	});
 
-	// Reference MockAPIError so it isn't flagged as unused; we instantiate
-	// it implicitly when APIError is thrown via the mocked module.
 	void MockAPIError;
 });

@@ -7,21 +7,13 @@ import { toAPIError } from "../utils/errors";
 import { getLogger } from "../utils/logger";
 import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
 
+/** Options for `checkout()`: product catalog, redirect URLs, and auth gating. */
 export interface CheckoutOptions {
-	/** Optional slug → productId mapping so callers can request `{ slug }` instead of hard-coding UUIDs. */
 	products?: StreamPayProduct[] | (() => Promise<StreamPayProduct[]>);
-	/** Absolute or site-relative URL StreamPay redirects to on success. */
 	successUrl?: string;
-	/** Absolute or site-relative URL StreamPay redirects to on failure. */
 	failureUrl?: string;
-	/** Reject unauthenticated callers and anonymous sessions. */
 	authenticatedUsersOnly?: boolean;
-	/**
-	 * Contact-information type forwarded to StreamPay. The API evolves this
-	 * enum, so we intentionally don't narrow beyond the two current values.
-	 */
 	contactInformationType?: "EMAIL" | "PHONE";
-	/** Custom fields forwarded on every created payment link. */
 	customFields?: Record<string, unknown>;
 }
 
@@ -47,7 +39,6 @@ export const CheckoutBody = z
 			.optional(),
 		slug: z.string().optional(),
 		referenceId: z.string().optional(),
-		consumerId: z.string().uuid().optional(),
 		name: z.string().min(1).optional(),
 		description: z.string().optional(),
 		metadata: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
@@ -91,7 +82,6 @@ async function resolveProducts(
 		return [buildItem(hit.productId, 1)];
 	}
 
-	// Schema .refine guarantees products is defined when slug is not.
 	const products = body.products as NonNullable<CheckoutParams["products"]>;
 	if (typeof products === "string") return [buildItem(products, 1)];
 
@@ -114,15 +104,14 @@ function resolveRedirectUrl(
 async function resolveConsumerId(
 	options: StreamPayOptions,
 	ctx: EnsureConsumerContext,
-	body: CheckoutParams,
 	user: StreamPaySessionUser | null,
 ): Promise<string | null> {
-	if (body.consumerId) return body.consumerId;
 	if (!user || user.isAnonymous) return null;
 	const { consumerId } = await ensureConsumerForUser(options, ctx, user);
 	return consumerId;
 }
 
+/** Hosted-checkout sub-plugin. Exposes `POST /streampay/checkout`, returning a StreamPay payment link. */
 export const checkout =
 	(checkoutOptions: CheckoutOptions = {}) =>
 	(options: StreamPayOptions) => {
@@ -153,7 +142,7 @@ export const checkout =
 						}
 
 						const items = await resolveProducts(ctx.body, checkoutOptions);
-						const consumerId = await resolveConsumerId(options, ctx, ctx.body, sessionUser);
+						const consumerId = await resolveConsumerId(options, ctx, sessionUser);
 
 						const successUrl = resolveRedirectUrl(
 							ctx.body.successUrl ?? checkoutOptions.successUrl,

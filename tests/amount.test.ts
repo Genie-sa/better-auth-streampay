@@ -16,7 +16,6 @@ describe("StreamPayAmount.toHalalat", () => {
 	});
 
 	it("rounds away IEEE 754 drift on classic cases", () => {
-		// 0.1 + 0.2 = 0.30000000000000004 as a float; must still be 30.
 		expect(StreamPayAmount.toHalalat(0.1 + 0.2)).toBe(30);
 	});
 

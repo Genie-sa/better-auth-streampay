@@ -50,11 +50,6 @@ export {
 	UPGRADE_IDEMPOTENCY_WINDOW_MS,
 } from "./types";
 
-/**
- * Shared registry the main `streampay()` plugin hands to each sub-plugin
- * factory. Used by sub-plugins that need request-time communication —
- * e.g. subscriptions sync → webhooks dispatch. Fresh per `streampay()` call.
- */
 export interface StreamPayPluginRegistry {
 	subscriptionWebhookSync?: (
 		ctx: GenericEndpointContext,
@@ -62,18 +57,13 @@ export interface StreamPayPluginRegistry {
 		meta?: { rawBody?: string; signatureHeader?: string | null },
 	) => Promise<void>;
 
-	/**
-	 * Replay a previously persisted webhook event (typically `dead_letter`
-	 * or stuck `pending`) by re-running the sync pipeline against its
-	 * stored `rawPayload`. Bypasses the dedupe gate — the row IS the
-	 * dedupe — and updates it to `completed` on success.
-	 */
 	replayWebhookEvent?: (
 		ctx: GenericEndpointContext,
 		eventId: string,
 	) => Promise<{ replayed: true; eventId: string }>;
 }
 
+/** Subscriptions sub-plugin: plan upgrades, cancellation, feature/limit checks, and webhook-driven subscription sync. */
 export function subscriptions(subsOptions: SubscriptionsOptions) {
 	if (Array.isArray(subsOptions.plans)) {
 		validatePlansShape(subsOptions.plans as readonly StreamPayPlanLike[]);

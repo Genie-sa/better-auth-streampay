@@ -1,5 +1,3 @@
-// Source: https://docs.streampay.sa/webhooks
-
 export const STREAMPAY_PAYMENT_EVENT_TYPES = [
 	"PAYMENT_SUCCEEDED",
 	"PAYMENT_FAILED",
@@ -49,12 +47,6 @@ export type StreamPayEventType = (typeof STREAMPAY_EVENT_TYPES)[number];
 
 export type StreamPayEntityType = "PAYMENT" | "INVOICE" | "SUBSCRIPTION" | "PAYMENT_LINK";
 
-/**
- * `data` payload shape. Every entity pointer is optional — StreamPay's
- * example shows multiple keys populated at once (payment + invoice +
- * payment_link) and the docs don't guarantee any specific one for a
- * given event_type.
- */
 export interface StreamPayWebhookData {
 	metadata?: Record<string, unknown>;
 	payment?: { id: string; url: string };
@@ -70,11 +62,6 @@ interface StreamPayWebhookEnvelope<TData extends StreamPayWebhookData = StreamPa
 	data: TData;
 }
 
-/**
- * Discriminated union of every documented webhook variant. Keying on
- * `event_type` narrows both `event_type` AND `entity_type` through a
- * switch — dispatcher calls the specific handler without assertions.
- */
 export type StreamPayWebhookPayload<
 	TEvent extends StreamPayEventType = StreamPayEventType,
 	TEntity extends StreamPayEntityType = StreamPayEntityType,
@@ -82,7 +69,6 @@ export type StreamPayWebhookPayload<
 > = Extract<StreamPayWebhookPayloadVariant<TData>, { event_type: TEvent; entity_type: TEntity }>;
 
 type StreamPayWebhookPayloadVariant<TData extends StreamPayWebhookData = StreamPayWebhookData> =
-	// Payment
 	| (StreamPayWebhookEnvelope<TData> & { event_type: "PAYMENT_SUCCEEDED"; entity_type: "PAYMENT" })
 	| (StreamPayWebhookEnvelope<TData> & { event_type: "PAYMENT_FAILED"; entity_type: "PAYMENT" })
 	| (StreamPayWebhookEnvelope<TData> & { event_type: "PAYMENT_CANCELED"; entity_type: "PAYMENT" })
@@ -91,7 +77,6 @@ type StreamPayWebhookPayloadVariant<TData extends StreamPayWebhookData = StreamP
 			event_type: "PAYMENT_MARKED_AS_PAID";
 			entity_type: "PAYMENT";
 	  })
-	// Invoice
 	| (StreamPayWebhookEnvelope<TData> & { event_type: "INVOICE_CREATED"; entity_type: "INVOICE" })
 	| (StreamPayWebhookEnvelope<TData> & { event_type: "INVOICE_SENT"; entity_type: "INVOICE" })
 	| (StreamPayWebhookEnvelope<TData> & { event_type: "INVOICE_ACCEPTED"; entity_type: "INVOICE" })
@@ -102,7 +87,6 @@ type StreamPayWebhookPayloadVariant<TData extends StreamPayWebhookData = StreamP
 	  })
 	| (StreamPayWebhookEnvelope<TData> & { event_type: "INVOICE_CANCELED"; entity_type: "INVOICE" })
 	| (StreamPayWebhookEnvelope<TData> & { event_type: "INVOICE_UPDATED"; entity_type: "INVOICE" })
-	// Subscription
 	| (StreamPayWebhookEnvelope<TData> & {
 			event_type: "SUBSCRIPTION_CREATED";
 			entity_type: "SUBSCRIPTION";
@@ -147,7 +131,6 @@ type StreamPayWebhookPayloadVariant<TData extends StreamPayWebhookData = StreamP
 			event_type: "SUBSCRIPTION_FREEZE_CANCEL";
 			entity_type: "SUBSCRIPTION";
 	  })
-	// Payment Link
 	| (StreamPayWebhookEnvelope<TData> & {
 			event_type: "PAYMENT_LINK_PAY_ATTEMPT_FAILED";
 			entity_type: "PAYMENT_LINK";

@@ -1,8 +1,4 @@
-/**
- * StreamPay represents money as decimal SAR strings (`"10.50"`). We
- * convert to integer halalat (1 SAR = 100 halalat) at this boundary so
- * the rest of the code is drift-free.
- */
+/** Convert between decimal-SAR strings/numbers and integer halalat (1 SAR = 100 halalat). */
 export const StreamPayAmount = {
 	toHalalat(sar: string | number): number {
 		const asNumber = typeof sar === "string" ? Number(sar) : sar;

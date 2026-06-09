@@ -74,7 +74,6 @@ describe("validatePlansShape", () => {
 });
 
 describe("hasFeature / checkLimit", () => {
-	// Import lazily to avoid registering before plan validation tests run.
 	it("hasFeature returns false on non-active subscription", async () => {
 		const { hasFeature } = await import("../src/plugins/subscriptions/plans");
 		const sub = {

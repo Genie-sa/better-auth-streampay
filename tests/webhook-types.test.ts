@@ -11,12 +11,6 @@ import type {
 	WebhookHandlers,
 } from "../src";
 
-/**
- * Pure type-level assertions. Every `expectTypeOf` call is compiled
- * away — this file proves the developer-facing types narrow the way
- * the README promises, and fails the typecheck if that contract ever
- * slips.
- */
 describe("webhook type narrowing", () => {
 	describe("StreamPayWebhookPayload generics", () => {
 		it("defaults to the wide unions on event_type and entity_type", () => {
@@ -119,30 +113,15 @@ describe("webhook type narrowing", () => {
 	describe("shared-handler pattern", () => {
 		it("a payload typed as StreamPayWebhookPayload<SubscriptionEventType, 'SUBSCRIPTION'> only accepts subscription events", () => {
 			type SubPayload = StreamPayWebhookPayload<StreamPaySubscriptionEventType, "SUBSCRIPTION">;
-			// A PAYMENT_SUCCEEDED payload should NOT be assignable to SubPayload —
-			// assignability is asserted via a parameter-contravariant handler
-			// function: if the subscription-only handler accepted a payment
-			// payload, this would typecheck.
 			type SubHandler = (p: SubPayload) => void;
 			type PaymentHandler = (p: StreamPayWebhookPayload<"PAYMENT_SUCCEEDED", "PAYMENT">) => void;
-			// `SubHandler` is NOT assignable to `PaymentHandler` (the subscription
-			// handler can't safely receive a payment payload).
 			expectTypeOf<SubHandler>().not.toMatchTypeOf<PaymentHandler>();
 		});
 	});
 
 	describe("cross-entity handler mismatches are rejected", () => {
-		// These are the negative tests that protect the handler
-		// narrowing contract from regressing. If `WebhookHandler`
-		// ever becomes covariant in `TEvent`/`TEntity`, the positive
-		// tests above still pass but users lose the type safety that
-		// prevents mis-registering a payment handler as an invoice
-		// handler. These assertions fail in that regression.
-
 		it("WebhookHandlers[onPaymentSucceeded] rejects a handler typed for a different event literal", () => {
 			type PaymentSucceededHandler = NonNullable<WebhookHandlers["onPaymentSucceeded"]>;
-			// A handler typed for INVOICE_CREATED must NOT be assignable
-			// to the onPaymentSucceeded slot.
 			type InvoiceCreatedHandler = (
 				payload: StreamPayWebhookPayload<"INVOICE_CREATED", "INVOICE">,
 			) => void;
@@ -156,9 +135,6 @@ describe("webhook type narrowing", () => {
 		});
 
 		it("a user-defined shared-handler can be typed with the per-entity union", () => {
-			// This asserts the documented DX pattern from the README
-			// actually compiles — a single handler function for every
-			// subscription event, fully typed.
 			const handler: WebhookHandler<StreamPaySubscriptionEventType, "SUBSCRIPTION"> = (payload) => {
 				expectTypeOf(payload.event_type).toEqualTypeOf<StreamPaySubscriptionEventType>();
 				expectTypeOf(payload.entity_type).toEqualTypeOf<"SUBSCRIPTION">();

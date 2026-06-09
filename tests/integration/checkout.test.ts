@@ -204,8 +204,6 @@ describe("checkout integration", () => {
 			body: { products: PRODUCT_ID },
 		});
 
-		// Plugin propagates the upstream HTTP status (422 here) instead of
-		// always collapsing to 500 — see toAPIError + statusToAPIErrorStatus.
 		expect(response.status).toBe(422);
 		expect(await readJson(response)).toMatchObject({
 			message: "StreamPay checkout creation failed.",

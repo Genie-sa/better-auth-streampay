@@ -1,11 +1,3 @@
-/**
- * Tables contributed by `subscriptions()`:
- *   - `subscription` — one row per (referenceId, plan).
- *   - `streampayWebhookEvent` — event lifecycle: `pending` → `completed`
- *     or `pending` → `dead_letter` after `attemptCount` reaches the
- *     configured maximum. Dead-lettered rows preserve `rawPayload` and
- *     `signatureHeader` so an operator can replay them after a fix.
- */
 export const subscriptionTable = {
 	subscription: {
 		fields: {
@@ -97,14 +89,11 @@ export const webhookEventTable = {
 				type: "string",
 				required: true,
 			},
-			/** Last activity (insert/retry/completion/dead-letter).
-			 *  For `completed` = finished-at; for `pending` = last attempt. */
 			processedAt: {
 				type: "date",
 				required: true,
 				index: true,
 			},
-			/** Defaults to `completed` so pre-state-machine rows still dedupe. */
 			status: {
 				type: "string",
 				required: false,

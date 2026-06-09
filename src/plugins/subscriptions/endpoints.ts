@@ -16,7 +16,11 @@ import { toAPIError } from "../../utils/errors";
 import { getLogger } from "../../utils/logger";
 import { asSessionUser, type StreamPaySessionUser } from "../../utils/session";
 import { checkLimit, hasFeature, type ResolvedPlans } from "./plans";
-import { type PluginAdapter, syncSubscriptionFromUpstream } from "./sync";
+import {
+	type PluginAdapter,
+	subscriptionItemProductId,
+	syncSubscriptionFromUpstream,
+} from "./sync";
 import {
 	PLAN_NAME_METADATA_KEY,
 	REFERENCE_ID_METADATA_KEY,
@@ -42,34 +46,11 @@ const SuccessQuery = z.object({
 const CancelBody = z.object({
 	subscriptionId: z.string().uuid(),
 	cancelRelatedInvoices: z.boolean().optional(),
-	/**
-	 * When `true`, schedule the cancellation to take effect at the end
-	 * of the current billing period instead of terminating immediately.
-	 * Implemented via StreamPay's `PATCH /subscriptions/:id` with
-	 * `until_cycle_number = current_cycle_number` (see OpenAPI
-	 * `SubscriptionUpdate.until_cycle_number`). The customer retains
-	 * access through `periodEnd`; status stays `active` until the
-	 * `SUBSCRIPTION_CANCEL_AT_PERIOD_END` webhook lands.
-	 */
 	cancelAtPeriodEnd: z.boolean().optional(),
 });
 
 const ChangePlanBody = z.object({
-	/** Target plan name, must be declared in `subscriptions({ plans })`. */
 	plan: z.string().min(1),
-	/**
-	 * `at_period_end` (default) — old plan keeps serving until
-	 * `periodEnd`, then the new plan's payment link is presented via a
-	 * freshly spawned `incomplete` row. Safer. Customer pays only what
-	 * they would on a normal renewal cycle.
-	 *
-	 * `immediate` — PATCH the existing StreamPay subscription's items
-	 * to the new plan's productId. No proration — StreamPay does not
-	 * expose proration on PATCH. The current cycle's paid invoice is
-	 * NOT refunded; the customer starts paying the new price from the
-	 * next cycle. Use for "upgrade now, I'll pay more later" UX where
-	 * proration is acceptable.
-	 */
 	mode: z.enum(["at_period_end", "immediate"]).optional(),
 	successUrl: z.string().url().optional(),
 	failureUrl: z.string().url().optional(),
@@ -151,18 +132,6 @@ function getAdapter(ctx: GenericEndpointContext): PluginAdapter {
 	return adapter as unknown as PluginAdapter;
 }
 
-/**
- * Extract `items` and `coupons` from a live StreamPay subscription in
- * the exact shape `SubscriptionUpdate` requires. StreamPay's `PATCH
- * /subscriptions/:id` demands `items` (min 1) AND `coupons` as full
- * replacements — omitting them would clear the sub. Callers that only
- * want to toggle a single field (e.g. `until_cycle_number`) must echo
- * the current state here.
- *
- * `SubscriptionDetailed.items[].product.id` carries the productId, and
- * `coupon_calculation_metadata.coupons[].id` carries applied coupon
- * ids — both are the canonical places per the SDK's generated types.
- */
 function echoSubscriptionPatch(
 	stream: SubscriptionDetailed,
 ): Pick<SubscriptionUpdate, "items" | "coupons"> {
@@ -251,8 +220,6 @@ export function buildSubscriptionEndpoints(
 					});
 				}
 
-				// Within the idempotency window, reuse an existing incomplete
-				// row rather than double-spawning payment links.
 				const now = Date.now();
 				const reuseCandidate = existingActive.find(
 					(row) =>
@@ -270,8 +237,6 @@ export function buildSubscriptionEndpoints(
 					});
 				}
 
-				// Bind the payment link to a specific consumer so renewals
-				// don't re-prompt for payment info.
 				const ensureCtx = { context: ctx.context };
 				const { consumerId } = await ensureConsumerForUser(options, ensureCtx, user);
 
@@ -368,7 +333,6 @@ export function buildSubscriptionEndpoints(
 				}
 				await authorizeReference(ctx, user, row.referenceId, "read", subsOptions);
 
-				// Webhook already synced → redirect-only no-op.
 				if (row.status !== "incomplete") {
 					return ctx.json({
 						subscription: row,
@@ -376,36 +340,25 @@ export function buildSubscriptionEndpoints(
 					});
 				}
 
-				// Fallback: webhook hasn't landed yet. Fetch the sub and
-				// update only if the same consumer owns it.
 				if (!row.streampayConsumerId) {
 					return ctx.json({ subscription: row, synced: false });
 				}
 				try {
+					const plans = await plansRef();
+					const plan = plans.byName.get(row.plan);
+					if (!plan) {
+						getLogger(ctx).warn(
+							`subscriptionSuccess: plan "${row.plan}" is no longer configured — skipping fallback sync for row=${row.id}.`,
+						);
+						return ctx.json({ subscription: row, synced: false });
+					}
 					const list = await client.listSubscriptions({ page: 1, size: 100 });
 					const match = list.data?.find(
 						(sub) =>
 							sub.organization_consumer_id === row.streampayConsumerId &&
+							sub.status !== "CANCELED" &&
 							Array.isArray(sub.items) &&
-							sub.items.some((item) => {
-								const productId =
-									typeof item === "object" &&
-									item &&
-									"product" in item &&
-									item.product &&
-									typeof item.product === "object" &&
-									"id" in item.product
-										? item.product.id
-										: typeof item === "object" && item && "product_id" in item
-											? item.product_id
-											: null;
-								return (
-									typeof productId === "string" &&
-									productId.length > 0 &&
-									row.plan &&
-									sub.status !== "CANCELED"
-								);
-							}),
+							sub.items.some((item) => subscriptionItemProductId(item) === plan.productId),
 					);
 					if (!match?.id) {
 						return ctx.json({ subscription: row, synced: false });
@@ -476,13 +429,8 @@ export function buildSubscriptionEndpoints(
 					});
 				}
 
-				// Two divergent paths — StreamPay exposes them on different
-				// endpoints. `SubscriptionCancel` has NO period-end flag; the
-				// OpenAPI knob is `SubscriptionUpdate.until_cycle_number`.
 				if (ctx.body.cancelAtPeriodEnd) {
 					try {
-						// Fetch live sub to echo items/coupons (PATCH is a full
-						// replacement — min 1 item, coupons required).
 						const stream = await client.getSubscription(row.streampaySubscriptionId);
 						const patch: SubscriptionUpdate = {
 							...echoSubscriptionPatch(stream),
@@ -510,7 +458,6 @@ export function buildSubscriptionEndpoints(
 					}
 				}
 
-				// Immediate cancel — the existing path.
 				const payload: SubscriptionCancel = {
 					cancel_related_invoices: ctx.body.cancelRelatedInvoices ?? false,
 				};
@@ -556,10 +503,6 @@ export function buildSubscriptionEndpoints(
 					});
 				}
 
-				// Find the live row for this user. We key on
-				// (referenceId + group) so plan groups with multiple
-				// concurrent subs stay isolated. Matches
-				// upgradeSubscription's grouping logic.
 				const existing = await adapter.findMany<Subscription>({
 					model: SUBSCRIPTION_MODEL,
 					where: [
@@ -593,10 +536,6 @@ export function buildSubscriptionEndpoints(
 				const mode = ctx.body.mode ?? "at_period_end";
 
 				if (mode === "immediate") {
-					// PATCH the existing StreamPay sub's items to the new
-					// productId. StreamPay does NOT prorate — customer pays
-					// the new price from the next cycle; the current cycle's
-					// paid invoice stands.
 					try {
 						const stream = await client.getSubscription(row.streampaySubscriptionId);
 						const existingCoupons: SubscriptionUpdate["coupons"] = [];
@@ -608,9 +547,6 @@ export function buildSubscriptionEndpoints(
 							coupons: existingCoupons,
 						};
 						const result = await client.updateSubscription(row.streampaySubscriptionId, patch);
-						// Local-only fields first (plan/group are our
-						// semantics, not upstream's), then sync upstream-
-						// derived fields (amount/interval/period/...).
 						await adapter.update({
 							model: SUBSCRIPTION_MODEL,
 							update: {
@@ -644,12 +580,6 @@ export function buildSubscriptionEndpoints(
 					}
 				}
 
-				// at_period_end — the default and safer path:
-				//   1) schedule old sub to stop at current cycle via
-				//      `until_cycle_number`
-				//   2) pre-create an `incomplete` row for the new plan with
-				//      a payment link that the client redirects to when the
-				//      old period ends (or up front — UX choice)
 				try {
 					const stream = await client.getSubscription(row.streampaySubscriptionId);
 					const patch: SubscriptionUpdate = {
@@ -666,9 +596,6 @@ export function buildSubscriptionEndpoints(
 						where: [{ field: "id", value: row.id }],
 					});
 
-					// Spawn a fresh payment link for the new plan. The
-					// `incomplete` row here will activate on
-					// SUBSCRIPTION_ACTIVATED after the customer pays.
 					const ensureCtx = { context: ctx.context };
 					const { consumerId } = await ensureConsumerForUser(options, ensureCtx, user);
 					const linkInput: CreatePaymentLinkDto = {
@@ -841,11 +768,6 @@ export function buildSubscriptionEndpoints(
 						});
 					}
 
-					// StreamPay rejects DELETE on an active freeze with 403.
-					// The supported way to end a freeze early is PUT with
-					// `freeze_end_datetime` set to the current time — the
-					// server then auto-transitions the subscription back to
-					// ACTIVE and fires SUBSCRIPTION_ACTIVATED.
 					await client.updateSubscriptionFreeze(row.streampaySubscriptionId, active.id, {
 						freeze_start_datetime: active.freeze_start_datetime,
 						freeze_end_datetime: new Date(nowMs).toISOString(),
@@ -895,23 +817,6 @@ export function buildSubscriptionEndpoints(
 			},
 		),
 
-		/**
-		 * Returns the user's current billable subscription, or `null` if
-		 * none. **Intentionally filters out `incomplete`, `canceled`,
-		 * `expired`, and `inactive` rows** — only `active | frozen |
-		 * past_due` are surfaced, since those are the statuses that
-		 * represent a *live* entitlement.
-		 *
-		 * Notable consequence: between `/subscription/upgrade` (creates
-		 * an `incomplete` row + payment link) and the
-		 * `SUBSCRIPTION_ACTIVATED` webhook landing, this endpoint
-		 * returns `null`. If you want to render "your subscription is
-		 * being activated" during that window, call `/subscription/list`
-		 * and filter for `status === "incomplete"` yourself.
-		 *
-		 * Pass `?group=<name>` to scope to a single plan group when the
-		 * app declares multiple concurrent subscriptions per user.
-		 */
 		currentSubscription: createAuthEndpoint(
 			"/subscription/current",
 			{

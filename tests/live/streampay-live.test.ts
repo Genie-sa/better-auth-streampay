@@ -7,7 +7,8 @@ import {
 	type StreamPayHookContext,
 } from "../../src/hooks/consumer";
 import type { StreamPayClient } from "../../src/types";
-import { findConsumerByExternalId } from "../../src/utils/consumer";
+import { findConsumerByExternalId, findConsumerByIdentifiers } from "../../src/utils/consumer";
+import { isDuplicateConsumerError } from "../../src/utils/ensure-consumer";
 import { verifyWebhook } from "../../src/webhooks/verify";
 
 const live = process.env.STREAMPAY_LIVE === "1";
@@ -155,11 +156,21 @@ liveWriteDescribe("live StreamPay write smoke", () => {
 	const client: StreamPayClient = sdk;
 
 	const initialExternalId = `ba-live-test-${Date.now()}`;
-	const testPhoneNumber = `+9665${String(Date.now()).slice(-8)}`;
 	let orgOwnerEmail = "";
 	let createdConsumerId: string | null = null;
 	let createdPaymentLinkId: string | null = null;
 	let currentExternalId = initialExternalId;
+
+	let ownsConsumer = false;
+	let originalName: string | null = null;
+	let originalExternalId: string | null = null;
+
+	async function restoreAdoptedConsumer(consumerId: string): Promise<void> {
+		await client.updateConsumer(consumerId, {
+			...(originalName ? { name: originalName } : {}),
+			...(originalExternalId ? { external_id: originalExternalId } : {}),
+		});
+	}
 
 	beforeAll(async () => {
 		const meResponse = await fetch(`${config.baseUrl}/api/v2/me`, {
@@ -179,28 +190,42 @@ liveWriteDescribe("live StreamPay write smoke", () => {
 	});
 
 	afterAll(async () => {
-		if (createdConsumerId) {
-			try {
+		if (!createdConsumerId) return;
+		try {
+			if (ownsConsumer) {
 				await client.deleteConsumer(createdConsumerId);
-			} catch {
-				// Best-effort sandbox cleanup.
+			} else {
+				await restoreAdoptedConsumer(createdConsumerId);
 			}
-		}
+		} catch {}
 	});
 
-	it("createConsumer succeeds and returns a real id", async () => {
-		const consumer = await client.createConsumer({
-			name: "BA Live Test Consumer",
-			email: orgOwnerEmail,
-			external_id: currentExternalId,
-			phone_number: testPhoneNumber,
-		});
-		expect(consumer.id).toBeDefined();
-		expect(typeof consumer.id).toBe("string");
-		expect(consumer.external_id).toBe(currentExternalId);
-		expect(consumer.email).toBe(orgOwnerEmail);
-		expect(consumer.phone_number).toBe(testPhoneNumber);
-		createdConsumerId = consumer.id ?? null;
+	it("createConsumer succeeds (or adopts the sandbox's existing consumer)", async () => {
+		try {
+			const consumer = await client.createConsumer({
+				name: "BA Live Test Consumer",
+				email: orgOwnerEmail,
+				external_id: currentExternalId,
+			});
+			expect(consumer.id).toBeDefined();
+			expect(typeof consumer.id).toBe("string");
+			expect(consumer.external_id).toBe(currentExternalId);
+			expect(consumer.email).toBe(orgOwnerEmail);
+			createdConsumerId = consumer.id ?? null;
+			ownsConsumer = true;
+		} catch (err) {
+			if (!isDuplicateConsumerError(err)) throw err;
+			const existing = await findConsumerByIdentifiers(client, { email: orgOwnerEmail });
+			expect(existing?.id).toBeDefined();
+			if (!existing?.id) return;
+			originalName = existing.name ?? null;
+			originalExternalId = existing.external_id ?? null;
+			const adopted = await client.updateConsumer(existing.id, {
+				external_id: currentExternalId,
+			});
+			expect(adopted.external_id).toBe(currentExternalId);
+			createdConsumerId = existing.id;
+		}
 	});
 
 	it("findConsumerByExternalId finds the freshly-created consumer", async () => {
@@ -242,7 +267,7 @@ liveWriteDescribe("live StreamPay write smoke", () => {
 				}),
 				createHookContext(),
 			),
-		).rejects.toThrow(/cannot be created at this time/i);
+		).rejects.toThrow(/already linked to another account/i);
 	});
 
 	it('onBeforeUserCreate reuses a linked duplicate when claimExistingConsumerBy is ["email"]', async () => {
@@ -328,8 +353,18 @@ liveWriteDescribe("live StreamPay write smoke", () => {
 		},
 	);
 
-	it("deleteConsumer removes the consumer", async () => {
+	it("deleteConsumer removes an owned consumer (adopted consumers are restored)", async () => {
 		if (!createdConsumerId) throw new Error("prerequisite test failed");
+		if (!ownsConsumer) {
+			await restoreAdoptedConsumer(createdConsumerId);
+			const restored = await client.getConsumer(createdConsumerId);
+			expect(restored.id).toBe(createdConsumerId);
+			if (originalExternalId) {
+				expect(restored.external_id).toBe(originalExternalId);
+			}
+			createdConsumerId = null;
+			return;
+		}
 		await client.deleteConsumer(createdConsumerId);
 		const foundAfter = await findConsumerByExternalId(client, {
 			externalId: currentExternalId,

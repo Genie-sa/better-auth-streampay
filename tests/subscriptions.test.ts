@@ -520,8 +520,6 @@ describe("subscriptions() endpoints", () => {
 			});
 			await handler(ctx);
 
-			// Plugin ends a freeze early by PUT'ing freeze_end_datetime=now
-			// (StreamPay returns 403 on DELETE of an active freeze).
 			expect(mockClient.updateSubscriptionFreeze).toHaveBeenCalledWith(
 				"sub_uf",
 				"freeze_live",
@@ -707,6 +705,80 @@ describe("subscriptions() endpoints", () => {
 			const result = await handler(ctx);
 			expect(result.synced).toBe(false);
 			expect(mockClient.listSubscriptions).not.toHaveBeenCalled();
+		});
+
+		it("links only the subscription whose items contain the plan's product", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler<{
+				subscription: { streampaySubscriptionId: string | null; status: string };
+				synced: boolean;
+			}>(plugin.endpoints.subscriptionSuccess);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_inc",
+					referenceId: "user-123",
+					plan: "pro",
+					status: "incomplete",
+					streampayConsumerId: "cons_1",
+				}),
+			});
+
+			mockClient.listSubscriptions.mockResolvedValue({
+				data: [
+					createMockSubscription({
+						id: "sub_other",
+						organization_consumer_id: "cons_1",
+						items: [{ product_id: "prod_unrelated" }],
+					}),
+					createMockSubscription({
+						id: "sub_pro",
+						organization_consumer_id: "cons_1",
+						items: [{ product_id: "prod_pro" }],
+					}),
+				],
+			});
+
+			const { ctx } = setupCtx({ adapter, query: { subscriptionId: "row_inc" } });
+			const result = await handler(ctx);
+
+			expect(result.synced).toBe(true);
+			expect(result.subscription.streampaySubscriptionId).toBe("sub_pro");
+			expect(result.subscription.status).toBe("active");
+		});
+
+		it("does not link when no subscription carries the plan's product", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler<{ synced: boolean }>(plugin.endpoints.subscriptionSuccess);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_inc",
+					referenceId: "user-123",
+					plan: "pro",
+					status: "incomplete",
+					streampayConsumerId: "cons_1",
+				}),
+			});
+			mockClient.listSubscriptions.mockResolvedValue({
+				data: [
+					createMockSubscription({
+						id: "sub_other",
+						organization_consumer_id: "cons_1",
+						items: [{ product_id: "prod_unrelated" }],
+					}),
+				],
+			});
+
+			const { ctx } = setupCtx({ adapter, query: { subscriptionId: "row_inc" } });
+			const result = await handler(ctx);
+
+			expect(result.synced).toBe(false);
+			const rows = getSubscriptionRows(adapter);
+			expect(rows[0]?.streampaySubscriptionId).toBeNull();
+			expect(rows[0]?.status).toBe("incomplete");
 		});
 	});
 
