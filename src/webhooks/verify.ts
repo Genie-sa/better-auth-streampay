@@ -48,12 +48,13 @@ function hexDecode(hex: string): Buffer | null {
 	return Buffer.from(hex, "hex");
 }
 
-/** Verify a StreamPay webhook signature against the raw body. Returns a result object; never throws. */
 export function verifyWebhook(input: VerifyWebhookInput): VerifyWebhookResult {
 	const { rawBody, signatureHeader } = input;
 	const toleranceSeconds = input.toleranceSeconds ?? 300;
 	const now = input.now ?? (() => Math.floor(Date.now() / 1000));
-	const secrets = typeof input.secret === "string" ? [input.secret] : input.secret;
+	const secrets = (typeof input.secret === "string" ? [input.secret] : input.secret).filter(
+		(secret) => secret.length > 0,
+	);
 
 	if (!signatureHeader) return { ok: false, reason: "MISSING_HEADER" };
 	const parsed = parseSignatureHeader(signatureHeader);
@@ -79,7 +80,6 @@ export function verifyWebhook(input: VerifyWebhookInput): VerifyWebhookResult {
 	return { ok: false, reason: "INVALID_SIGNATURE" };
 }
 
-/** Like `verifyWebhook` but throws `StreamPayWebhookError` on failure; returns the signed timestamp on success. */
 export function verifyWebhookOrThrow(input: VerifyWebhookInput): number {
 	const result = verifyWebhook(input);
 	if (!result.ok) throw new StreamPayWebhookError(result.reason);

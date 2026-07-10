@@ -28,11 +28,13 @@ vi.mock("better-auth/api", () => ({
 
 import {
 	type StreamPayPlan,
+	type StreamPayPluginRegistry,
+	subscriptionSlotKey,
 	subscriptions,
 	UPGRADE_IDEMPOTENCY_WINDOW_MS,
 } from "../src/plugins/subscriptions";
 import { unwrapHandler } from "./utils/better-auth-mock";
-import { createTestStreamPayOptions } from "./utils/helpers";
+import { createTestStreamPayOptions, mockApiError } from "./utils/helpers";
 import {
 	createMockContext,
 	createMockStreamPayClient,
@@ -41,25 +43,29 @@ import {
 	type MockCtx,
 	type MockedStreamPayClient,
 } from "./utils/mocks";
-import { createMockAdapter, createMockSubscriptionRow } from "./utils/subscription-helpers";
+import {
+	createMockAdapter,
+	createMockSubscriptionRow,
+	createMockWebhookPayload,
+} from "./utils/subscription-helpers";
 
 const PRO_PLAN: StreamPayPlan = {
 	name: "pro",
 	productId: "prod_pro",
-	priceHalalat: 9900,
+	priceInSmallestUnit: 9900,
 	billingInterval: "MONTH",
 };
 const PRO_PLUS_PLAN: StreamPayPlan = {
 	name: "pro_plus",
 	productId: "prod_pro_plus",
-	priceHalalat: 19900,
+	priceInSmallestUnit: 19900,
 	billingInterval: "MONTH",
 	group: "tier",
 };
 const BASIC_PLAN: StreamPayPlan = {
 	name: "basic",
 	productId: "prod_basic",
-	priceHalalat: 2900,
+	priceInSmallestUnit: 2900,
 	billingInterval: "MONTH",
 	group: "tier",
 };
@@ -140,14 +146,132 @@ describe("subscriptions() endpoints", () => {
 			const [row] = getSubscriptionRows(adapter);
 			expect(row?.plan).toBe("pro");
 			expect(row?.status).toBe("incomplete");
-			expect(row?.amountHalalat).toBe(9900);
+			expect(row?.amountInSmallestUnit).toBe(9900);
 			expect(row?.streampayConsumerId).toBe("cons_linked");
+			expect(row?.referenceType).toBe("user");
+			expect(row?.activeSlotKey).toBe(subscriptionSlotKey("user", "user-123", null));
+			expect(row).not.toHaveProperty("checkoutUrl");
 
 			const paymentLinkArgs = mockClient.createPaymentLink.mock.calls[0]?.[0];
 			expect(paymentLinkArgs?.custom_metadata).toMatchObject({
 				streampay_plugin_plan_name: "pro",
 				streampay_plugin_reference_id: "user-123",
+				streampay_plugin_reference_type: "user",
+				streampay_plugin_subscription_row_id: row?.id,
 			});
+		});
+
+		it("propagates SDK currency and immutable plan version into checkout and persistence", async () => {
+			const versionedPlan: StreamPayPlan = {
+				...PRO_PLAN,
+				currency: "QAR",
+				version: "catalog-2026-07",
+			};
+			const plugin = buildSubsPlugin([versionedPlan], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscription);
+			mockClient.createPaymentLink.mockResolvedValue({ id: "pl_jpy", url: "https://x" });
+			mockClient.getPaymentUrl.mockReturnValue("https://x");
+			const { ctx, adapter } = setupCtx({
+				user: { streampayConsumerId: "cons_linked" },
+				body: { plan: "pro" },
+			});
+
+			await handler(ctx);
+
+			expect(mockClient.createPaymentLink).toHaveBeenCalledWith(
+				expect.objectContaining({ currency: "QAR" }),
+			);
+			expect(getSubscriptionRows(adapter)[0]).toMatchObject({
+				currency: "QAR",
+				planVersion: "catalog-2026-07",
+				productId: "prod_pro",
+			});
+		});
+
+		it("passes a configured trial period to StreamPay checkout", async () => {
+			const plugin = buildSubsPlugin([{ ...PRO_PLAN, trialPeriodDays: 14 }], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscription);
+			mockClient.createPaymentLink.mockResolvedValue({ id: "pl_trial", url: "https://x" });
+			mockClient.getPaymentUrl.mockReturnValue("https://x");
+			const { ctx } = setupCtx({
+				user: { streampayConsumerId: "cons_linked" },
+				body: { plan: "pro" },
+			});
+
+			await handler(ctx);
+			expect(mockClient.createPaymentLink).toHaveBeenCalledWith(
+				expect.objectContaining({ trial_period_days: 14 }),
+			);
+		});
+
+		it("suppresses repeat trials within the same reference and plan group", async () => {
+			const plugin = buildSubsPlugin([{ ...PRO_PLAN, trialPeriodDays: 14 }], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscription);
+			mockClient.createPaymentLink.mockResolvedValue({ id: "pl_repeat", url: "https://x" });
+			mockClient.getPaymentUrl.mockReturnValue("https://x");
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					referenceId: "user-123",
+					plan: "pro",
+					status: "canceled",
+					trialEnd: new Date("2026-01-15T00:00:00.000Z"),
+				}),
+			});
+			const { ctx } = setupCtx({
+				adapter,
+				user: { streampayConsumerId: "cons_linked" },
+				body: { plan: "pro" },
+			});
+
+			await handler(ctx);
+
+			expect(mockClient.createPaymentLink).toHaveBeenCalledWith(
+				expect.not.objectContaining({ trial_period_days: expect.any(Number) }),
+			);
+		});
+
+		it("supports a typed application override for repeat-trial eligibility", async () => {
+			const isTrialEligible = vi.fn(() => true);
+			const plugin = buildSubsPlugin([{ ...PRO_PLAN, trialPeriodDays: 14 }], mockClient, {
+				isTrialEligible,
+			});
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscription);
+			mockClient.createPaymentLink.mockResolvedValue({
+				id: "pl_repeat_override",
+				url: "https://x",
+			});
+			mockClient.getPaymentUrl.mockReturnValue("https://x");
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					referenceId: "user-123",
+					plan: "pro",
+					status: "canceled",
+					trialStart: new Date("2026-01-01T00:00:00.000Z"),
+				}),
+			});
+			const { ctx } = setupCtx({
+				adapter,
+				user: { streampayConsumerId: "cons_linked" },
+				body: { plan: "pro" },
+			});
+
+			await handler(ctx);
+
+			expect(isTrialEligible).toHaveBeenCalledWith(
+				expect.objectContaining({
+					referenceId: "user-123",
+					referenceType: "user",
+					defaultEligible: false,
+				}),
+				ctx,
+			);
+			expect(mockClient.createPaymentLink).toHaveBeenCalledWith(
+				expect.objectContaining({ trial_period_days: 14 }),
+			);
 		});
 
 		it("returns the existing incomplete row within the 15-minute idempotency window", async () => {
@@ -159,16 +283,22 @@ describe("subscriptions() endpoints", () => {
 			}>(plugin.endpoints.upgradeSubscription);
 
 			const adapter = createMockAdapter();
-			const existing = (await adapter.create({
+			await adapter.create({
 				model: "subscription",
 				data: createMockSubscriptionRow({
 					id: "row_existing",
 					referenceId: "user-123",
 					plan: "pro",
 					status: "incomplete",
+					streampayPaymentLinkId: "pl_existing",
 					createdAt: new Date(Date.now() - 60 * 1000),
 				}),
-			})) as { id: string };
+			});
+			mockClient.getPaymentLink.mockResolvedValue({
+				id: "pl_existing",
+				url: "https://pay.streampay.sa/pl_existing",
+			});
+			mockClient.getPaymentUrl.mockReturnValue("https://pay.streampay.sa/pl_existing");
 
 			const { ctx } = setupCtx({
 				user: { streampayConsumerId: "cons_linked" },
@@ -177,9 +307,116 @@ describe("subscriptions() endpoints", () => {
 			});
 
 			const result = await handler(ctx);
-			expect(result.subscriptionId).toBe(existing.id);
+			expect(result.subscriptionId).toBe("row_existing");
 			expect(result.reused).toBe(true);
+			expect(result).toMatchObject({
+				url: "https://pay.streampay.sa/pl_existing",
+				redirect: true,
+			});
 			expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
+		});
+
+		it("does not expire or duplicate a checkout when payment-link recovery is transiently unavailable", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscription);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_recovery_outage",
+					activeSlotKey: subscriptionSlotKey("user", "user-123", null),
+					status: "incomplete",
+					streampayPaymentLinkId: "pl_recovery_outage",
+					createdAt: new Date(),
+				}),
+			});
+			mockClient.getPaymentLink.mockRejectedValue(mockApiError(503, { code: "UNAVAILABLE" }));
+			const { ctx } = setupCtx({
+				adapter,
+				body: { plan: "pro" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({ code: "INTERNAL_SERVER_ERROR" });
+			expect(getSubscriptionRows(adapter)[0]).toMatchObject({
+				status: "incomplete",
+				activeSlotKey: subscriptionSlotKey("user", "user-123", null),
+			});
+			expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
+		});
+
+		it("returns a valid checkout when correlation persistence fails after provider creation", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler<{ subscriptionId: string; url: string }>(
+				plugin.endpoints.upgradeSubscription,
+			);
+			const adapter = createMockAdapter();
+			vi.spyOn(adapter, "update").mockRejectedValueOnce(new Error("database write unavailable"));
+			mockClient.createPaymentLink.mockResolvedValue({
+				id: "pl_persist_recovery",
+				url: "https://pay.streampay.sa/pl_persist_recovery",
+			});
+			mockClient.getPaymentUrl.mockReturnValue("https://pay.streampay.sa/pl_persist_recovery");
+			const { ctx } = setupCtx({
+				adapter,
+				body: { plan: "pro" },
+			});
+
+			const result = await handler(ctx);
+
+			expect(result.url).toBe("https://pay.streampay.sa/pl_persist_recovery");
+			expect(getSubscriptionRows(adapter)[0]?.streampayPaymentLinkId).toBeNull();
+			expect(ctx.context.logger.error).toHaveBeenCalledWith(
+				expect.stringContaining("Protected checkout metadata will reconcile"),
+			);
+		});
+
+		it("releases the reservation after provider failure so an immediate retry can succeed", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler<{ url: string }>(plugin.endpoints.upgradeSubscription);
+			const adapter = createMockAdapter();
+			const { ctx } = setupCtx({
+				adapter,
+				user: { streampayConsumerId: "cons_linked" },
+				body: { plan: "pro" },
+			});
+			mockClient.createPaymentLink.mockRejectedValueOnce(
+				mockApiError(503, { error: { code: "UPSTREAM_UNAVAILABLE" } }),
+			);
+
+			await expect(handler(ctx)).rejects.toMatchObject({ code: "INTERNAL_SERVER_ERROR" });
+			expect(getSubscriptionRows(adapter)).toHaveLength(0);
+
+			mockClient.createPaymentLink.mockResolvedValueOnce({
+				id: "pl_retry",
+				url: "https://pay.streampay.sa/pl_retry",
+			});
+			mockClient.getPaymentUrl.mockReturnValue("https://pay.streampay.sa/pl_retry");
+
+			await expect(handler(ctx)).resolves.toMatchObject({
+				url: "https://pay.streampay.sa/pl_retry",
+			});
+			expect(getSubscriptionRows(adapter)).toHaveLength(1);
+		});
+
+		it("releases the active slot when StreamPay creates a link without a payment URL", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscription);
+			const adapter = createMockAdapter();
+			const { ctx } = setupCtx({
+				adapter,
+				user: { streampayConsumerId: "cons_linked" },
+				body: { plan: "pro" },
+			});
+			mockClient.createPaymentLink.mockResolvedValue({ id: "pl_without_url" });
+			mockClient.getPaymentUrl.mockReturnValue(null);
+
+			await expect(handler(ctx)).rejects.toMatchObject({ code: "INTERNAL_SERVER_ERROR" });
+			expect(getSubscriptionRows(adapter)).toHaveLength(1);
+			expect(getSubscriptionRows(adapter)[0]).toMatchObject({
+				streampayPaymentLinkId: "pl_without_url",
+				status: "incomplete_expired",
+				activeSlotKey: null,
+			});
 		});
 
 		it("does not reuse rows older than the idempotency window", async () => {
@@ -209,6 +446,75 @@ describe("subscriptions() endpoints", () => {
 			const result = await handler(ctx);
 			expect(result.reused).toBe(false);
 			expect(mockClient.createPaymentLink).toHaveBeenCalledTimes(1);
+		});
+
+		it("uses the unique active slot to reject a concurrent checkout reservation", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscription);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_in_flight",
+					activeSlotKey: subscriptionSlotKey("user", "user-123", null),
+					status: "incomplete",
+					streampayPaymentLinkId: null,
+				}),
+			});
+			const { ctx } = setupCtx({
+				adapter,
+				user: { streampayConsumerId: "cons_linked" },
+				body: { plan: "pro" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({
+				code: "CONFLICT",
+				errorCode: "SUBSCRIPTION_CHECKOUT_IN_PROGRESS",
+			});
+			expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
+			expect(getSubscriptionRows(adapter)).toHaveLength(1);
+		});
+
+		it("replaces an abandoned checkout reservation after the idempotency window", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler<{ subscriptionId: string; reused: boolean }>(
+				plugin.endpoints.upgradeSubscription,
+			);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_abandoned",
+					activeSlotKey: subscriptionSlotKey("user", "user-123", null),
+					status: "incomplete",
+					streampayPaymentLinkId: null,
+					createdAt: new Date(Date.now() - UPGRADE_IDEMPOTENCY_WINDOW_MS - 1),
+				}),
+			});
+			mockClient.createPaymentLink.mockResolvedValue({
+				id: "pl_replacement",
+				url: "https://pay.streampay.sa/pl_replacement",
+			});
+			mockClient.getPaymentUrl.mockReturnValue("https://pay.streampay.sa/pl_replacement");
+			const { ctx } = setupCtx({
+				adapter,
+				user: { streampayConsumerId: "cons_linked" },
+				body: { plan: "pro" },
+			});
+
+			const result = await handler(ctx);
+
+			expect(result).toMatchObject({ reused: false });
+			expect(result.subscriptionId).not.toBe("row_abandoned");
+			expect(mockClient.createPaymentLink).toHaveBeenCalledTimes(1);
+			expect(getSubscriptionRows(adapter)).toHaveLength(2);
+			expect(getSubscriptionRows(adapter).find((row) => row.id === "row_abandoned")).toMatchObject({
+				status: "incomplete_expired",
+				activeSlotKey: null,
+			});
+			expect(ctx.context.logger.warn).toHaveBeenCalledWith(
+				expect.stringContaining("released stale checkout reservation"),
+			);
 		});
 
 		it("throws SUBSCRIPTION_PLAN_NOT_FOUND when plan is not configured", async () => {
@@ -257,7 +563,12 @@ describe("subscriptions() endpoints", () => {
 
 		it("allows a second sub if plans are in different groups", async () => {
 			const GROUP_A: StreamPayPlan = { ...PRO_PLAN, name: "plan_a", group: "group_a" };
-			const GROUP_B: StreamPayPlan = { ...PRO_PLAN, name: "plan_b", group: "group_b" };
+			const GROUP_B: StreamPayPlan = {
+				...PRO_PLAN,
+				name: "plan_b",
+				productId: "prod_plan_b",
+				group: "group_b",
+			};
 			const plugin = buildSubsPlugin([GROUP_A, GROUP_B], mockClient);
 			const handler = unwrapHandler(plugin.endpoints.upgradeSubscription);
 
@@ -315,9 +626,24 @@ describe("subscriptions() endpoints", () => {
 
 			await expect(handler(ctx)).resolves.toBeDefined();
 			expect(authorizeReference).toHaveBeenCalledWith(
-				expect.objectContaining({ referenceId: "user-other", action: "upgrade" }),
+				expect.objectContaining({
+					referenceId: "user-other",
+					referenceType: "custom",
+					action: "upgrade",
+				}),
 				expect.anything(),
 			);
+		});
+
+		it("requires authorization when a custom reference happens to equal the user id", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscription);
+			const { ctx } = setupCtx({
+				body: { plan: "pro", referenceId: "user-123", referenceType: "custom" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({ code: "FORBIDDEN" });
+			expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
 		});
 	});
 
@@ -336,16 +662,20 @@ describe("subscriptions() endpoints", () => {
 				}),
 			});
 
-			mockClient.cancelSubscription.mockResolvedValue(createMockSubscription({ id: "sub_c" }));
-			mockClient.getSubscription.mockResolvedValue({
-				id: "sub_c",
-				status: "CANCELED",
-				ended_at: "2026-04-25T10:00:00Z",
-			});
+			mockClient.cancelSubscription.mockResolvedValue(
+				createMockSubscription({
+					id: "sub_c",
+					status: "CANCELED",
+					ended_at: "2026-04-25T10:00:00Z",
+				}),
+			);
+			mockClient.getSubscription.mockResolvedValueOnce(
+				createMockSubscription({ id: "sub_c", status: "ACTIVE" }),
+			);
 
 			const { ctx } = setupCtx({
 				user: { streampayConsumerId: "cons_me" },
-				body: { subscriptionId: "sub_c" },
+				body: { subscriptionId: "row_c" },
 				adapter,
 			});
 			await handler(ctx);
@@ -353,7 +683,7 @@ describe("subscriptions() endpoints", () => {
 			expect(mockClient.cancelSubscription).toHaveBeenCalledWith("sub_c", {
 				cancel_related_invoices: false,
 			});
-			expect(mockClient.getSubscription).toHaveBeenCalledWith("sub_c");
+			expect(mockClient.getSubscription).toHaveBeenCalledOnce();
 			const row = getSubscriptionRows(adapter)[0];
 			expect(row?.status).toBe("canceled");
 			expect(row?.endedAt).toBeInstanceOf(Date);
@@ -377,6 +707,405 @@ describe("subscriptions() endpoints", () => {
 				adapter,
 			});
 			await expect(handler(ctx)).rejects.toMatchObject({ code: "FORBIDDEN" });
+		});
+
+		it("uses current StreamPay state when the local cancellation projection is stale", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.cancelSubscription);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					streampaySubscriptionId: "sub_stale_cancel",
+					status: "active",
+					cancelAtPeriodEnd: true,
+				}),
+			});
+			mockClient.getSubscription
+				.mockResolvedValueOnce(
+					createMockSubscription({
+						id: "sub_stale_cancel",
+						cancel_at_period_end: false,
+					}),
+				)
+				.mockResolvedValueOnce(
+					createMockSubscription({
+						id: "sub_stale_cancel",
+						cancel_at_period_end: true,
+					}),
+				);
+			mockClient.cancelSubscription.mockResolvedValue(
+				createMockSubscription({ id: "sub_stale_cancel", cancel_at_period_end: true }),
+			);
+
+			const { ctx } = setupCtx({
+				body: { subscriptionId: "sub_stale_cancel" },
+				adapter,
+			});
+			await handler(ctx);
+
+			expect(mockClient.cancelSubscription).toHaveBeenCalledOnce();
+		});
+
+		it("rejects a period-end request that StreamPay would immediately cancel", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.cancelSubscription);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					streampaySubscriptionId: "sub_trial",
+					status: "trialing",
+				}),
+			});
+			mockClient.getSubscription.mockResolvedValue(
+				createMockSubscription({ id: "sub_trial", status: "TRIALING" }),
+			);
+
+			const { ctx } = setupCtx({
+				body: { subscriptionId: "sub_trial", cancelAtPeriodEnd: true },
+				adapter,
+			});
+			await expect(handler(ctx)).rejects.toMatchObject({
+				errorCode: "SUBSCRIPTION_PERIOD_END_CANCEL_UNSUPPORTED",
+			});
+			expect(mockClient.cancelSubscription).not.toHaveBeenCalled();
+		});
+
+		it("treats an upstream canceled subscription as an idempotent cancellation", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.cancelSubscription);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					streampaySubscriptionId: "sub_already_canceled",
+					status: "active",
+				}),
+			});
+			mockClient.getSubscription.mockResolvedValue(
+				createMockSubscription({ id: "sub_already_canceled", status: "CANCELED" }),
+			);
+
+			const { ctx } = setupCtx({
+				body: { subscriptionId: "sub_already_canceled" },
+				adapter,
+			});
+			await expect(handler(ctx)).resolves.toMatchObject({ status: "CANCELED" });
+			expect(mockClient.cancelSubscription).not.toHaveBeenCalled();
+			expect(getSubscriptionRows(adapter)[0]?.status).toBe("canceled");
+		});
+	});
+
+	describe("changeSubscriptionPlan", () => {
+		it("schedules a native deferred change on the existing subscription", async () => {
+			const plugin = buildSubsPlugin([BASIC_PLAN, PRO_PLUS_PLAN], mockClient);
+			const handler = unwrapHandler<{
+				mode: string;
+				subscriptionId: string;
+				plan: string;
+				reused: boolean;
+			}>(plugin.endpoints.changeSubscriptionPlan);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_plan",
+					plan: "basic",
+					group: "tier",
+					status: "active",
+					streampaySubscriptionId: "sub_plan",
+				}),
+			});
+			mockClient.getSubscription.mockResolvedValue(
+				createMockSubscription({
+					id: "sub_plan",
+					items: [{ product_id: "prod_basic", quantity: 1 }],
+				}),
+			);
+			mockClient.updateSubscription.mockResolvedValue(
+				createMockSubscription({
+					id: "sub_plan",
+					items: [{ product_id: "prod_basic", quantity: 1 }],
+					pending_change: {
+						id: "pending_1",
+						effective_at: "2026-05-01T00:00:00Z",
+						target_items: [{ product_id: "prod_pro_plus", quantity: 1 }],
+					},
+				}),
+			);
+
+			const { ctx } = setupCtx({
+				body: { subscriptionId: "sub_plan", plan: "pro_plus" },
+				adapter,
+			});
+			const result = await handler(ctx);
+
+			expect(mockClient.updateSubscription).toHaveBeenCalledWith("sub_plan", {
+				items: [{ product_id: "prod_pro_plus", quantity: 1 }],
+				coupons: [],
+				recurring_interval: "MONTH",
+				recurring_interval_count: 1,
+			});
+			expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
+			expect(result).toMatchObject({
+				mode: "at_period_end",
+				subscriptionId: "row_plan",
+				plan: "pro_plus",
+				reused: false,
+			});
+			expect(getSubscriptionRows(adapter)).toHaveLength(1);
+			expect(getSubscriptionRows(adapter)[0]).toMatchObject({
+				plan: "basic",
+				pendingPlan: "pro_plus",
+				pendingPlanEffectiveAt: new Date("2026-05-01T00:00:00Z"),
+				cancelAtPeriodEnd: false,
+			});
+		});
+
+		it("returns the existing pending change when the requested target matches", async () => {
+			const plugin = buildSubsPlugin([BASIC_PLAN, PRO_PLUS_PLAN], mockClient);
+			const handler = unwrapHandler<{ reused: boolean }>(plugin.endpoints.changeSubscriptionPlan);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					plan: "basic",
+					group: "tier",
+					status: "active",
+					streampaySubscriptionId: "sub_plan",
+				}),
+			});
+			mockClient.getSubscription.mockResolvedValue(
+				createMockSubscription({
+					id: "sub_plan",
+					pending_change: {
+						id: "pending_1",
+						effective_at: "2026-05-01T00:00:00Z",
+						target_items: [{ product_id: "prod_pro_plus", quantity: 1 }],
+					},
+				}),
+			);
+
+			const { ctx } = setupCtx({
+				body: { subscriptionId: "sub_plan", plan: "pro_plus" },
+				adapter,
+			});
+			await expect(handler(ctx)).resolves.toMatchObject({ reused: true });
+			expect(mockClient.updateSubscription).not.toHaveBeenCalled();
+			expect(getSubscriptionRows(adapter)[0]).toMatchObject({
+				pendingPlan: "pro_plus",
+				pendingPlanEffectiveAt: new Date("2026-05-01T00:00:00Z"),
+			});
+		});
+
+		it("rejects a different target while a plan change is pending", async () => {
+			const plugin = buildSubsPlugin([BASIC_PLAN, PRO_PLUS_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.changeSubscriptionPlan);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					plan: "basic",
+					group: "tier",
+					status: "active",
+					streampaySubscriptionId: "sub_plan",
+				}),
+			});
+			mockClient.getSubscription.mockResolvedValue(
+				createMockSubscription({
+					id: "sub_plan",
+					pending_change: {
+						id: "pending_other",
+						target_items: [{ product_id: "prod_other", quantity: 1 }],
+					},
+				}),
+			);
+
+			const { ctx } = setupCtx({
+				body: { subscriptionId: "sub_plan", plan: "pro_plus" },
+				adapter,
+			});
+			await expect(handler(ctx)).rejects.toMatchObject({
+				code: "CONFLICT",
+				errorCode: "SUBSCRIPTION_PLAN_CHANGE_ALREADY_SCHEDULED",
+			});
+		});
+
+		it("schedules a billing interval change through the typed StreamPay update contract", async () => {
+			const annualPlan: StreamPayPlan = {
+				...PRO_PLUS_PLAN,
+				name: "annual",
+				productId: "prod_annual",
+				billingInterval: "YEAR",
+			};
+			const plugin = buildSubsPlugin([BASIC_PLAN, annualPlan], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.changeSubscriptionPlan);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					plan: "basic",
+					group: "tier",
+					status: "active",
+					streampaySubscriptionId: "sub_plan",
+				}),
+			});
+			mockClient.getSubscription.mockResolvedValue(
+				createMockSubscription({
+					id: "sub_plan",
+					recurring_interval: "MONTH",
+					recurring_interval_count: 1,
+					items: [{ product_id: "prod_basic", quantity: 1 }],
+				}),
+			);
+			mockClient.updateSubscription.mockResolvedValue(
+				createMockSubscription({
+					id: "sub_plan",
+					recurring_interval: "MONTH",
+					items: [{ product_id: "prod_basic", quantity: 1 }],
+					pending_change: {
+						id: "pending_annual",
+						effective_at: "2026-08-01T00:00:00Z",
+						target_items: [{ product_id: "prod_annual", quantity: 1 }],
+					},
+				}),
+			);
+			const { ctx } = setupCtx({
+				body: { subscriptionId: "sub_plan", plan: "annual" },
+				adapter,
+			});
+
+			await expect(handler(ctx)).resolves.toMatchObject({
+				mode: "at_period_end",
+				plan: "annual",
+			});
+			expect(mockClient.updateSubscription).toHaveBeenCalledWith("sub_plan", {
+				items: [{ product_id: "prod_annual", quantity: 1 }],
+				coupons: [],
+				recurring_interval: "YEAR",
+				recurring_interval_count: 1,
+			});
+		});
+
+		it("rejects changing a subscription into a different plan group", async () => {
+			const plugin = buildSubsPlugin([BASIC_PLAN, PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.changeSubscriptionPlan);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					plan: "basic",
+					group: "tier",
+					status: "active",
+					streampaySubscriptionId: "sub_plan",
+				}),
+			});
+			mockClient.getSubscription.mockResolvedValue(
+				createMockSubscription({
+					id: "sub_plan",
+					items: [{ product_id: "prod_basic", quantity: 1 }],
+				}),
+			);
+
+			const { ctx } = setupCtx({
+				body: { subscriptionId: "sub_plan", plan: "pro" },
+				adapter,
+			});
+			await expect(handler(ctx)).rejects.toMatchObject({
+				errorCode: "SUBSCRIPTION_PLAN_GROUP_MISMATCH",
+			});
+			expect(mockClient.getSubscription).toHaveBeenCalledWith("sub_plan");
+		});
+
+		it("rejects a plan change while cancellation is scheduled", async () => {
+			const plugin = buildSubsPlugin([BASIC_PLAN, PRO_PLUS_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.changeSubscriptionPlan);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					plan: "basic",
+					group: "tier",
+					status: "active",
+					streampaySubscriptionId: "sub_canceling",
+				}),
+			});
+			mockClient.getSubscription.mockResolvedValue(
+				createMockSubscription({
+					id: "sub_canceling",
+					cancel_at_period_end: true,
+					items: [{ product_id: "prod_basic", quantity: 1 }],
+				}),
+			);
+
+			const { ctx } = setupCtx({
+				body: { subscriptionId: "sub_canceling", plan: "pro_plus" },
+				adapter,
+			});
+			await expect(handler(ctx)).rejects.toMatchObject({
+				code: "CONFLICT",
+				errorCode: "SUBSCRIPTION_ALREADY_SCHEDULED_CANCEL",
+			});
+			expect(mockClient.updateSubscription).not.toHaveBeenCalled();
+		});
+	});
+
+	describe("scheduled change reversal", () => {
+		it("cancels a pending plan change and clears its local projection", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.cancelSubscriptionPlanChange);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					streampaySubscriptionId: "sub_pending",
+					status: "active",
+					pendingPlan: "pro_plus",
+					pendingPlanEffectiveAt: new Date("2026-05-01T00:00:00Z"),
+				}),
+			});
+			mockClient.getSubscription.mockResolvedValue(createMockSubscription({ id: "sub_pending" }));
+			const { ctx } = setupCtx({ body: { subscriptionId: "sub_pending" }, adapter });
+
+			await handler(ctx);
+			expect(mockClient.deletePendingSubscriptionChange).toHaveBeenCalledWith("sub_pending");
+			expect(getSubscriptionRows(adapter)[0]).toMatchObject({
+				pendingPlan: null,
+				pendingPlanEffectiveAt: null,
+			});
+		});
+
+		it("uncancels renewal and mirrors the provider state", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.uncancelSubscription);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					streampaySubscriptionId: "sub_uncancel",
+					status: "active",
+					cancelAtPeriodEnd: true,
+					cancelAt: new Date("2026-02-01T00:00:00.000Z"),
+					cancelScheduledAt: new Date("2026-01-15T00:00:00.000Z"),
+				}),
+			});
+			mockClient.getSubscription.mockResolvedValue(
+				createMockSubscription({
+					id: "sub_uncancel",
+					status: "ACTIVE",
+					cancel_at_period_end: false,
+				}),
+			);
+			const { ctx } = setupCtx({ body: { subscriptionId: "sub_uncancel" }, adapter });
+
+			await handler(ctx);
+			expect(mockClient.uncancelSubscription).toHaveBeenCalledWith("sub_uncancel");
+			expect(getSubscriptionRows(adapter)[0]).toMatchObject({
+				cancelAtPeriodEnd: false,
+				cancelAt: null,
+				cancelScheduledAt: null,
+			});
 		});
 	});
 
@@ -563,8 +1292,117 @@ describe("subscriptions() endpoints", () => {
 				adapter,
 			});
 			await expect(handler(ctx)).rejects.toMatchObject({
-				errorCode: "SUBSCRIPTION_NOT_FROZEN",
+				errorCode: "SUBSCRIPTION_FREEZE_NOT_ACTIVE",
 			});
+		});
+
+		it("cancels a scheduled freeze by id and reconciles the subscription", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.cancelSubscriptionFreeze);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_future_freeze",
+					streampaySubscriptionId: "sub_future_freeze",
+					status: "active",
+				}),
+			});
+			mockClient.getSubscription.mockResolvedValue(
+				createMockSubscription({ id: "sub_future_freeze", status: "ACTIVE" }),
+			);
+			mockClient.listSubscriptionFreezes.mockResolvedValue({
+				data: [{ id: "freeze_future", freeze_start_datetime: "2026-08-01T00:00:00Z" }],
+				pagination: {
+					total_count: 1,
+					current_page: 1,
+					limit: 100,
+					max_page: 1,
+					has_next_page: false,
+					has_previous_page: false,
+				},
+			});
+
+			const { ctx } = setupCtx({
+				body: { subscriptionId: "row_future_freeze", freezeId: "freeze_future" },
+				adapter,
+			});
+			await expect(handler(ctx)).resolves.toEqual({
+				canceled: true,
+				freezeId: "freeze_future",
+				reused: false,
+			});
+			expect(mockClient.deleteSubscriptionFreeze).toHaveBeenCalledWith(
+				"sub_future_freeze",
+				"freeze_future",
+			);
+			expect(mockClient.getSubscription).toHaveBeenCalledWith("sub_future_freeze");
+		});
+
+		it("treats StreamPay's retained canceled-freeze tombstone as an idempotent replay", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.cancelSubscriptionFreeze);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_tombstone",
+					streampaySubscriptionId: "sub_tombstone",
+					status: "active",
+				}),
+			});
+			mockClient.listSubscriptionFreezes.mockResolvedValue({
+				data: [{ id: "freeze_tombstone", freeze_start_datetime: "2026-08-01T00:00:00Z" }],
+			});
+			mockClient.deleteSubscriptionFreeze.mockRejectedValue(
+				mockApiError(403, {
+					error: {
+						code: "STREAM_ERROR",
+						message: "Something wrong happened, please contact support.",
+						additional_info: "Cannot delete non-latest freeze entry.",
+					},
+				}),
+			);
+			const { ctx } = setupCtx({
+				adapter,
+				body: { subscriptionId: "row_tombstone", freezeId: "freeze_tombstone" },
+			});
+
+			await expect(handler(ctx)).resolves.toEqual({
+				canceled: true,
+				freezeId: "freeze_tombstone",
+				reused: true,
+			});
+			expect(ctx.context.logger.info).toHaveBeenCalledWith(
+				expect.stringContaining("provider tombstone"),
+			);
+		});
+
+		it("does not hide unrelated provider authorization failures while canceling a freeze", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.cancelSubscriptionFreeze);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_forbidden_freeze",
+					streampaySubscriptionId: "sub_forbidden_freeze",
+				}),
+			});
+			mockClient.listSubscriptionFreezes.mockResolvedValue({
+				data: [{ id: "freeze_forbidden", freeze_start_datetime: "2026-08-01T00:00:00Z" }],
+			});
+			mockClient.deleteSubscriptionFreeze.mockRejectedValue(
+				mockApiError(403, {
+					error: { code: "STREAM_ERROR", additional_info: "Insufficient permissions." },
+				}),
+			);
+			const { ctx } = setupCtx({
+				adapter,
+				body: { subscriptionId: "row_forbidden_freeze", freezeId: "freeze_forbidden" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({ code: "FORBIDDEN" });
 		});
 	});
 
@@ -602,6 +1440,43 @@ describe("subscriptions() endpoints", () => {
 			expect((result[0]?.plan as { name?: string })?.name).toBe("pro");
 		});
 
+		it("lists an organization reference only after explicit read authorization", async () => {
+			const authorizeReference = vi.fn().mockResolvedValue(true);
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient, { authorizeReference });
+			const handler = unwrapHandler<Array<Record<string, unknown>>>(
+				plugin.endpoints.listSubscriptions,
+			);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					referenceId: "org-123",
+					referenceType: "organization",
+					status: "active",
+				}),
+			});
+			const { ctx } = setupCtx({
+				adapter,
+				query: { referenceId: "org-123", referenceType: "organization" },
+			});
+
+			const result = await handler(ctx);
+
+			expect(result).toHaveLength(1);
+			expect(result[0]).toMatchObject({
+				referenceId: "org-123",
+				referenceType: "organization",
+			});
+			expect(authorizeReference).toHaveBeenCalledWith(
+				expect.objectContaining({
+					referenceId: "org-123",
+					referenceType: "organization",
+					action: "read",
+				}),
+				expect.anything(),
+			);
+		});
+
 		it("currentSubscription returns null when no live sub exists", async () => {
 			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
 			const handler = unwrapHandler(plugin.endpoints.currentSubscription);
@@ -630,13 +1505,47 @@ describe("subscriptions() endpoints", () => {
 			const result = await handler(ctx);
 			expect(result?.plan).toMatchObject({ name: "basic" });
 		});
+
+		it("currentSubscription defaults to the ungrouped plan when other groups are active", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN, BASIC_PLAN], mockClient);
+			const handler = unwrapHandler<Record<string, unknown> | null>(
+				plugin.endpoints.currentSubscription,
+			);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					referenceId: "user-123",
+					plan: "basic",
+					group: "tier",
+					streampaySubscriptionId: "sub_grouped",
+					status: "active",
+				}),
+			});
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					referenceId: "user-123",
+					plan: "pro",
+					group: null,
+					streampaySubscriptionId: "sub_default",
+					status: "active",
+				}),
+			});
+			const { ctx } = setupCtx({ adapter });
+
+			const result = await handler(ctx);
+
+			expect(result?.streampaySubscriptionId).toBe("sub_default");
+			expect(result?.plan).toMatchObject({ name: "pro" });
+		});
 	});
 
 	describe("hasSubscriptionFeature / checkSubscriptionLimit", () => {
 		const TEAM_PLAN: StreamPayPlan = {
 			name: "team",
 			productId: "prod_team",
-			priceHalalat: 19900,
+			priceInSmallestUnit: 19900,
 			billingInterval: "MONTH",
 			limits: { seats: 10, workspaces: true },
 		};
@@ -748,6 +1657,148 @@ describe("subscriptions() endpoints", () => {
 			expect(result.subscription.status).toBe("active");
 		});
 
+		it("filters by consumer and follows pagination during fallback reconciliation", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler<{ synced: boolean }>(plugin.endpoints.subscriptionSuccess);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_paged",
+					plan: "pro",
+					status: "incomplete",
+					streampayConsumerId: "cons_paged",
+				}),
+			});
+			mockClient.listSubscriptions
+				.mockResolvedValueOnce({
+					data: [],
+					pagination: { current_page: 1, max_page: 2, has_next_page: true },
+				})
+				.mockResolvedValueOnce({
+					data: [
+						createMockSubscription({
+							id: "sub_page_2",
+							organization_consumer_id: "cons_paged",
+							items: [{ product_id: "prod_pro", quantity: 1 }],
+						}),
+					],
+					pagination: { current_page: 2, max_page: 2, has_next_page: false },
+				});
+
+			const { ctx } = setupCtx({ adapter, query: { subscriptionId: "row_paged" } });
+			await expect(handler(ctx)).resolves.toMatchObject({ synced: true });
+			expect(mockClient.listSubscriptions).toHaveBeenNthCalledWith(1, {
+				page: 1,
+				size: 100,
+				organization_consumer_id: "cons_paged",
+			});
+			expect(mockClient.listSubscriptions).toHaveBeenNthCalledWith(2, {
+				page: 2,
+				size: 100,
+				organization_consumer_id: "cons_paged",
+			});
+		});
+
+		it("does not attach an older checkout for the same consumer and product", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler<{ synced: boolean }>(plugin.endpoints.subscriptionSuccess);
+			const adapter = createMockAdapter();
+			const checkoutCreatedAt = new Date("2026-07-10T12:00:00.000Z");
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_recent_checkout",
+					plan: "pro",
+					status: "incomplete",
+					streampayConsumerId: "cons_repeat",
+					streampayPaymentLinkId: "pl_new",
+					createdAt: checkoutCreatedAt,
+				}),
+			});
+			mockClient.listSubscriptions.mockResolvedValue({
+				data: [
+					createMockSubscription({
+						id: "sub_old",
+						organization_consumer_id: "cons_repeat",
+						created_at: "2026-07-01T12:00:00.000Z",
+						items: [{ product_id: "prod_pro" }],
+					}),
+				],
+			});
+
+			const { ctx } = setupCtx({
+				adapter,
+				query: { subscriptionId: "row_recent_checkout" },
+			});
+			await expect(handler(ctx)).resolves.toMatchObject({ synced: false });
+			expect(getSubscriptionRows(adapter)[0]?.streampaySubscriptionId).toBeNull();
+		});
+
+		it("rejects a candidate whose invoice belongs to a different payment link", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler<{ synced: boolean }>(plugin.endpoints.subscriptionSuccess);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_link_match",
+					plan: "pro",
+					status: "incomplete",
+					streampayConsumerId: "cons_repeat",
+					streampayPaymentLinkId: "pl_expected",
+				}),
+			});
+			mockClient.listSubscriptions.mockResolvedValue({
+				data: [
+					createMockSubscription({
+						id: "sub_other_link",
+						organization_consumer_id: "cons_repeat",
+						items: [{ product_id: "prod_pro" }],
+						latest_invoice: { payment_link_id: "pl_other", currency: "SAR" },
+					}),
+				],
+			});
+
+			const { ctx } = setupCtx({ adapter, query: { subscriptionId: "row_link_match" } });
+			await expect(handler(ctx)).resolves.toMatchObject({ synced: false });
+		});
+
+		it("reconciles a legacy timestamp-less row only by exact payment-link correlation", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler<{ synced: boolean }>(plugin.endpoints.subscriptionSuccess);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_legacy_timestamp",
+					plan: "pro",
+					status: "incomplete",
+					streampayConsumerId: "cons_legacy",
+					streampayPaymentLinkId: "pl_exact",
+				}),
+			});
+			const legacyRow = adapter.tables.subscription?.[0];
+			if (legacyRow) legacyRow.createdAt = null;
+			mockClient.listSubscriptions.mockResolvedValue({
+				data: [
+					createMockSubscription({
+						id: "sub_exact",
+						organization_consumer_id: "cons_legacy",
+						items: [{ product_id: "prod_pro" }],
+						latest_invoice: { payment_link_id: "pl_exact", currency: "SAR" },
+					}),
+				],
+			});
+
+			const { ctx } = setupCtx({
+				adapter,
+				query: { subscriptionId: "row_legacy_timestamp" },
+			});
+			await expect(handler(ctx)).resolves.toMatchObject({ synced: true });
+			expect(getSubscriptionRows(adapter)[0]?.streampaySubscriptionId).toBe("sub_exact");
+		});
+
 		it("does not link when no subscription carries the plan's product", async () => {
 			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
 			const handler = unwrapHandler<{ synced: boolean }>(plugin.endpoints.subscriptionSuccess);
@@ -783,36 +1834,166 @@ describe("subscriptions() endpoints", () => {
 	});
 
 	describe("schema contribution", () => {
+		it("replays a stored dead-letter event through an exclusive lease", async () => {
+			const registry: StreamPayPluginRegistry = {};
+			subscriptions({ plans: [PRO_PLAN] })(
+				createTestStreamPayOptions({ client: mockClient }),
+				registry,
+			);
+			const replay = registry.replayWebhookEvent;
+			if (!replay) throw new Error("expected replay registry");
+
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					streampaySubscriptionId: "sp_replay",
+					status: "active",
+				}),
+			});
+			await adapter.create({
+				model: "streampayWebhookEvent",
+				data: {
+					eventId: "event-replay",
+					eventType: "SUBSCRIPTION_ACTIVATED",
+					status: "dead_letter",
+					attemptCount: 2,
+					receivedAt: new Date(),
+					lockedAt: null,
+					lockedBy: null,
+					rawPayload: JSON.stringify({
+						event_type: "SUBSCRIPTION_ACTIVATED",
+						entity_type: "SUBSCRIPTION",
+						entity_id: "sp_replay",
+						entity_url: "https://api.example/subscriptions/sp_replay",
+						status: "ACTIVE",
+						timestamp: "2026-01-01T00:00:00.000Z",
+						data: {},
+					}),
+				},
+			});
+			mockClient.getSubscription.mockResolvedValue(
+				createMockSubscription({ id: "sp_replay", status: "ACTIVE" }),
+			);
+			const { ctx } = setupCtx({ adapter });
+
+			await expect(
+				replay(ctx as unknown as Parameters<typeof replay>[0], "event-replay"),
+			).resolves.toEqual({
+				replayed: true,
+				eventId: "event-replay",
+			});
+			expect(adapter.tables.streampayWebhookEvent?.[0]).toMatchObject({
+				status: "completed",
+				attemptCount: 3,
+				lockedAt: null,
+				lockedBy: null,
+				rawPayload: null,
+			});
+		});
+
+		it("rejects malformed stored replay JSON as a controlled bad request", async () => {
+			const registry: StreamPayPluginRegistry = {};
+			subscriptions({ plans: [PRO_PLAN] })(
+				createTestStreamPayOptions({ client: mockClient }),
+				registry,
+			);
+			const replay = registry.replayWebhookEvent;
+			if (!replay) throw new Error("expected replay registry");
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "streampayWebhookEvent",
+				data: {
+					eventId: "event-malformed",
+					eventType: "SUBSCRIPTION_ACTIVATED",
+					status: "dead_letter",
+					attemptCount: 1,
+					receivedAt: new Date(),
+					lockedAt: null,
+					lockedBy: null,
+					rawPayload: "{",
+				},
+			});
+			const { ctx } = setupCtx({ adapter });
+
+			await expect(
+				replay(ctx as unknown as Parameters<typeof replay>[0], "event-malformed"),
+			).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		});
+
 		it("exposes the `subscription` + `streampayWebhookEvent` tables", () => {
 			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
 			expect(plugin.schema).toBeDefined();
 			expect(plugin.schema).toHaveProperty("subscription");
 			expect(plugin.schema).toHaveProperty("streampayWebhookEvent");
-		});
-
-		it("omits the schema when enableSubscriptionTable=false", () => {
-			const plugin = buildSubsPlugin([PRO_PLAN], mockClient, {
-				enableSubscriptionTable: false,
-			});
-			expect(plugin.schema).toBeUndefined();
-		});
-
-		it("skips webhook auto-sync registration when enableSubscriptionTable=false", () => {
-			const registry: Record<string, unknown> = {};
-			subscriptions({ plans: [PRO_PLAN], enableSubscriptionTable: false })(
-				createTestStreamPayOptions({ client: mockClient }),
-				registry,
+			expect(plugin.schema).toHaveProperty("subscription.fields.createdAt");
+			expect(plugin.schema).toHaveProperty("subscription.fields.updatedAt");
+			expect(plugin.schema).toHaveProperty("subscription.fields.activeSlotKey.unique", true);
+			expect(plugin.schema).toHaveProperty(
+				"subscription.fields.streampaySubscriptionId.unique",
+				true,
 			);
-			expect(registry.subscriptionWebhookSync).toBeUndefined();
+			expect(plugin.schema).toHaveProperty(
+				"subscription.fields.streampayPaymentLinkId.unique",
+				true,
+			);
+			expect(plugin.schema).toHaveProperty("subscription.fields.providerStatus");
+			expect(plugin.schema).toHaveProperty("subscription.fields.billingStatus");
+			expect(plugin.schema).toHaveProperty("streampayWebhookEvent.fields.lockedBy");
+			expect(plugin.schema).toHaveProperty("streampayWebhookEvent.fields.nextAttemptAt");
+			expect(plugin.schema).not.toHaveProperty("subscription.fields.checkoutUrl");
 		});
 
-		it("registers webhook auto-sync by default", () => {
-			const registry: Record<string, unknown> = {};
+		it("dead-letters permanent webhook failures and rethrows transient failures", async () => {
+			const registry: StreamPayPluginRegistry = {};
 			subscriptions({ plans: [PRO_PLAN] })(
 				createTestStreamPayOptions({ client: mockClient }),
 				registry,
 			);
-			expect(typeof registry.subscriptionWebhookSync).toBe("function");
+			const sync = registry.subscriptionWebhookSync;
+			if (!sync) throw new Error("expected subscription webhook sync registry");
+
+			const permanentAdapter = createMockAdapter();
+			const { ctx: permanentCtx } = setupCtx({ adapter: permanentAdapter });
+			const permanentPayload = createMockWebhookPayload({
+				event_type: "SUBSCRIPTION_ACTIVATED",
+				entity_id: "sub_permanent_failure",
+				timestamp: "2026-07-10T18:00:00.000Z",
+			});
+			mockClient.getSubscription.mockRejectedValueOnce(
+				mockApiError(400, { error: { code: "INVALID_SUBSCRIPTION" } }),
+			);
+
+			await expect(
+				sync(permanentCtx as unknown as Parameters<typeof sync>[0], permanentPayload, {
+					rawBody: "permanent-raw-body",
+					signatureHeader: "t=1,v1=permanent",
+				}),
+			).resolves.toBeUndefined();
+			expect(permanentAdapter.tables.streampayWebhookEvent?.[0]).toMatchObject({
+				status: "dead_letter",
+				rawPayload: "permanent-raw-body",
+				signatureHeader: "t=1,v1=permanent",
+			});
+
+			const transientAdapter = createMockAdapter();
+			const { ctx: transientCtx } = setupCtx({ adapter: transientAdapter });
+			const transientPayload = createMockWebhookPayload({
+				event_type: "SUBSCRIPTION_ACTIVATED",
+				entity_id: "sub_transient_failure",
+				timestamp: "2026-07-10T18:01:00.000Z",
+			});
+			mockClient.getSubscription.mockRejectedValueOnce(
+				mockApiError(503, { error: { code: "UPSTREAM_UNAVAILABLE" } }),
+			);
+
+			await expect(
+				sync(transientCtx as unknown as Parameters<typeof sync>[0], transientPayload),
+			).rejects.toBeDefined();
+			expect(transientAdapter.tables.streampayWebhookEvent?.[0]).toMatchObject({
+				status: "pending",
+				attemptCount: 1,
+			});
 		});
 
 		it("omits the streampayWebhookEvent table when enableWebhookEventTable=false", () => {
@@ -830,6 +2011,15 @@ describe("subscriptions() endpoints", () => {
 
 		it("rejects construction when `plans` is an empty array", () => {
 			expect(() => subscriptions({ plans: [] })).toThrow(/at least one plan/);
+		});
+
+		it("rejects invalid retry counts and access statuses at construction", () => {
+			expect(() => subscriptions({ plans: [PRO_PLAN], maxWebhookAttempts: 0 })).toThrow(
+				/positive integer/,
+			);
+			expect(() =>
+				subscriptions({ plans: [PRO_PLAN], accessStatuses: ["unknown" as never] }),
+			).toThrow(/invalid access status/);
 		});
 	});
 });

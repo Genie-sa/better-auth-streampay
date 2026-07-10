@@ -166,5 +166,17 @@ describe("verifyWebhook", () => {
 			expect(result.ok).toBe(false);
 			if (!result.ok) expect(result.reason).toBe("INVALID_SIGNATURE");
 		});
+
+		it("never accepts a signature created with an empty rotation entry", () => {
+			const header = sign(now(), body, "");
+			const result = verifyWebhook({
+				secret: ["real-secret", ""],
+				rawBody: body,
+				signatureHeader: header,
+				now,
+			});
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.reason).toBe("INVALID_SIGNATURE");
+		});
 	});
 });

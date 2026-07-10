@@ -1,11 +1,15 @@
-/** Convert between decimal-SAR strings/numbers and integer halalat (1 SAR = 100 halalat). */
 export const StreamPayAmount = {
 	toHalalat(sar: string | number): number {
 		const asNumber = typeof sar === "string" ? Number(sar) : sar;
 		if (!Number.isFinite(asNumber)) {
 			throw new RangeError(`StreamPayAmount.toHalalat: invalid SAR value ${String(sar)}`);
 		}
-		return Math.round(asNumber * 100);
+		const absoluteHalalat = Math.round(Number(`${Math.abs(asNumber)}e2`));
+		const halalat = Math.sign(asNumber) * absoluteHalalat;
+		if (!Number.isSafeInteger(halalat)) {
+			throw new RangeError(`StreamPayAmount.toHalalat: SAR value is outside the safe range`);
+		}
+		return halalat;
 	},
 
 	toSAR(halalat: number): string {

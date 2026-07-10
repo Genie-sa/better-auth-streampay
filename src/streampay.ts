@@ -9,7 +9,6 @@ import type { StreamPayPluginRegistry } from "./plugins/subscriptions";
 import type { StreamPayEndpoints, StreamPayOptions } from "./types";
 import { version as PACKAGE_VERSION } from "./version";
 
-/** Better Auth plugin entry. Composes the StreamPay sub-plugins listed in `use` and wires the consumer lifecycle hooks. */
 export const streampay = <O extends StreamPayOptions>(options: O) => {
 	const registry: StreamPayPluginRegistry = {};
 	const endpoints = {} as StreamPayEndpoints;
@@ -59,5 +58,5 @@ export const streampay = <O extends StreamPayOptions>(options: O) => {
 				},
 			};
 		},
-	} satisfies BetterAuthPlugin;
+	} satisfies BetterAuthPlugin & { version: string };
 };

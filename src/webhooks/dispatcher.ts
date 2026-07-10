@@ -1,8 +1,10 @@
-import type {
-	StreamPayEntityType,
-	StreamPayEventType,
-	StreamPayWebhookData,
-	StreamPayWebhookPayload,
+import {
+	isKnownStreamPayWebhookPayload,
+	type StreamPayEntityType,
+	type StreamPayEventType,
+	type StreamPayWebhookData,
+	type StreamPayWebhookEnvelope,
+	type StreamPayWebhookPayload,
 } from "./events";
 
 export type WebhookHandler<
@@ -11,8 +13,10 @@ export type WebhookHandler<
 	TData extends StreamPayWebhookData = StreamPayWebhookData,
 > = (payload: StreamPayWebhookPayload<TEvent, TEntity, TData>) => Promise<void> | void;
 
+export type WebhookEnvelopeHandler = (payload: StreamPayWebhookEnvelope) => Promise<void> | void;
+
 export interface WebhookHandlers {
-	onPayload?: WebhookHandler;
+	onPayload?: WebhookEnvelopeHandler;
 
 	onPaymentSucceeded?: WebhookHandler<"PAYMENT_SUCCEEDED", "PAYMENT">;
 	onPaymentFailed?: WebhookHandler<"PAYMENT_FAILED", "PAYMENT">;
@@ -45,15 +49,30 @@ export interface WebhookHandlers {
 	onSubscriptionUnfreezeNow?: WebhookHandler<"SUBSCRIPTION_UNFREEZE_NOW", "SUBSCRIPTION">;
 	onSubscriptionUnfreezeFuture?: WebhookHandler<"SUBSCRIPTION_UNFREEZE_FUTURE", "SUBSCRIPTION">;
 	onSubscriptionFreezeCancel?: WebhookHandler<"SUBSCRIPTION_FREEZE_CANCEL", "SUBSCRIPTION">;
+	onSubscriptionPlanChangeScheduled?: WebhookHandler<
+		"SUBSCRIPTION_PLAN_CHANGE_SCHEDULED",
+		"SUBSCRIPTION"
+	>;
+	onSubscriptionPlanChangeCanceled?: WebhookHandler<
+		"SUBSCRIPTION_PLAN_CHANGE_CANCELED",
+		"SUBSCRIPTION"
+	>;
+	onSubscriptionPlanChanged?: WebhookHandler<"SUBSCRIPTION_PLAN_CHANGED", "SUBSCRIPTION">;
+	onSubscriptionPlanChangeInvoiceReissued?: WebhookHandler<
+		"SUBSCRIPTION_PLAN_CHANGE_INVOICE_REISSUED",
+		"SUBSCRIPTION"
+	>;
+	onSubscriptionPlanUpdated?: WebhookHandler<"SUBSCRIPTION_PLAN_UPDATED", "SUBSCRIPTION">;
 
 	onPaymentLinkPayAttemptFailed?: WebhookHandler<"PAYMENT_LINK_PAY_ATTEMPT_FAILED", "PAYMENT_LINK">;
 }
 
 export async function dispatchWebhook(
-	payload: StreamPayWebhookPayload,
+	payload: StreamPayWebhookEnvelope,
 	handlers: WebhookHandlers,
 ): Promise<void> {
 	if (handlers.onPayload) await handlers.onPayload(payload);
+	if (!isKnownStreamPayWebhookPayload(payload)) return;
 
 	switch (payload.event_type) {
 		case "PAYMENT_SUCCEEDED":
@@ -126,6 +145,21 @@ export async function dispatchWebhook(
 			return;
 		case "SUBSCRIPTION_FREEZE_CANCEL":
 			await handlers.onSubscriptionFreezeCancel?.(payload);
+			return;
+		case "SUBSCRIPTION_PLAN_CHANGE_SCHEDULED":
+			await handlers.onSubscriptionPlanChangeScheduled?.(payload);
+			return;
+		case "SUBSCRIPTION_PLAN_CHANGE_CANCELED":
+			await handlers.onSubscriptionPlanChangeCanceled?.(payload);
+			return;
+		case "SUBSCRIPTION_PLAN_CHANGED":
+			await handlers.onSubscriptionPlanChanged?.(payload);
+			return;
+		case "SUBSCRIPTION_PLAN_CHANGE_INVOICE_REISSUED":
+			await handlers.onSubscriptionPlanChangeInvoiceReissued?.(payload);
+			return;
+		case "SUBSCRIPTION_PLAN_UPDATED":
+			await handlers.onSubscriptionPlanUpdated?.(payload);
 			return;
 
 		case "PAYMENT_LINK_PAY_ATTEMPT_FAILED":

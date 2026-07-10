@@ -7,14 +7,26 @@ import { toAPIError } from "../utils/errors";
 import { getLogger } from "../utils/logger";
 import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
 
-/** Options for `checkout()`: product catalog, redirect URLs, and auth gating. */
+export interface StreamPayCustomFieldDefinition {
+	type: "string";
+	title?: string;
+	description?: string;
+}
+
+export interface StreamPayCustomFieldsSchema {
+	type: "object";
+	properties: Record<string, StreamPayCustomFieldDefinition>;
+	required?: string[];
+}
+
 export interface CheckoutOptions {
 	products?: StreamPayProduct[] | (() => Promise<StreamPayProduct[]>);
 	successUrl?: string;
 	failureUrl?: string;
 	authenticatedUsersOnly?: boolean;
 	contactInformationType?: "EMAIL" | "PHONE";
-	customFields?: Record<string, unknown>;
+	currency?: CreatePaymentLinkDto["currency"];
+	customFields?: StreamPayCustomFieldsSchema;
 }
 
 const RelativeOrAbsoluteUrl = z.string().refine((val) => val.startsWith("/") || URL.canParse(val), {
@@ -111,7 +123,6 @@ async function resolveConsumerId(
 	return consumerId;
 }
 
-/** Hosted-checkout sub-plugin. Exposes `POST /streampay/checkout`, returning a StreamPay payment link. */
 export const checkout =
 	(checkoutOptions: CheckoutOptions = {}) =>
 	(options: StreamPayOptions) => {
@@ -166,6 +177,7 @@ export const checkout =
 						const payload: CreatePaymentLinkDto = {
 							name: ctx.body.name ?? `Checkout ${new Date().toISOString()}`,
 							description: ctx.body.description ?? null,
+							currency: checkoutOptions.currency ?? "SAR",
 							items,
 						};
 						if (consumerId !== null) payload.organization_consumer_id = consumerId;
@@ -182,7 +194,10 @@ export const checkout =
 						}
 						if (customMetadata !== null) payload.custom_metadata = customMetadata;
 						if (checkoutOptions.customFields) {
-							payload.custom_fields = checkoutOptions.customFields;
+							// SDK 1.1.3 generates this JSON Schema field as Record<string, never>.
+							payload.custom_fields = checkoutOptions.customFields as unknown as NonNullable<
+								CreatePaymentLinkDto["custom_fields"]
+							>;
 						}
 						if (checkoutOptions.contactInformationType) {
 							payload.contact_information_type = checkoutOptions.contactInformationType;

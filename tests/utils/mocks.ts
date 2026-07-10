@@ -84,6 +84,8 @@ export const createMockStreamPayClient = (): MockedStreamPayClient => ({
 			) => Promise<FreezeSubscriptionBase>
 		>(),
 	deleteSubscriptionFreeze: vi.fn<(subscriptionId: string, freezeId: string) => Promise<void>>(),
+	deletePendingSubscriptionChange: vi.fn<(subscriptionId: string) => Promise<void>>(),
+	uncancelSubscription: vi.fn<(subscriptionId: string) => Promise<void>>(),
 	listInvoices: vi.fn<(params?: PaginationParams) => Promise<InvoiceListResponse>>(),
 	getInvoice: vi.fn<(invoiceId: string) => Promise<InvoiceDetailed>>(),
 	listPayments:
@@ -211,13 +213,15 @@ export const createMockSubscription = (
 	status: "ACTIVE",
 	amount: "10.00",
 	currency: "SAR",
+	recurring_interval: "MONTH",
+	recurring_interval_count: 1,
 	current_period_start: new Date().toISOString(),
 	current_period_end: new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString(),
 	created_at: new Date().toISOString(),
 	...overrides,
 });
 
-export const createMockInvoice = (overrides: InvoiceListItem = {}): InvoiceListItem => ({
+export const createMockInvoice = (overrides: Partial<InvoiceListItem> = {}): InvoiceListItem => ({
 	id: "inv_mocked",
 	organization_consumer_id: "cons_mocked",
 	status: "COMPLETED",
@@ -247,7 +251,9 @@ export const createMockCoupon = (overrides: CouponDetailed = {}): CouponDetailed
 	...overrides,
 });
 
-export const createMockInvoiceDetailed = (overrides: InvoiceDetailed = {}): InvoiceDetailed => ({
+export const createMockInvoiceDetailed = (
+	overrides: Partial<InvoiceDetailed> = {},
+): InvoiceDetailed => ({
 	id: "inv_mocked",
 	organization_consumer_id: "cons_mocked",
 	status: "COMPLETED",

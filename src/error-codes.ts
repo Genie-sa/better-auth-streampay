@@ -39,10 +39,27 @@ export const $ERROR_CODES = defineErrorCodes({
 	SUBSCRIPTION_NOT_FOUND: "The subscription does not exist.",
 	SUBSCRIPTION_PLAN_NOT_FOUND: "The requested subscription plan is not configured.",
 	SUBSCRIPTION_ALREADY_ACTIVE: "An active subscription already exists for this plan group.",
+	SUBSCRIPTION_CHECKOUT_IN_PROGRESS:
+		"A subscription checkout is already being created for this plan group.",
+	SUBSCRIPTION_ALREADY_CANCELED: "The subscription is already canceled.",
+	SUBSCRIPTION_ALREADY_FROZEN: "The subscription is already frozen.",
+	SUBSCRIPTION_EXPIRED: "The subscription has expired.",
+	SUBSCRIPTION_ALREADY_SCHEDULED_CANCEL:
+		"The subscription is already scheduled to cancel at period end.",
+	SUBSCRIPTION_ALREADY_ON_PLAN: "The subscription is already on the requested plan.",
+	SUBSCRIPTION_IMMEDIATE_CANCEL_UNSUPPORTED:
+		"StreamPay does not support immediate cancellation for active subscriptions.",
+	SUBSCRIPTION_PERIOD_END_CANCEL_UNSUPPORTED:
+		"StreamPay only supports period-end cancellation for active subscriptions.",
+	SUBSCRIPTION_PLAN_GROUP_MISMATCH:
+		"Subscription plan changes must stay within the same configured plan group.",
+	SUBSCRIPTION_PLAN_CHANGE_ALREADY_SCHEDULED:
+		"A different plan change is already scheduled for this subscription.",
 	SUBSCRIPTION_INVALID_STATE: "The subscription is in a state that forbids this action.",
 	SUBSCRIPTION_FREEZE_NOT_ACTIVE: "No active freeze period was found for this subscription.",
 	SUBSCRIPTION_REFERENCE_NOT_AUTHORIZED:
 		"You are not authorized to act on this subscription reference.",
+	WEBHOOK_REPLAY_IN_PROGRESS: "This webhook event is already being replayed.",
 	UNKNOWN: "An unexpected error occurred.",
 });
 
@@ -102,10 +119,10 @@ const RAW_CODE_MAP: Record<string, StreamPayErrorCode> = {
 
 	SUBSCRIPTION_ALREADY_ACTIVE: "SUBSCRIPTION_ALREADY_ACTIVE",
 	SUBSCRIPTION_NOT_FOUND: "SUBSCRIPTION_NOT_FOUND",
-	SUBSCRIPTION_ALREADY_CANCELED: "SUBSCRIPTION_INVALID_STATE",
-	SUBSCRIPTION_ALREADY_FROZEN: "SUBSCRIPTION_INVALID_STATE",
+	SUBSCRIPTION_ALREADY_CANCELED: "SUBSCRIPTION_ALREADY_CANCELED",
+	SUBSCRIPTION_ALREADY_FROZEN: "SUBSCRIPTION_ALREADY_FROZEN",
 	SUBSCRIPTION_NOT_FROZEN: "SUBSCRIPTION_FREEZE_NOT_ACTIVE",
-	SUBSCRIPTION_EXPIRED: "SUBSCRIPTION_INVALID_STATE",
+	SUBSCRIPTION_EXPIRED: "SUBSCRIPTION_EXPIRED",
 };
 
 export function mapToErrorCode(

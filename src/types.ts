@@ -126,6 +126,8 @@ export interface StreamPayClient {
 		input: FreezeSubscriptionUpdateRequest,
 	): Promise<FreezeSubscriptionBase>;
 	deleteSubscriptionFreeze(subscriptionId: string, freezeId: string): Promise<void>;
+	deletePendingSubscriptionChange(subscriptionId: string): Promise<void>;
+	uncancelSubscription(subscriptionId: string): Promise<void>;
 
 	listInvoices(params?: StreamPayListInvoicesParams): Promise<InvoiceListResponse>;
 	getInvoice(invoiceId: string): Promise<InvoiceDetailed>;
@@ -155,19 +157,13 @@ export type StreamPayPlugins = readonly StreamPayPlugin[];
 
 export type StreamPayEndpoints = UnionToIntersection<ReturnType<StreamPayPlugin>["endpoints"]>;
 
-export interface ConsumerCreateOverrides {
-	phone_number?: string;
-	alias?: string;
-	comment?: string;
-	preferred_language?: string;
-	iban?: string;
-	communication_methods?: ("WHATSAPP" | "EMAIL" | "SMS")[];
-}
+export type ConsumerCreateOverrides = Partial<
+	Omit<ConsumerCreate, "name" | "email" | "external_id">
+>;
 
 export type ClaimExistingConsumerIdentifier = "email" | "phone";
 export type ClaimExistingConsumerBy = readonly ClaimExistingConsumerIdentifier[];
 
-/** Top-level options for `streampay()`: the SDK `client`, the `use` sub-plugins, and consumer-provisioning behavior. */
 export interface StreamPayOptions {
 	client: StreamPayClient;
 

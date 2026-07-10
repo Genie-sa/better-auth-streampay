@@ -20,7 +20,9 @@ describe("StreamPayAmount.toHalalat", () => {
 	});
 
 	it("rounds half-up at the halalah boundary", () => {
+		expect(StreamPayAmount.toHalalat(1.005)).toBe(101);
 		expect(StreamPayAmount.toHalalat(10.005)).toBe(1001);
+		expect(StreamPayAmount.toHalalat(-1.005)).toBe(-101);
 	});
 
 	it("accepts negative values (refunds are negative amounts)", () => {
@@ -31,6 +33,7 @@ describe("StreamPayAmount.toHalalat", () => {
 		expect(() => StreamPayAmount.toHalalat("abc")).toThrow(RangeError);
 		expect(() => StreamPayAmount.toHalalat(Number.NaN)).toThrow(RangeError);
 		expect(() => StreamPayAmount.toHalalat(Number.POSITIVE_INFINITY)).toThrow(RangeError);
+		expect(() => StreamPayAmount.toHalalat(Number.MAX_SAFE_INTEGER)).toThrow(RangeError);
 	});
 });
 

@@ -206,6 +206,7 @@ liveWriteDescribe("live StreamPay write smoke", () => {
 				name: "BA Live Test Consumer",
 				email: orgOwnerEmail,
 				external_id: currentExternalId,
+				consumer_type: "INDIVIDUAL",
 			});
 			expect(consumer.id).toBeDefined();
 			expect(typeof consumer.id).toBe("string");
@@ -324,6 +325,7 @@ liveWriteDescribe("live StreamPay write smoke", () => {
 			}
 			const link = await client.createPaymentLink({
 				name: `BA live test link ${Date.now()}`,
+				currency: "SAR",
 				items: [
 					{
 						product_id: config.productId,

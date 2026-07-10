@@ -57,6 +57,7 @@ export const onBeforeUserCreate =
 		const createPayload: ConsumerCreate = {
 			name: user.name || user.email,
 			email: user.email,
+			consumer_type: "INDIVIDUAL",
 			...extras,
 		};
 

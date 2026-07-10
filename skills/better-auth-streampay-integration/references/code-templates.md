@@ -1,294 +1,205 @@
-# Code templates
+# Setup examples
 
-Copy-and-adapt snippets. Always check the option names against the
-plugin source before pasting — these summaries can lag behind the
-real types.
+Use these only after reading the app. Match its paths, framework, and style.
 
-## Contents
+## Install
 
-- Installing
-- Environment
-- Server (`auth.ts`)
-  - Factory pattern
-- Better Auth CLI
-- Client (`auth-client.ts`)
-- Framework routes (Next App / Next Pages / Hono / Elysia / Express)
-- Migrations
-- After checkout — refreshing the client
-- Verifying webhooks without the plugin
-
-## Installing
-
-```
-# bun
-bun add better-auth-streampay @streamsdk/typescript
-
-# pnpm
+```bash
 pnpm add better-auth-streampay @streamsdk/typescript
-
-# yarn
-yarn add better-auth-streampay @streamsdk/typescript
-
-# npm
-npm i better-auth-streampay @streamsdk/typescript
 ```
 
-In a monorepo, install in the workspace that owns the auth file (e.g.
-`packages/auth`), not at the root. Make sure `better-auth ^1.4.0` and
-`zod ^3.24 || ^4` are present.
+Install in the workspace that owns the Better Auth config.
 
 ## Environment
 
-`.env` (or `.env.local`, or `apps/server/.env` in a monorepo — match
-where Better Auth is reading from):
-
-```
+```bash
 STREAMPAY_API_KEY=
-# only when webhooks() is enabled:
 STREAMPAY_WEBHOOK_SECRET=
-# Better Auth basics:
 BETTER_AUTH_SECRET=
 BETTER_AUTH_URL=
 ```
 
-Mirror in `.env.example` with empty values. See
-[env-setup.md](env-setup.md) for sources and rules.
+Only add `STREAMPAY_WEBHOOK_SECRET` when `webhooks()` is enabled.
 
-## Server (`auth.ts`)
+Keep real values out of source control. Put empty names in `.env.example`.
 
-Use only the sub-plugins the user picked. See
-[plugins-overview.md](plugins-overview.md) for what each one does and
-[plugin-reference.md](plugin-reference.md) for the option list.
+## Server
 
 ```ts
-import { betterAuth } from "better-auth"
-import StreamSDK from "@streamsdk/typescript"
+import StreamSDK from "@streamsdk/typescript";
+import { betterAuth } from "better-auth";
 import {
-  streampay,
   checkout,
-  portal,
+  streampay,
   subscriptions,
-  admin,
   webhooks,
-} from "better-auth-streampay"
+} from "better-auth-streampay";
 
-const streamPayClient = StreamSDK.init(process.env.STREAMPAY_API_KEY!)
+const streamPayClient = StreamSDK.init(process.env.STREAMPAY_API_KEY!);
 
 export const auth = betterAuth({
-  // ...existing config
   plugins: [
     streampay({
       client: streamPayClient,
-      // Leaving `createConsumerOnSignUp` unset means the consumer is
-      // created lazily on the user's first paid action (checkout /
-      // upgrade). Set `true` ONLY when your org's consumer-creation
-      // path is reliable AND you accept that signup will fail if
-      // StreamPay rejects the create call — sandbox email lock,
-      // regional policy, or a transient outage will then block
-      // account creation entirely.
-      // createConsumerOnSignUp: true,
-      // claimExistingConsumerBy: ["email"],
-      // getConsumerCreateParams: async ({ user }, request) => ({ /* ... */ }),
       use: [
         checkout({
-          products: [
-            // { productId: "uuid", slug: "pro" },
-          ],
-          successUrl: "/dashboard?checkout=success",
-          failureUrl: "/dashboard?checkout=failure",
+          successUrl: "/billing/success",
+          failureUrl: "/billing/failed",
           authenticatedUsersOnly: true,
         }),
-        portal(),
         subscriptions({
           plans: [
-            // {
-            //   name: "pro-monthly",
-            //   productId: "uuid",
-            //   priceHalalat: 9900,
-            //   billingInterval: "MONTH",
-            // },
+            {
+              name: "pro",
+              productId: "recurring-product-id",
+              priceInSmallestUnit: 9900,
+              billingInterval: "MONTH",
+              group: "main",
+              limits: { seats: 10 },
+            },
           ],
-          // onSubscriptionActivated: async ({ subscription, user }) => { /* ... */ },
-        }),
-        admin({
-          // adminRoles: ["admin"],
-          // isAdmin: (user) => user.email?.endsWith("@yourco.com") ?? false,
         }),
         webhooks({
           secret: process.env.STREAMPAY_WEBHOOK_SECRET!,
-          // onPayload: async (p) => logger.info("streampay webhook", p.event_type),
-          onPaymentSucceeded: async (p) => {
-            // TODO
-          },
-          onSubscriptionActivated: async (p) => {
-            // TODO
-          },
-          onSubscriptionCanceled: async (p) => {
-            // TODO
-          },
         }),
       ],
     }),
   ],
-})
+});
 ```
 
-Trim `use: [...]` to whatever the user picked. Drop
-`getConsumerCreateParams` entirely if there are no custom fields.
-Don't include `admin()` unless the user asked — it exposes
-back-office endpoints.
+Remove parts the app does not use.
 
-### Factory pattern (e.g. Better-T-Stack)
-
-Some starters wrap the call in a function. Keep that shape; just add
-the plugin to the inner `plugins: [...]`:
+Keep an existing auth factory:
 
 ```ts
 export function createAuth() {
-  const db = createDb()
-  const streamPayClient = StreamSDK.init(process.env.STREAMPAY_API_KEY!)
+  const db = createDb();
+
   return betterAuth({
     database: drizzleAdapter(db, { provider: "sqlite", schema }),
-    // ...rest
     plugins: [
-      streampay({ client: streamPayClient, use: [/* ... */] }),
+      streampay({
+        client: streamPayClient,
+        use: [checkout()],
+      }),
     ],
-  })
+  });
 }
-
-export const auth = createAuth()
 ```
 
-## Better Auth CLI
-
-Two commands, depending on how the project manages its schema.
-
-```
-# If the project uses its own Drizzle/Prisma schema (BYO), update the
-# schema files first, then run the ORM migration:
-npx @better-auth/cli generate --config <path/to/auth.ts>
-
-# If Better Auth manages the schema directly (no BYO), one command:
-npx @better-auth/cli migrate --config <path/to/auth.ts>
-```
-
-`--config` points at the file that calls `betterAuth(...)`. In a
-monorepo:
-
-```
-npx @better-auth/cli generate --config packages/auth/src/index.ts
-```
-
-## Client (`auth-client.ts`)
+## Client
 
 ```ts
-import { createAuthClient } from "better-auth/react" // or /vue, /svelte, /solid
-import { streampayClient } from "better-auth-streampay/client"
+import { createAuthClient } from "better-auth/react";
+import { streampayClient } from "better-auth-streampay/client";
 
 export const authClient = createAuthClient({
   plugins: [streampayClient()],
-})
+});
 ```
 
-Match the existing framework variant — don't switch.
+Use the app's current Better Auth client package.
 
-## Framework routes
-
-Plugin endpoints live under `/api/auth/*` via Better Auth's handler.
-If the handler is already mounted, you don't need to add anything —
-just make sure all HTTP methods are accepted (admin endpoints use
-PATCH, PUT, and DELETE).
+## Routes
 
 ### Next.js App Router
 
 ```ts
-// app/api/auth/[...all]/route.ts
-import { auth } from "@/lib/auth"
-import { toNextJsHandler } from "better-auth/next-js"
-export const { GET, POST, PATCH, PUT, DELETE } = toNextJsHandler(auth)
+import { toNextJsHandler } from "better-auth/next-js";
+import { auth } from "@/lib/auth";
+
+export const { GET, POST, PATCH, PUT, DELETE } = toNextJsHandler(auth);
 ```
 
 ### Next.js Pages Router
 
 ```ts
-// pages/api/auth/[...all].ts
-import { auth } from "@/lib/auth"
-import { toNodeHandler } from "better-auth/node"
-export default toNodeHandler(auth)
+import { toNodeHandler } from "better-auth/node";
+import { auth } from "@/lib/auth";
+
+export default toNodeHandler(auth);
 ```
 
 ### Hono
 
 ```ts
-app.on(["GET", "POST", "PATCH", "PUT", "DELETE"], "/api/auth/*", (c) => auth.handler(c.req.raw))
+app.on(
+  ["GET", "POST", "PATCH", "PUT", "DELETE"],
+  "/api/auth/*",
+  (c) => auth.handler(c.req.raw),
+);
 ```
-
-If the existing app limits methods (e.g. `app.on(["POST", "GET"], ...)`), widen them. Admin endpoints will 405 otherwise.
 
 ### Elysia
 
 ```ts
-new Elysia().all("/api/auth/*", ({ request }) => auth.handler(request))
+new Elysia().all("/api/auth/*", ({ request }) => auth.handler(request));
 ```
 
 ### Express
 
 ```ts
-import { toNodeHandler } from "better-auth/node"
-app.all("/api/auth/*", toNodeHandler(auth))
+import { toNodeHandler } from "better-auth/node";
+
+app.all("/api/auth/*", toNodeHandler(auth));
 ```
 
-The webhook URL once mounted: `/api/auth/streampay/webhooks` —
-register THAT in the StreamPay dashboard.
+## Database
 
-## Migrations
+New Better Auth managed database:
 
-Once the auth file is updated:
+```bash
+npx @better-auth/cli migrate --config path/to/auth.ts
+```
 
-| Tool | Command |
-|---|---|
-| Better Auth CLI | `npx @better-auth/cli migrate` |
-| Drizzle | `npx drizzle-kit generate && npx drizzle-kit migrate` (or `bun run db:push`) |
-| Prisma | `npx prisma migrate dev --name streampay` |
+Drizzle or Prisma:
 
-After migration, confirm `user.streampayConsumerId` exists. If
-`subscriptions()` is enabled, also confirm `subscription` and
-`streampayWebhookEvent` tables exist.
+```bash
+npx @better-auth/cli generate --config path/to/auth.ts
+```
 
-## After checkout — refreshing the client
+Then run the app's normal database migration.
 
-`webhooks()` updates the server row. Cached client state does not
-update by itself, so the UI keeps rendering the pre-payment tier
-until something asks again.
-
-On the return URL, do two things:
-
-1. Call `authClient.subscriptionSuccess({ subscriptionId })` — this
-   is a fallback sync (in case the webhook is still in flight) AND
-   your cue to invalidate.
-2. Invalidate whatever client-side cache the project already uses
-   for subscription reads. **Read the user's project to find out
-   how** — query keys, router invalidation, server-action
-   revalidation, plain refetch. Don't paste a pattern; mirror theirs.
-
-If `subscriptionSuccess` returns `synced: false`, the webhook hasn't
-landed yet — short-poll `currentSubscription` for a few seconds, or
-just leave the UI in a "activating…" state until the user navigates.
-
-## Verifying webhooks without the plugin
-
-If the user wants signature verification but doesn't want to wire the
-whole plugin:
+## Checkout return
 
 ```ts
-import { verifyWebhook } from "better-auth-streampay"
+await authClient.subscription.success({
+  query: { subscriptionId },
+});
+```
 
+After this call, refresh the subscription query or route data already used by the app.
+
+## Server-side call
+
+```ts
+import { headers } from "next/headers";
+
+const subscription = await auth.api.currentSubscription({
+  query: { group: "main" },
+  headers: await headers(),
+});
+```
+
+Pass session headers to user and admin actions.
+
+## Webhook signature only
+
+Use this when the app does not use the webhook plugin:
+
+```ts
+import { verifyWebhook } from "better-auth-streampay";
+
+const rawBody = await request.text();
 const result = verifyWebhook({
   secret: process.env.STREAMPAY_WEBHOOK_SECRET!,
-  rawBody: await request.text(),
+  rawBody,
   signatureHeader: request.headers.get("X-Webhook-Signature"),
   toleranceSeconds: 300,
-})
+});
 
-if (!result.ok) return new Response(`invalid: ${result.reason}`, { status: 400 })
+if (!result.ok) {
+  return new Response("Invalid webhook", { status: 401 });
+}
 ```

@@ -52,10 +52,11 @@ function createAdminUser(overrides: Partial<AdminMockUser> = {}): AdminMockUser 
 	return createMockUser({ role: "admin", ...overrides } as Partial<MockUser>) as AdminMockUser;
 }
 
-function createMockPayment(overrides: PaymentResponse = {}): PaymentResponse {
+function createMockPayment(overrides: Partial<PaymentResponse> = {}): PaymentResponse {
 	return {
 		id: "pay_mocked",
 		amount: "10.00",
+		currency: "SAR",
 		current_status: "SUCCEEDED",
 		...overrides,
 	};

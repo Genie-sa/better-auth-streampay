@@ -1,5 +1,13 @@
 import { z } from "zod";
-import type { PlansInput, StreamPayPlanLike, Subscription } from "./types";
+import {
+	DEFAULT_ACCESS_STATUSES,
+	type PlansInput,
+	type StreamPayPlanLike,
+	type Subscription,
+	type SubscriptionStatus,
+} from "./types";
+
+const SUBSCRIPTION_INTERVALS = ["WEEK", "MONTH", "QUARTER", "YEAR"] as const;
 
 export interface ResolvedPlans {
 	list: readonly StreamPayPlanLike[];
@@ -9,21 +17,30 @@ export interface ResolvedPlans {
 const PlanSchema = z.object({
 	name: z.string().min(1, "every plan must have a non-empty `name`."),
 	productId: z.string().min(1, "missing a non-empty `productId`."),
-	priceHalalat: z
-		.number({ error: "must have a non-negative numeric `priceHalalat`." })
-		.refine((n) => Number.isFinite(n) && n >= 0, {
-			message: "must have a non-negative numeric `priceHalalat`.",
-		}),
-	billingInterval: z.enum(["WEEK", "MONTH", "QUARTER", "YEAR"], {
-		error: () => "has invalid `billingInterval`. Expected one of: WEEK, MONTH, QUARTER, YEAR.",
-	}),
+	priceInSmallestUnit: z.custom<number>(
+		(value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
+		"must have a non-negative safe-integer `priceInSmallestUnit`.",
+	),
+	currency: z.enum(["SAR", "USD", "EUR", "GBP", "AED", "BHD", "KWD", "OMR", "QAR"]).optional(),
+	version: z.string().min(1, "has an empty `version`.").optional(),
+	billingInterval: z.custom<(typeof SUBSCRIPTION_INTERVALS)[number]>(
+		(value) =>
+			typeof value === "string" && SUBSCRIPTION_INTERVALS.some((interval) => interval === value),
+		"has invalid `billingInterval`. Expected one of: WEEK, MONTH, QUARTER, YEAR.",
+	),
 	billingIntervalCount: z
 		.number()
 		.refine((n) => Number.isInteger(n) && n >= 1, {
 			message: "has invalid `billingIntervalCount` — must be a positive integer.",
 		})
 		.optional(),
-	group: z.string().optional(),
+	trialPeriodDays: z
+		.number()
+		.refine((n) => Number.isInteger(n) && n >= 1 && n <= 365, {
+			message: "has invalid `trialPeriodDays` — must be an integer from 1 to 365.",
+		})
+		.optional(),
+	group: z.string().min(1, "has an empty `group`.").optional(),
 	limits: z.record(z.string(), z.unknown()).optional(),
 });
 
@@ -31,16 +48,25 @@ const PlansSchema = z
 	.array(PlanSchema)
 	.nonempty("`plans` resolved to an empty list. Provide at least one plan.")
 	.superRefine((plans, ctx) => {
-		const seen = new Set<string>();
+		const seenNames = new Set<string>();
+		const seenProductIds = new Set<string>();
 		for (const [index, plan] of plans.entries()) {
-			if (seen.has(plan.name)) {
+			if (seenNames.has(plan.name)) {
 				ctx.addIssue({
 					code: "custom",
 					path: [index, "name"],
 					message: `duplicate plan name "${plan.name}" — plan names must be unique.`,
 				});
 			}
-			seen.add(plan.name);
+			seenNames.add(plan.name);
+			if (seenProductIds.has(plan.productId)) {
+				ctx.addIssue({
+					code: "custom",
+					path: [index, "productId"],
+					message: `duplicate productId "${plan.productId}" — webhook plan inference requires unique product IDs.`,
+				});
+			}
+			seenProductIds.add(plan.productId);
 		}
 	});
 
@@ -94,14 +120,21 @@ export type FeatureKey<P> = P extends { limits?: infer L }
 		: string
 	: string;
 
-/** Whether the subscription's plan grants `feature`. Returns false for non-live (expired/canceled) subscriptions. */
+export function hasSubscriptionAccess(
+	subscription: Pick<Subscription, "status">,
+	accessStatuses: readonly SubscriptionStatus[] = DEFAULT_ACCESS_STATUSES,
+): boolean {
+	return accessStatuses.includes(subscription.status);
+}
+
 export function hasFeature<P extends StreamPayPlanLike>(
 	subscription: Subscription,
 	plan: P | undefined,
 	feature: FeatureKey<P>,
+	accessStatuses: readonly SubscriptionStatus[] = DEFAULT_ACCESS_STATUSES,
 ): boolean {
 	if (!plan?.limits) return false;
-	if (subscription.status !== "active" && subscription.status !== "frozen") return false;
+	if (!hasSubscriptionAccess(subscription, accessStatuses)) return false;
 	const value = plan.limits[feature];
 	if (typeof value === "boolean") return value;
 	if (typeof value === "number") return value > 0;
@@ -114,14 +147,14 @@ export interface LimitCheckResult {
 	remaining: number;
 }
 
-/** Check a numeric quota (`feature`) on the subscription's plan against `count`. */
 export function checkLimit<P extends StreamPayPlanLike>(
 	subscription: Subscription,
 	plan: P | undefined,
 	feature: FeatureKey<P>,
 	requested: number,
+	accessStatuses: readonly SubscriptionStatus[] = DEFAULT_ACCESS_STATUSES,
 ): LimitCheckResult {
-	if (!plan?.limits || (subscription.status !== "active" && subscription.status !== "frozen")) {
+	if (!plan?.limits || !hasSubscriptionAccess(subscription, accessStatuses)) {
 		return { allowed: false, limit: 0, remaining: 0 };
 	}
 	const raw = plan.limits[feature];

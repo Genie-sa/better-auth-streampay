@@ -4,10 +4,13 @@ import { $ERROR_CODES } from "../../error-codes";
 import type { StreamPayOptions } from "../../types";
 import { getLogger } from "../../utils/logger";
 import type { StreamPayWebhookPayload } from "../../webhooks/events";
+import { isKnownStreamPayWebhookPayload, isStreamPayWebhookEnvelope } from "../../webhooks/events";
 import { buildSubscriptionEndpoints } from "./endpoints";
 import { createPlanResolver, validatePlansShape } from "./plans";
 import { subscriptionTable, webhookEventTable } from "./schema";
+import { SUBSCRIPTION_STATUSES } from "./status";
 import {
+	claimWebhookEventForReplay,
 	classifyWebhookFailure,
 	markWebhookEventCompleted,
 	recordWebhookEventFailure,
@@ -22,6 +25,7 @@ export {
 	checkLimit,
 	type FeatureKey,
 	hasFeature,
+	hasSubscriptionAccess,
 	type LimitCheckResult,
 	type ResolvedPlans,
 } from "./plans";
@@ -38,15 +42,22 @@ export type {
 	StreamPayPlan,
 	StreamPayPlanLike,
 	Subscription,
+	SubscriptionBillingStatus,
 	SubscriptionCallback,
 	SubscriptionCallbackData,
 	SubscriptionCallbacks,
+	SubscriptionReferenceType,
 	SubscriptionStatus,
 	SubscriptionsOptions,
+	TrialEligibilityContext,
 } from "./types";
 export {
+	DEFAULT_ACCESS_STATUSES,
 	PLAN_NAME_METADATA_KEY,
 	REFERENCE_ID_METADATA_KEY,
+	REFERENCE_TYPE_METADATA_KEY,
+	SUBSCRIPTION_ROW_ID_METADATA_KEY,
+	subscriptionSlotKey,
 	UPGRADE_IDEMPOTENCY_WINDOW_MS,
 } from "./types";
 
@@ -63,30 +74,30 @@ export interface StreamPayPluginRegistry {
 	) => Promise<{ replayed: true; eventId: string }>;
 }
 
-/** Subscriptions sub-plugin: plan upgrades, cancellation, feature/limit checks, and webhook-driven subscription sync. */
 export function subscriptions(subsOptions: SubscriptionsOptions) {
 	if (Array.isArray(subsOptions.plans)) {
 		validatePlansShape(subsOptions.plans as readonly StreamPayPlanLike[]);
 	} else if (typeof subsOptions.plans !== "function") {
 		throw new TypeError("subscriptions(): `plans` must be an array or an async factory function.");
 	}
-
-	const flags = subsOptions as {
-		enableSubscriptionTable?: boolean;
-		enableWebhookEventTable?: boolean;
-	};
-	if (flags.enableSubscriptionTable === false && flags.enableWebhookEventTable === true) {
-		throw new TypeError(
-			"subscriptions(): `enableWebhookEventTable: true` requires `enableSubscriptionTable: true` — the event lifecycle table is part of the subscription sync pipeline.",
-		);
+	if (
+		subsOptions.maxWebhookAttempts !== undefined &&
+		(!Number.isInteger(subsOptions.maxWebhookAttempts) || subsOptions.maxWebhookAttempts < 1)
+	) {
+		throw new TypeError("subscriptions(): `maxWebhookAttempts` must be a positive integer.");
 	}
-	const tableEnabled = subsOptions.enableSubscriptionTable !== false;
+	for (const status of subsOptions.accessStatuses ?? []) {
+		if (!SUBSCRIPTION_STATUSES.includes(status)) {
+			throw new TypeError(`subscriptions(): invalid access status "${status}".`);
+		}
+	}
+
 	const dedupeEnabled = subsOptions.enableWebhookEventTable !== false;
 
 	return (options: StreamPayOptions, registry?: StreamPayPluginRegistry) => {
 		const resolvePlans = createPlanResolver(subsOptions.plans);
 
-		if (registry && tableEnabled) {
+		if (registry) {
 			registry.subscriptionWebhookSync = async (
 				ctx: GenericEndpointContext,
 				payload: StreamPayWebhookPayload,
@@ -104,6 +115,7 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 						...(subsOptions.maxWebhookAttempts !== undefined && {
 							maxAttempts: subsOptions.maxWebhookAttempts,
 						}),
+						retryOnCallbackError: subsOptions.retryOnCallbackError !== false,
 					});
 				} catch (err) {
 					if (classifyWebhookFailure(err) === "PERMANENT") {
@@ -138,17 +150,52 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 						});
 					}
 
-					const payload = JSON.parse(row.rawPayload) as StreamPayWebhookPayload;
+					let parsedPayload: unknown;
+					try {
+						parsedPayload = JSON.parse(row.rawPayload);
+					} catch {
+						throw new APIError("BAD_REQUEST", {
+							message: `Webhook event ${eventId} has malformed stored JSON.`,
+						});
+					}
+					if (
+						!isStreamPayWebhookEnvelope(parsedPayload) ||
+						!isKnownStreamPayWebhookPayload(parsedPayload)
+					) {
+						throw new APIError("BAD_REQUEST", {
+							message: `Webhook event ${eventId} has an invalid stored payload.`,
+						});
+					}
+					const payload = parsedPayload;
 					const plans = await resolvePlans();
+					const claimed = await claimWebhookEventForReplay(syncCtx, row);
+					if (!claimed?.lockedBy) {
+						throw new APIError("CONFLICT", {
+							code: $ERROR_CODES.WEBHOOK_REPLAY_IN_PROGRESS.code,
+							message: `Webhook event ${eventId} is already being replayed.`,
+						});
+					}
 
 					try {
 						await syncWebhookPayload(syncCtx, payload, options.client, plans, subsOptions, {
 							dedupe: false,
+							retryingRenewalCallback:
+								claimed.lastError?.startsWith(
+									"Subscription callback onSubscriptionRenewed failed:",
+								) === true,
 						});
-						await markWebhookEventCompleted(syncCtx, row.id);
+						await markWebhookEventCompleted(syncCtx, claimed.id, claimed.lockedBy);
 						return { replayed: true, eventId };
 					} catch (err) {
-						await recordWebhookEventFailure(syncCtx, row.id, null, null, err);
+						await recordWebhookEventFailure(
+							syncCtx,
+							claimed.id,
+							null,
+							null,
+							err,
+							claimed.lockedBy,
+							true,
+						);
 						throw err;
 					}
 				};
@@ -156,13 +203,13 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 		}
 
 		const schema = {
-			...(tableEnabled ? subscriptionTable : {}),
-			...(tableEnabled && dedupeEnabled ? webhookEventTable : {}),
+			...subscriptionTable,
+			...(dedupeEnabled ? webhookEventTable : {}),
 		};
 
 		return {
 			endpoints: buildSubscriptionEndpoints(options, subsOptions, resolvePlans),
-			...(Object.keys(schema).length > 0 ? { schema } : {}),
+			schema,
 		};
 	};
 }

@@ -1,25 +1,31 @@
+import type { CouponCreate, ProductCreate, SubscriptionCancel } from "@streamsdk/typescript";
 import type { User } from "better-auth";
 import { getTestInstance } from "better-auth/test";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { streampayClient } from "../../src/client";
 import { $ERROR_CODES } from "../../src/error-codes";
-import { checkout } from "../../src/plugins/checkout";
+import { admin as streampayAdmin } from "../../src/plugins/admin";
 import { streampay } from "../../src/streampay";
-import { version } from "../../src/version";
 import { createStreamPayTestInstance } from "../utils/auth-instance";
 import { createMockConsumer, createMockStreamPayClient } from "../utils/mocks";
 
 describe("streampay plugin integration", () => {
-	it("exposes plugin metadata and callable Better Auth API endpoints", async () => {
-		const { auth } = await createStreamPayTestInstance({
-			use: [checkout()],
+	it("preserves SDK request body types through Better Auth inference", async () => {
+		const { auth } = await getTestInstance({
+			plugins: [
+				streampay({
+					client: createMockStreamPayClient(),
+					use: [streampayAdmin({ isAdmin: () => true })],
+				}),
+			],
 		});
 
-		expect(auth.options.plugins?.some((plugin) => plugin.id === "streampay")).toBe(true);
-		expect(auth.options.plugins?.find((plugin) => plugin.id === "streampay")).toMatchObject({
-			version,
-		});
-		expect(auth.api.checkout).toBeTypeOf("function");
+		type ProductBody = NonNullable<Parameters<typeof auth.api.adminCreateProduct>[0]>["body"];
+		type CouponBody = NonNullable<Parameters<typeof auth.api.adminCreateCoupon>[0]>["body"];
+		type CancelBody = NonNullable<Parameters<typeof auth.api.adminCancelSubscription>[0]>["body"];
+		expectTypeOf<ProductBody>().toEqualTypeOf<ProductCreate>();
+		expectTypeOf<CouponBody>().toEqualTypeOf<CouponCreate>();
+		expectTypeOf<CancelBody>().toEqualTypeOf<SubscriptionCancel>();
 	});
 
 	it("infers the user schema field added by the plugin", async () => {

@@ -10,33 +10,43 @@ export {
 	type CheckoutOptions,
 	type CheckoutParams,
 	checkout,
+	type StreamPayCustomFieldDefinition,
+	type StreamPayCustomFieldsSchema,
 } from "./plugins/checkout";
 export { type PortalOptions, portal } from "./plugins/portal";
 export {
 	type AuthorizeReferenceContext,
 	checkLimit,
 	classifyWebhookFailure,
+	DEFAULT_ACCESS_STATUSES,
 	type FeatureKey,
 	hasFeature,
+	hasSubscriptionAccess,
 	type LimitCheckResult,
 	PLAN_NAME_METADATA_KEY,
 	type PluginAdapter,
 	REFERENCE_ID_METADATA_KEY,
+	REFERENCE_TYPE_METADATA_KEY,
 	type ResolvedPlans,
 	type StreamPayPlan,
 	type StreamPayPlanLike,
 	type StreamPayPluginRegistry,
+	SUBSCRIPTION_ROW_ID_METADATA_KEY,
 	type Subscription,
+	type SubscriptionBillingStatus,
 	type SubscriptionCallback,
 	type SubscriptionCallbackData,
 	type SubscriptionCallbacks,
+	type SubscriptionReferenceType,
 	type SubscriptionSchema,
 	type SubscriptionStatus,
 	type SubscriptionsOptions,
 	type SyncContext,
 	subscriptionSchema,
+	subscriptionSlotKey,
 	subscriptions,
 	syncWebhookPayload,
+	type TrialEligibilityContext,
 	type WebhookSyncFailure,
 } from "./plugins/subscriptions";
 export { type WebhooksOptions, webhooks } from "./plugins/webhooks";
@@ -73,10 +83,13 @@ export {
 
 export {
 	dispatchWebhook,
+	type WebhookEnvelopeHandler,
 	type WebhookHandler,
 	type WebhookHandlers,
 } from "./webhooks/dispatcher";
 export {
+	isKnownStreamPayWebhookPayload,
+	isStreamPayWebhookEnvelope,
 	STREAMPAY_EVENT_TYPES,
 	STREAMPAY_INVOICE_EVENT_TYPES,
 	STREAMPAY_PAYMENT_EVENT_TYPES,
@@ -89,6 +102,7 @@ export {
 	type StreamPayPaymentLinkEventType,
 	type StreamPaySubscriptionEventType,
 	type StreamPayWebhookData,
+	type StreamPayWebhookEnvelope,
 	type StreamPayWebhookPayload,
 } from "./webhooks/events";
 export {

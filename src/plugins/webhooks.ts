@@ -2,19 +2,13 @@ import { APIError, createAuthEndpoint } from "better-auth/api";
 import type { StreamPayOptions } from "../types";
 import { getLogger } from "../utils/logger";
 import { dispatchWebhook, type WebhookHandlers } from "../webhooks/dispatcher";
-import type { StreamPayWebhookPayload } from "../webhooks/events";
+import { isKnownStreamPayWebhookPayload, isStreamPayWebhookEnvelope } from "../webhooks/events";
 import { StreamPayWebhookError, verifyWebhookOrThrow } from "../webhooks/verify";
 import type { StreamPayPluginRegistry } from "./subscriptions";
 
-/** Options for `webhooks()`: the signing `secret` (single or rotated), freshness `toleranceSeconds`, and per-event handlers. */
 export interface WebhooksOptions extends WebhookHandlers {
 	secret: string | readonly string[];
 	toleranceSeconds?: number;
-}
-
-function isStreamPayWebhookPayload(value: unknown): value is StreamPayWebhookPayload {
-	if (!value || typeof value !== "object") return false;
-	return "event_type" in value && typeof value.event_type === "string";
 }
 
 function toErrorCode(reason: StreamPayWebhookError["reason"]): "UNAUTHORIZED" | "BAD_REQUEST" {
@@ -23,10 +17,20 @@ function toErrorCode(reason: StreamPayWebhookError["reason"]): "UNAUTHORIZED" | 
 		: "BAD_REQUEST";
 }
 
-/** Signed-webhook sub-plugin. Verifies StreamPay signatures and dispatches `POST /streampay/webhooks` to your handlers. */
-export const webhooks =
-	(webhooksOptions: WebhooksOptions) =>
-	(_options: StreamPayOptions, registry?: StreamPayPluginRegistry) => {
+export const webhooks = (webhooksOptions: WebhooksOptions) => {
+	const configuredSecrets =
+		typeof webhooksOptions.secret === "string" ? [webhooksOptions.secret] : webhooksOptions.secret;
+	if (configuredSecrets.length === 0 || configuredSecrets.some((secret) => secret.length === 0)) {
+		throw new TypeError("webhooks(): `secret` must contain only non-empty values.");
+	}
+	if (
+		webhooksOptions.toleranceSeconds !== undefined &&
+		(!Number.isFinite(webhooksOptions.toleranceSeconds) || webhooksOptions.toleranceSeconds < 0)
+	) {
+		throw new TypeError("webhooks(): `toleranceSeconds` must be a non-negative number.");
+	}
+
+	return (_options: StreamPayOptions, registry?: StreamPayPluginRegistry) => {
 		const { secret, toleranceSeconds, ...handlers } = webhooksOptions;
 
 		return {
@@ -40,14 +44,6 @@ export const webhooks =
 					},
 					async (ctx) => {
 						const logger = getLogger(ctx);
-						const hasSecret =
-							typeof secret === "string" ? secret.length > 0 : secret.some((s) => s.length > 0);
-						if (!hasSecret) {
-							logger.error("webhook secret is not configured.");
-							throw new APIError("INTERNAL_SERVER_ERROR", {
-								message: "StreamPay webhook secret is not configured.",
-							});
-						}
 						if (!ctx.request) {
 							throw new APIError("BAD_REQUEST", { message: "Missing request body." });
 						}
@@ -81,14 +77,14 @@ export const webhooks =
 							});
 						}
 
-						if (!isStreamPayWebhookPayload(parsed)) {
+						if (!isStreamPayWebhookEnvelope(parsed)) {
 							throw new APIError("BAD_REQUEST", {
-								message: "Webhook body is missing `event_type`.",
+								message: "Webhook body is not a valid StreamPay event envelope.",
 							});
 						}
 						const payload = parsed;
 
-						if (registry?.subscriptionWebhookSync) {
+						if (registry?.subscriptionWebhookSync && isKnownStreamPayWebhookPayload(payload)) {
 							try {
 								await registry.subscriptionWebhookSync(ctx, payload, {
 									rawBody,
@@ -119,3 +115,4 @@ export const webhooks =
 			},
 		};
 	};
+};

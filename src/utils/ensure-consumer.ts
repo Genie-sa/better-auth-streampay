@@ -131,6 +131,7 @@ export async function ensureConsumerForUser(
 		name: user.name || user.email,
 		email: user.email,
 		external_id: user.id,
+		consumer_type: "INDIVIDUAL",
 		...extras,
 	};
 

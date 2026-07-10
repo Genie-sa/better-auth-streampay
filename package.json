@@ -1,12 +1,12 @@
 {
   "name": "better-auth-streampay",
   "version": "1.3.0",
-  "description": "Community Better Auth plugin for StreamPay — consumers, checkout, portal, subscriptions, and signed webhooks. Not affiliated with Stream.",
+  "description": "Community Better Auth plugin for StreamPay with consumers, checkout, portal, subscriptions, and signed webhooks. Not affiliated with Stream.",
   "license": "MIT",
   "type": "module",
   "sideEffects": false,
   "engines": {
-    "node": ">=18"
+    "node": ">=20.19.0"
   },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -57,11 +57,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/Genie-sa/better-auth-streampay"
+    "url": "git+https://github.com/Genie-sa/better-auth-streampay.git"
   },
   "scripts": {
     "build": "tsup",
-    "prepublishOnly": "pnpm run build && pnpm run typecheck",
+    "prepublishOnly": "pnpm run check",
     "dev": "tsup --watch",
     "test": "vitest run --exclude tests/live/**/*.test.ts",
     "test:live": "STREAMPAY_LIVE=1 vitest run tests/live",
@@ -71,18 +71,23 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check ./src ./tests",
     "format": "biome format --write ./src ./tests",
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "pnpm build && changeset publish",
     "prepare": "lefthook install"
   },
   "peerDependencies": {
-    "@streamsdk/typescript": "^1.0.6",
-    "better-auth": "^1.4.0",
+    "@streamsdk/typescript": "^1.1.3",
+    "better-auth": "^1.5.0",
     "zod": "^3.24.0 || ^4.0.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.12",
-    "@streamsdk/typescript": "^1.0.6",
+    "@changesets/cli": "^2.31.0",
+    "@streamsdk/typescript": "^1.1.3",
     "@types/node": "^25.6.0",
-    "better-auth": "^1.6.5",
+    "better-auth": "^1.6.23",
     "lefthook": "^2.1.6",
     "msw": "^2.13.3",
     "pkg-pr-new": "^0.0.66",
@@ -90,6 +95,6 @@
     "typescript": "^5.9.3",
     "vite": "^8.0.8",
     "vitest": "^4.1.4",
-    "zod": "^4.3.6"
+    "zod": "^4.4.3"
   }
 }
