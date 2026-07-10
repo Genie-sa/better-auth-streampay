@@ -44,8 +44,15 @@
     "streampay",
     "stream-pay",
     "payments",
+    "payment-gateway",
     "subscriptions",
+    "recurring-payments",
+    "checkout",
+    "billing",
+    "webhooks",
+    "typescript",
     "saudi-arabia",
+    "saudi-payments",
     "fintech"
   ],
   "repository": {
