@@ -44,13 +44,33 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Upgrade npm for trusted publishing
-        run: npm install --global npm@11.18.0
+      - name: Pin npm for trusted publishing
+        run: npm install --global npm@11.5.1
 
-      - name: Create release pull request or publish
+      - name: Version
+        id: changesets
         uses: changesets/action@3841a0683d3cfa6dae0f9bb335290003010fe3f0 # v1.9.0
         with:
           version: pnpm version-packages
-          publish: pnpm release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish and release
+        if: steps.changesets.outputs.hasChangesets == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pnpm build
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version already published"
+          else
+            npm publish --access public
+          fi
+          if gh release view "v$version" >/dev/null 2>&1; then
+            echo "v$version release already exists"
+            exit 0
+          fi
+          notes=$(awk -v header="## $version" '$0==header{found=1} /^## /&&$0!=header{if(found)exit} found' CHANGELOG.md)
+          gh release create "v$version" --target "$GITHUB_SHA" --title "v$version" --notes "${notes:-$name@$version}"
