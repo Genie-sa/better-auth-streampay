@@ -5,12 +5,26 @@ describe("validatePlansShape", () => {
 	const baseline = {
 		name: "pro",
 		productId: "prod_pro",
-		priceHalalat: 9900,
+		priceInSmallestUnit: 9900,
 		billingInterval: "MONTH" as const,
 	};
 
 	it("accepts a valid single-plan list", () => {
 		expect(() => validatePlansShape([baseline])).not.toThrow();
+	});
+
+	it("accepts SDK-supported checkout currencies and rejects unsupported runtime input", () => {
+		expect(() => validatePlansShape([{ ...baseline, currency: "QAR" }])).not.toThrow();
+		const invalidPlan = { ...baseline, currency: "sar" } as const;
+		expect(() => {
+			// @ts-expect-error Runtime validation still protects untyped JavaScript callers.
+			validatePlansShape([invalidPlan]);
+		}).toThrow(/Invalid (option|enum value)/);
+	});
+
+	it("accepts a non-empty plan version and rejects an empty version", () => {
+		expect(() => validatePlansShape([{ ...baseline, version: "2026-07" }])).not.toThrow();
+		expect(() => validatePlansShape([{ ...baseline, version: "" }])).toThrow(/empty `version`/);
 	});
 
 	it("rejects an empty list", () => {
@@ -25,21 +39,29 @@ describe("validatePlansShape", () => {
 		expect(() => validatePlansShape([baseline, baseline])).toThrow(/duplicate plan name/);
 	});
 
+	it("rejects duplicate product IDs that would make webhook inference ambiguous", () => {
+		expect(() => validatePlansShape([baseline, { ...baseline, name: "pro-annual" }])).toThrow(
+			/duplicate productId/,
+		);
+	});
+
 	it("rejects plans with no productId", () => {
 		expect(() => validatePlansShape([{ ...baseline, productId: "" }])).toThrow(
 			/non-empty `productId`/,
 		);
 	});
 
-	it("rejects negative priceHalalat", () => {
-		expect(() => validatePlansShape([{ ...baseline, priceHalalat: -1 }])).toThrow(
-			/non-negative numeric `priceHalalat`/,
-		);
+	it("rejects negative, fractional, and unsafe priceInSmallestUnit values", () => {
+		for (const priceInSmallestUnit of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+			expect(() => validatePlansShape([{ ...baseline, priceInSmallestUnit }])).toThrow(
+				/non-negative safe-integer `priceInSmallestUnit`/,
+			);
+		}
 	});
 
-	it("rejects non-numeric priceHalalat", () => {
-		expect(() => validatePlansShape([{ ...baseline, priceHalalat: NaN }])).toThrow(
-			/non-negative numeric `priceHalalat`/,
+	it("rejects non-numeric priceInSmallestUnit", () => {
+		expect(() => validatePlansShape([{ ...baseline, priceInSmallestUnit: NaN }])).toThrow(
+			/non-negative safe-integer `priceInSmallestUnit`/,
 		);
 	});
 
@@ -71,6 +93,17 @@ describe("validatePlansShape", () => {
 			/invalid `billingIntervalCount`/,
 		);
 	});
+
+	it("accepts trial periods from 1 to 365 days and rejects values outside that range", () => {
+		expect(() => validatePlansShape([{ ...baseline, trialPeriodDays: 1 }])).not.toThrow();
+		expect(() => validatePlansShape([{ ...baseline, trialPeriodDays: 365 }])).not.toThrow();
+		for (const trialPeriodDays of [0, 1.5, 366]) {
+			expect(() => validatePlansShape([{ ...baseline, trialPeriodDays }])).toThrow(
+				/invalid `trialPeriodDays`/,
+			);
+		}
+		expect(() => validatePlansShape([{ ...baseline, group: "" }])).toThrow(/empty `group`/);
+	});
 });
 
 describe("hasFeature / checkLimit", () => {
@@ -84,7 +117,7 @@ describe("hasFeature / checkLimit", () => {
 		const plan = {
 			name: "pro",
 			productId: "p",
-			priceHalalat: 0,
+			priceInSmallestUnit: 0,
 			billingInterval: "MONTH" as const,
 			limits: { teams: true },
 		};
@@ -101,7 +134,7 @@ describe("hasFeature / checkLimit", () => {
 		const plan = {
 			name: "pro",
 			productId: "p",
-			priceHalalat: 0,
+			priceInSmallestUnit: 0,
 			billingInterval: "MONTH" as const,
 			limits: { teams: true, api_calls: 1000 },
 		};
@@ -119,11 +152,40 @@ describe("hasFeature / checkLimit", () => {
 		const plan = {
 			name: "pro",
 			productId: "p",
-			priceHalalat: 0,
+			priceInSmallestUnit: 0,
 			billingInterval: "MONTH" as const,
 			limits: { teams: true },
 		};
 		expect(hasFeature(sub, plan, "teams")).toBe(true);
+	});
+
+	it.each([
+		"trialing",
+		"past_due",
+	] as const)("hasFeature grants access to %s by default", async (status) => {
+		const { hasFeature } = await import("../src/plugins/subscriptions/plans");
+		const sub = { status } as Parameters<typeof hasFeature>[0];
+		const plan = {
+			name: "pro",
+			productId: "p",
+			priceInSmallestUnit: 0,
+			billingInterval: "MONTH" as const,
+			limits: { teams: true },
+		};
+		expect(hasFeature(sub, plan, "teams")).toBe(true);
+	});
+
+	it("hasFeature honors an explicit access-status policy", async () => {
+		const { hasFeature } = await import("../src/plugins/subscriptions/plans");
+		const sub = { status: "past_due" } as Parameters<typeof hasFeature>[0];
+		const plan = {
+			name: "pro",
+			productId: "p",
+			priceInSmallestUnit: 0,
+			billingInterval: "MONTH" as const,
+			limits: { teams: true },
+		};
+		expect(hasFeature(sub, plan, "teams", ["active", "trialing"])).toBe(false);
 	});
 
 	it("checkLimit returns allowed true when requested <= limit", async () => {
@@ -136,7 +198,7 @@ describe("hasFeature / checkLimit", () => {
 		const plan = {
 			name: "pro",
 			productId: "p",
-			priceHalalat: 0,
+			priceInSmallestUnit: 0,
 			billingInterval: "MONTH" as const,
 			limits: { seats: 10 },
 		};
@@ -154,7 +216,7 @@ describe("hasFeature / checkLimit", () => {
 		const plan = {
 			name: "pro",
 			productId: "p",
-			priceHalalat: 0,
+			priceInSmallestUnit: 0,
 			billingInterval: "MONTH" as const,
 			limits: { seats: 10 },
 		};
@@ -172,7 +234,7 @@ describe("hasFeature / checkLimit", () => {
 		const plan = {
 			name: "pro",
 			productId: "p",
-			priceHalalat: 0,
+			priceInSmallestUnit: 0,
 			billingInterval: "MONTH" as const,
 			limits: { seats: 10 },
 		};

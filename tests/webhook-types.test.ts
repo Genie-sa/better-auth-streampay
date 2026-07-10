@@ -6,6 +6,7 @@ import type {
 	StreamPayPaymentEventType,
 	StreamPayPaymentLinkEventType,
 	StreamPaySubscriptionEventType,
+	StreamPayWebhookEnvelope,
 	StreamPayWebhookPayload,
 	WebhookHandler,
 	WebhookHandlers,
@@ -59,7 +60,7 @@ describe("webhook type narrowing", () => {
 			>();
 		});
 
-		it("StreamPaySubscriptionEventType is the 11 subscription literals", () => {
+		it("StreamPaySubscriptionEventType covers every documented subscription event", () => {
 			expectTypeOf<StreamPaySubscriptionEventType>().toEqualTypeOf<
 				| "SUBSCRIPTION_CREATED"
 				| "SUBSCRIPTION_ACTIVATED"
@@ -72,6 +73,11 @@ describe("webhook type narrowing", () => {
 				| "SUBSCRIPTION_UNFREEZE_NOW"
 				| "SUBSCRIPTION_UNFREEZE_FUTURE"
 				| "SUBSCRIPTION_FREEZE_CANCEL"
+				| "SUBSCRIPTION_PLAN_CHANGE_SCHEDULED"
+				| "SUBSCRIPTION_PLAN_CHANGE_CANCELED"
+				| "SUBSCRIPTION_PLAN_CHANGED"
+				| "SUBSCRIPTION_PLAN_CHANGE_INVOICE_REISSUED"
+				| "SUBSCRIPTION_PLAN_UPDATED"
 			>();
 		});
 
@@ -90,9 +96,9 @@ describe("webhook type narrowing", () => {
 	});
 
 	describe("WebhookHandlers field narrowing", () => {
-		it("onPayload receives the wide payload", () => {
+		it("onPayload receives the future-compatible validated envelope", () => {
 			type P = NonNullable<WebhookHandlers["onPayload"]>;
-			expectTypeOf<Parameters<P>[0]>().toEqualTypeOf<StreamPayWebhookPayload>();
+			expectTypeOf<Parameters<P>[0]>().toEqualTypeOf<StreamPayWebhookEnvelope>();
 		});
 
 		it("onPaymentSucceeded pins event_type and entity_type to payment literals", () => {

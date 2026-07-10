@@ -1,94 +1,98 @@
 # better-auth-streampay
 
-> Community plugin. Not affiliated with Stream / StreamPay.
-> Plugin bugs → [GitHub issues](https://github.com/Genie-sa/better-auth-streampay/issues). StreamPay bugs → [Stream support](https://streampay.sa).
+Add StreamPay payments and subscriptions to a Better Auth app.
 
-[Better Auth](https://better-auth.com) plugin for [StreamPay](https://streampay.sa).
+The plugin can:
 
-## Features
-
-- Checkout via payment links
-- Customer portal (subscriptions, invoices, consumer state)
-- Subscriptions: upgrade, change plan, cancel, freeze/unfreeze, entitlements
-- Webhook receiver with HMAC-SHA256 verification + replay protection
-- Auto DB sync from webhooks (idempotent)
-- Admin back-office (consumers, products, coupons, refunds, freezes, …)
-- Lazy or eager StreamPay consumer creation, with duplicate-claim modes
+- create StreamPay consumers
+- open hosted checkout
+- show a billing portal
+- manage subscriptions
+- expose admin billing actions
+- verify and handle signed webhooks
 
 ## Install
 
 ```bash
-pnpm add better-auth-streampay @streamsdk/typescript better-auth zod
+pnpm add better-auth-streampay @streamsdk/typescript
 ```
 
-Peers: `better-auth ^1.4`, `@streamsdk/typescript ^1.0.6`, `zod ^3.24 || ^4`.
+Required versions:
 
-### Preview releases
+- `better-auth ^1.5.0`
+- `@streamsdk/typescript ^1.1.3`
+- `zod ^3.24.0 || ^4.0.0`
 
-Every push to `main` and every PR is published as an installable tarball
-via [pkg.pr.new](https://github.com/stackblitz-labs/pkg.pr.new):
+## Basic setup
+
+Add your StreamPay API key:
 
 ```bash
-pnpm add https://pkg.pr.new/better-auth-streampay@<sha-or-pr-number>
+STREAMPAY_API_KEY=
+STREAMPAY_WEBHOOK_SECRET=
 ```
 
-## Env
-
-```bash
-STREAMPAY_API_KEY=...
-STREAMPAY_WEBHOOK_SECRET=...
-BETTER_AUTH_SECRET=...
-BETTER_AUTH_URL=...
-```
-
-## Server
+Create one SDK client and pass it to the plugin:
 
 ```ts
-import { betterAuth } from "better-auth";
 import StreamSDK from "@streamsdk/typescript";
+import { betterAuth } from "better-auth";
 import {
-  streampay,
   checkout,
   portal,
+  streampay,
   subscriptions,
   webhooks,
-  admin,
 } from "better-auth-streampay";
 
-const client = StreamSDK.init(process.env.STREAMPAY_API_KEY!);
+const streamPayClient = StreamSDK.init(process.env.STREAMPAY_API_KEY!);
 
 export const auth = betterAuth({
   plugins: [
     streampay({
-      client,
+      client: streamPayClient,
       use: [
-        checkout({
-          products: [{ productId: "aaaa-bbbb-cccc-dddd", slug: "pro" }],
-          successUrl: "/dashboard?checkout=success",
-          failureUrl: "/dashboard?checkout=failure",
-          authenticatedUsersOnly: true,
-        }),
+        checkout(),
         portal(),
         subscriptions({
           plans: [
             {
               name: "pro",
-              productId: "prod_recurring_uuid",
-              priceHalalat: 9900,
+              productId: "your-recurring-product-id",
+              priceInSmallestUnit: 9900,
               billingInterval: "MONTH",
               limits: { seats: 10 },
             },
           ],
         }),
-        webhooks({ secret: process.env.STREAMPAY_WEBHOOK_SECRET! }),
-        admin(),
+        webhooks({
+          secret: process.env.STREAMPAY_WEBHOOK_SECRET!,
+        }),
       ],
     }),
   ],
 });
 ```
 
-## Client
+Only add the parts you use.
+
+## Database
+
+For a new Better Auth managed database:
+
+```bash
+npx @better-auth/cli migrate --config path/to/auth.ts
+```
+
+For Drizzle or Prisma:
+
+```bash
+npx @better-auth/cli generate --config path/to/auth.ts
+```
+
+Then create and run your normal database migration.
+
+## Client setup
 
 ```ts
 import { createAuthClient } from "better-auth/react";
@@ -99,130 +103,75 @@ export const authClient = createAuthClient({
 });
 ```
 
-## Database migration
+Use the matching Better Auth client for Vue, Svelte, or Solid.
 
-Adds a `streampayConsumerId` column on `user`, plus `subscription` and `streampayWebhookEvent` tables when `subscriptions()` is in `use`.
+## Consumers
 
-```bash
-npx @better-auth/cli migrate                          # Better Auth CLI
-npx drizzle-kit generate && npx drizzle-kit migrate    # Drizzle
-npx prisma migrate dev                                 # Prisma
-```
+By default, the plugin creates a StreamPay consumer when the user first needs one. This keeps a
+StreamPay outage from blocking sign-up.
 
-## `streampay()` options
+To create the consumer during sign-up:
 
 ```ts
 streampay({
-  client,
-  // Eagerly create a consumer at signup. Default: false (lazy).
-  createConsumerOnSignUp: false,
-  // Reclaim duplicates by matching identifier(s).
-  claimExistingConsumerBy: ["email", "phone"],
-  // Extra fields passed to `client.createConsumer`.
-  getConsumerCreateParams: async ({ user }) => ({
-    phone_number: "+966501234567",
-    preferred_language: "AR",
-    communication_methods: ["WHATSAPP", "EMAIL"],
-  }),
-  use: [/* sub-plugins */],
+  client: streamPayClient,
+  createConsumerOnSignUp: true,
+  use: [],
 });
 ```
 
-### Consumer lifecycle
+To reuse an existing StreamPay consumer after a verified email match:
 
-- **Lazy** (default) — consumer created on first `/checkout` or subscription mutation.
-- **Eager** (`createConsumerOnSignUp: true`) — consumer created inside the signup transaction. Signup aborts if StreamPay rejects.
-- All consumers get `external_id = user.id`. The id is stored on `user.streampayConsumerId`.
-- On user update → name/email synced to StreamPay. On user delete → consumer deleted. Users with no link are skipped cheap.
+```ts
+streampay({
+  client: streamPayClient,
+  createConsumerOnSignUp: true,
+  claimExistingConsumerBy: ["email"],
+  use: [],
+});
+```
 
-### Duplicate handling
-
-`claimExistingConsumerBy` controls reuse when StreamPay returns `DUPLICATE_CONSUMER`:
-
-| Value                | Behavior                                                            |
-| -------------------- | ------------------------------------------------------------------- |
-| omitted / `[]`       | Reuse only stranded consumers (no `external_id`).                   |
-| `["email"]`          | Also reuse consumers matching the same email.                       |
-| `["phone"]`          | Also reuse consumers matching the same phone.                       |
-| `["email","phone"]`  | Reuse on either match.                                              |
-
-If reused, the plugin rewrites `external_id` to the new user id.
+Only enable reuse when your app verifies the matching email or phone number.
 
 ## Checkout
 
 ```ts
 checkout({
-  products: [{ productId: "aaaa-bbbb-cccc-dddd", slug: "pro" }],
-  successUrl: "/dashboard?checkout=success",
-  failureUrl: "/dashboard?checkout=failure",
+  products: [
+    { slug: "starter", productId: "product-id" },
+  ],
+  successUrl: "/billing/success",
+  failureUrl: "/billing/failed",
   authenticatedUsersOnly: true,
-  contactInformationType: "EMAIL",          // or "PHONE"
-  customFields: { source: "website" },
 });
 ```
 
-`products` can be a static array or a `() => Promise<StreamPayProduct[]>` factory.
-
-### Client
+Open checkout:
 
 ```ts
-// By slug
-const { data } = await authClient.checkout({ slug: "pro" });
+const { data } = await authClient.checkout({
+  slug: "starter",
+  redirect: false,
+});
+
 window.location.href = data.url;
-
-// By UUID
-await authClient.checkout({ products: "aaaa-bbbb-cccc-dddd" });
-
-// Multiple products + quantity
-await authClient.checkout({
-  products: [{ productId: "aaaa-bbbb-cccc-dddd", quantity: 2 }],
-});
-
-// With reference id and metadata
-await authClient.checkout({
-  slug: "pro",
-  referenceId: organizationId,
-  metadata: { campaign: "spring-sale" },
-});
 ```
 
-### Body fields
+You can also pass StreamPay product IDs directly with `products`.
 
-| Field                 | Type                                       | Notes                                  |
-| --------------------- | ------------------------------------------ | -------------------------------------- |
-| `slug`                | `string`                                   | Resolved server-side via `products`    |
-| `products`            | `string \| string[] \| { productId, quantity? }[]` | UUID(s)                        |
-| `referenceId`         | `string`                                   | Stored in `custom_metadata`            |
-| `name`                | `string`                                   | Payment link display name              |
-| `description`         | `string`                                   |                                        |
-| `metadata`            | `Record<string, string \| number \| boolean>` |                                     |
-| `successUrl`          | `string`                                   | Absolute or `/relative`                |
-| `failureUrl`          | `string`                                   | Absolute or `/relative`                |
-| `maxNumberOfPayments` | `number`                                   |                                        |
-| `validUntil`          | `string` (ISO 8601)                        |                                        |
-| `couponIds`           | `string[]` (uuid)                          |                                        |
-| `redirect`            | `boolean`                                  | Default `true`                         |
+## Billing portal
 
-## Portal
+`portal()` adds three signed-in user actions:
+
+- `state`
+- `subscriptions`
+- `invoices`
 
 ```ts
-portal();                       // default page size 100 (StreamPay's max)
-portal({ pageSize: 50 });
+const state = await authClient.consumer.state();
+const subscriptions = await authClient.consumer.subscriptions.list();
+const invoices = await authClient.consumer.invoices.list();
 ```
-
-Reads are scoped to the session user via `organization_consumer_id`. One API call per read.
-
-```ts
-const { data } = await authClient.state();
-if (!data.hasConsumer) {
-  // user has no StreamPay consumer yet
-}
-
-const subs     = await authClient.subscriptions();   // { hasConsumer, data }
-const invoices = await authClient.invoices();        // { hasConsumer, data }
-```
-
-When `hasConsumer` is `false`, reads return `200 OK` with `data: []` (or `consumer: null`) instead of 404.
 
 ## Subscriptions
 
@@ -230,473 +179,289 @@ When `hasConsumer` is `false`, reads return `200 OK` with `data: []` (or `consum
 subscriptions({
   plans: [
     {
-      name: "pro",
-      productId: "prod_recurring_uuid",
-      priceHalalat: 9900,                    // 99.00 SAR
-      billingInterval: "MONTH",              // WEEK | MONTH | QUARTER | YEAR
-      billingIntervalCount: 1,               // optional
-      group: "tier",                         // optional, enforces 1 active per group
-      limits: { seats: 10, ai_calls: 1000 }, // typed entitlements
+      name: "pro-monthly",
+      productId: "product-id",
+      priceInSmallestUnit: 9900,
+      currency: "SAR",
+      billingInterval: "MONTH",
+      billingIntervalCount: 1,
+      trialPeriodDays: 7,
+      group: "main",
+      limits: { seats: 10, reports: true },
     },
   ],
-  // or a factory: plans: async () => fetchPlansFromCMS(),
 
-  authorizeReference: async ({ user, referenceId, action }) => {
-    return user.role === "admin";
+  onSubscriptionActivated: async ({ subscription, user }) => {
+    // Run app-specific work here.
   },
-
-  // Schema knobs (defaults shown). Set to false to BYO state.
-  enableSubscriptionTable: true,    // false → skip `subscription` schema + auto-sync
-  enableWebhookEventTable: true,    // false → skip `streampayWebhookEvent` dedupe; you handle idempotency
-
-  onSubscriptionCreated:        async (data) => {},
-  onSubscriptionActivated:      async (data) => {},
-  onSubscriptionCanceled:       async (data) => {},
-  onSubscriptionFrozen:         async (data) => {},
-  onSubscriptionResumed:        async (data) => {},
-  onSubscriptionRenewed:        async (data) => {},
-  onSubscriptionPaymentFailed:  async (data) => {},
 });
 ```
 
-Each callback receives `{ subscription, user, streampaySubscription, event }`.
+Plan names and product IDs must be unique. Prices use the smallest currency unit. For SAR,
+`9900` means `99.00 SAR`.
 
-### Endpoints
+The plugin gives one trial per user and plan group by default. Use `isTrialEligible` when your
+app needs a stricter or more flexible rule.
 
-| Path                                   | Method | Notes                                                            |
-| -------------------------------------- | ------ | ---------------------------------------------------------------- |
-| `/subscription/upgrade`                | POST   | Creates payment link + `incomplete` row. Idempotent within 15min |
-| `/subscription/success`                | GET    | Post-checkout fallback sync if webhook is slow                   |
-| `/subscription/cancel`                 | POST   | Immediate or `cancelAtPeriodEnd: true`                           |
-| `/subscription/change-plan`            | POST   | `mode: "at_period_end"` (default) or `"immediate"`               |
-| `/subscription/freeze`                 | POST   |                                                                  |
-| `/subscription/unfreeze`               | POST   | Ends the active freeze early                                     |
-| `/subscription/list`                   | GET    | Local rows + plan config                                         |
-| `/subscription/current?group=...`      | GET    | Returns `active`/`frozen`/`past_due` only (or `null`). See note below. |
-| `/subscription/has-feature?feature=X`  | GET    | Boolean entitlement                                              |
-| `/subscription/check-limit?feature=X&count=N` | GET | `{ allowed, limit, remaining }`                            |
-
-### Client
+### Start checkout
 
 ```ts
-const { data } = await authClient.upgradeSubscription({ plan: "pro" });
+const { data } = await authClient.subscription.upgrade({
+  plan: "pro-monthly",
+});
+
 window.location.href = data.url;
+```
 
-// On success page:
-await authClient.subscriptionSuccess({ subscriptionId: data.subscriptionId });
+On the success page:
 
-// Cancel at period end (keeps access until periodEnd)
-await authClient.cancelSubscription({
+```ts
+await authClient.subscription.success({
+  query: { subscriptionId: data.subscriptionId },
+});
+```
+
+Then refresh the subscription data used by your UI.
+
+### Manage a subscription
+
+```ts
+await authClient.subscription.changePlan({
+  subscriptionId,
+  plan: "pro-yearly",
+});
+
+await authClient.subscription.changePlan.cancel({ subscriptionId });
+
+await authClient.subscription.cancel({
   subscriptionId,
   cancelAtPeriodEnd: true,
 });
 
-// Plan change — immediate (PATCH items, no proration)
-await authClient.changeSubscriptionPlan({ plan: "pro_plus", mode: "immediate" });
+await authClient.subscription.uncancel({ subscriptionId });
+```
 
-// Plan change — at period end (default; spawns new payment link)
-const { data: change } = await authClient.changeSubscriptionPlan({ plan: "pro_plus" });
-window.location.href = change.url;
+StreamPay cancels an active subscription at the end of its current period. Trial and inactive
+subscriptions are canceled at once.
 
-// Freeze
-await authClient.freezeSubscription({
+### Freeze a subscription
+
+```ts
+const { data: freeze } = await authClient.subscription.freeze({
   subscriptionId,
   freezeStartDatetime: new Date().toISOString(),
   freezeEndDatetime: null,
 });
-await authClient.unfreezeSubscription({ subscriptionId });
 
-// Reads
-const current = await authClient.currentSubscription();
-const seats   = await authClient.checkSubscriptionLimit({ feature: "seats", count: 8 });
-const flag    = await authClient.hasSubscriptionFeature({ feature: "ai_calls" });
-```
+await authClient.subscription.unfreeze({ subscriptionId });
 
-### Status values
-
-`incomplete | active | inactive | expired | canceled | frozen | past_due`
-
-> **`/subscription/current` filter semantics**
->
-> `/subscription/current` intentionally returns only rows whose status is
-> `active`, `frozen`, or `past_due` — i.e. live entitlements. **`incomplete`
-> rows are filtered out.**
->
-> Practical consequence: between `/subscription/upgrade` (which creates an
-> `incomplete` row and a payment link) and the `SUBSCRIPTION_ACTIVATED`
-> webhook landing, `/subscription/current` returns `null`. If you want to
-> render "your subscription is being activated" during that window, call
-> `/subscription/list` and filter for `status === "incomplete"` in your UI.
-
-- `incomplete` — row pre-created at `/upgrade`, webhook not landed yet.
-- `past_due` — renewal failed. StreamPay keeps `ACTIVE` during dunning; we don't.
-
-### Cross-account access
-
-By default `referenceId` is the session user's id. Pass a different one and `authorizeReference` is called:
-
-```ts
-authorizeReference: async ({ user, referenceId, action }, ctx) => {
-  // action: "upgrade" | "cancel" | "freeze" | "unfreeze" | "read" | "change-plan"
-  return user.role === "admin";
-},
-```
-
-Without `authorizeReference`, cross-account ops throw `FORBIDDEN`.
-
-### Webhook auto-sync
-
-If both `subscriptions()` and `webhooks()` are in `use`, the plugin runs an idempotent sync **before** your handlers:
-
-- Dedupes via `streampayWebhookEvent` (`event_type:entity_id:timestamp`).
-- Maps subscription events + `INVOICE_COMPLETED` (renewal) onto local rows.
-- Fires your `onSubscription*` callbacks after the row is persisted.
-- Transient failure → 500 (StreamPay retries). Permanent → logged + 200.
-
-## Admin
-
-Back-office over the StreamPay SDK. Auth gate is `(adminRoles match user.role) || (isAdmin returns true)` — anon → 401, non-admin → 403.
-
-```ts
-admin({
-  adminRoles: ["admin", "billing_ops"],
-  isAdmin: async (user, ctx) => user.email.endsWith("@yourco.com"),
-
-  onRefund:     async ({ user, paymentId, request }) => { /* throw to block */ },
-  onPlanChange: async ({ user, subscriptionId, current, patch }) => { /* throw to block */ },
+await authClient.subscription.freeze.cancel({
+  subscriptionId,
+  freezeId: freeze.id!,
 });
 ```
 
-- POST/PATCH/PUT bodies forward to the SDK verbatim (types from `@streamsdk/typescript`).
-- DELETEs take no body / no `Content-Type`.
-- List endpoints accept `?page=` / `?size=` (max 100); consumers also `?search_term=`; payments also `?invoice_id=`.
-- Admin sub mutations refetch + project into the local `subscription` row using the same code path as the webhook — no drift.
+### Read access and limits
 
-### Endpoints
-
-| Endpoint                                            | Method | SDK call                       |
-| --------------------------------------------------- | ------ | ------------------------------ |
-| `/admin/streampay/payments`                         | GET    | `listPayments`                 |
-| `/admin/streampay/payments/:id`                     | GET    | `getPayment`                   |
-| `/admin/streampay/payments/:id/refund`              | POST   | `refundPayment`                |
-| `/admin/streampay/subscriptions`                    | GET    | `listSubscriptions`            |
-| `/admin/streampay/subscriptions`                    | POST   | `createSubscription`           |
-| `/admin/streampay/subscriptions/:id`                | GET    | `getSubscription`              |
-| `/admin/streampay/subscriptions/:id`                | PATCH  | `updateSubscription`           |
-| `/admin/streampay/subscriptions/:id/cancel`         | POST   | `cancelSubscription`           |
-| `/admin/streampay/subscriptions/:id/freeze`         | GET    | `listSubscriptionFreezes`      |
-| `/admin/streampay/subscriptions/:id/freeze`         | POST   | `freezeSubscription`           |
-| `/admin/streampay/subscriptions/:id/freeze/:freezeId` | PUT  | `updateSubscriptionFreeze`     |
-| `/admin/streampay/subscriptions/:id/freeze/:freezeId` | DELETE | `deleteSubscriptionFreeze`   |
-| `/admin/streampay/consumers`                        | GET    | `listConsumers` (`search_term`) |
-| `/admin/streampay/consumers/:id`                    | GET    | `getConsumer`                  |
-| `/admin/streampay/consumers/:id`                    | PATCH  | `updateConsumer`               |
-| `/admin/streampay/consumers/:id`                    | DELETE | `deleteConsumer` + clears `streampayConsumerId` |
-| `/admin/streampay/invoices`                         | GET    | `listInvoices`                 |
-| `/admin/streampay/invoices/:id`                     | GET    | `getInvoice`                   |
-| `/admin/streampay/products`                         | GET / POST | `listProducts` / `createProduct` |
-| `/admin/streampay/products/:id`                     | GET / PUT / DELETE | `getProduct` / `updateProduct` / `deleteProduct` |
-| `/admin/streampay/coupons`                          | GET / POST | `listCoupons` / `createCoupon` |
-| `/admin/streampay/coupons/:id`                      | GET / PUT / DELETE | `getCoupon` / `updateCoupon` / `deleteCoupon` |
-| `/admin/streampay/payment-links`                    | GET    | `listPaymentLinks`             |
-| `/admin/streampay/payment-links/:id`                | GET    | `getPaymentLink`               |
-
-### Calling
-
-Method names mirror the routes: `adminListProducts`, `adminCreateProduct`, `adminCancelSubscription`, `adminRefundPayment`, etc.
-
-Server (`auth.api.*`):
 ```ts
-await auth.api.adminCancelSubscription({
-  params: { id: streampaySubscriptionId },
-  body:   { cancel_related_invoices: true },
+const current = await authClient.subscription.current({
+  query: { group: "main" },
+});
+
+const feature = await authClient.subscription.hasFeature({
+  query: { feature: "reports", group: "main" },
+});
+
+const seats = await authClient.subscription.checkLimit({
+  query: { feature: "seats", count: 4, group: "main" },
+});
+```
+
+Pass `group` for grouped plans. Leave it out only for a plan without a group.
+
+By default, `active`, `trialing`, `frozen`, and `past_due` subscriptions can use plan
+features. Change this with `accessStatuses`.
+
+## Server-side calls
+
+Every checkout, portal, subscription, and admin action is also available on `auth.api`. Types
+come from Better Auth.
+
+Browser calls follow the route path, such as `authClient.subscription.cancel`. Server calls use
+the endpoint name, such as `auth.api.cancelSubscription`.
+
+```ts
+import { headers } from "next/headers";
+
+const current = await auth.api.currentSubscription({
+  query: { group: "main" },
+  headers: await headers(),
+});
+
+await auth.api.cancelSubscription({
+  body: { subscriptionId, cancelAtPeriodEnd: true },
   headers: await headers(),
 });
 ```
 
-Client (`authClient.*` — auto-generated, cookie auto-sent, gate runs on server):
-```ts
-await authClient.adminListProducts({ query: { page: 1, size: 20 } });
-```
+Pass the request headers so Better Auth can read the session.
 
-### Examples
+Webhook delivery is not an `auth.api` action. It uses the raw HTTP body to verify the signature.
 
-Create a recurring product:
+## Cross-account access
+
+User actions use the signed-in user's ID by default.
+
+To manage an organization or another app-owned reference, add `authorizeReference`:
+
 ```ts
-await authClient.adminCreateProduct({
-  body: {
-    name: "Pro Monthly",
-    price: "99.000",                       // SAR (string preserves halalat precision)
-    is_one_time: false,
-    type: "RECURRING",                     // or "ONE_OFF"
-    recurring_interval: "MONTH",           // WEEK | MONTH | QUARTER | YEAR
-    recurring_interval_count: 1,
-    is_price_inclusive_of_vat: true,
+subscriptions({
+  plans,
+  authorizeReference: async ({ user, referenceId, referenceType, action }) => {
+    return canManageBilling(user, referenceId, referenceType, action);
   },
 });
 ```
-For ONE_OFF: drop the `recurring_*` fields, set `type: "ONE_OFF"`, `is_one_time: true`.
 
-Refund a payment:
+Without this callback, cross-account actions return `FORBIDDEN`.
+
+## Admin
+
+`admin()` adds billing actions for payments, subscriptions, freezes, consumers, invoices,
+products, coupons, payment links, and webhook retries.
+
 ```ts
-await authClient.adminRefundPayment({
-  params: { id: paymentId },
-  body: {
-    refund_reason: "REQUESTED_BY_CUSTOMER", // REQUESTED_BY_CUSTOMER | DUPLICATE | FRAUDULENT | OTHER
-    refund_note: "optional",
-    allow_refund_multiple_related_payments: false,
-  },
+import { admin } from "better-auth-streampay";
+
+admin({
+  adminRoles: ["admin", "billing"],
+  isAdmin: async (user) => user.email.endsWith("@example.com"),
 });
 ```
-Refunds are always full (no `amount` field). Settled payments only — `PENDING`/`CANCELED` → 400 `PAYMENT_INVALID_STATE`.
 
-### Errors
+Calls use names such as:
 
-Upstream status propagates: 404 → 404, 422 → 422, 409 → 409, 403 → 403. Network/5xx → 500. Body is `{ code, message }` — `code` is stable (`NOT_FOUND`, `VALIDATION_ERROR`, `PRODUCT_LOCKED`, `COUPON_LOCKED`, …). Branch on `code`.
+- `auth.api.adminListPayments`
+- `auth.api.adminGetSubscription`
+- `auth.api.adminCreateProduct`
+- `auth.api.adminReplayWebhookEvent`
+
+The IDE shows the body, query, and response types for every action.
+
+Make sure your Better Auth route accepts `GET`, `POST`, `PATCH`, `PUT`, and `DELETE`.
 
 ## Webhooks
 
-Register `https://your-app.com/api/auth/streampay/webhooks` in the StreamPay dashboard.
+Register this URL in the StreamPay dashboard:
+
+```text
+https://your-app.com/api/auth/streampay/webhooks
+```
+
+Then add the handlers you need:
 
 ```ts
 webhooks({
   secret: process.env.STREAMPAY_WEBHOOK_SECRET!,
-  toleranceSeconds: 300,                         // default 300s
 
-  onPayload: async (p) => { /* catch-all, runs first */ },
-
-  onPaymentSucceeded: async (p) => {},
-  onPaymentFailed: async (p) => {},
-  onPaymentCanceled: async (p) => {},
-  onPaymentRefunded: async (p) => {},
-  onPaymentMarkedAsPaid: async (p) => {},
-
-  onInvoiceCreated: async (p) => {},
-  onInvoiceSent: async (p) => {},
-  onInvoiceAccepted: async (p) => {},
-  onInvoiceRejected: async (p) => {},
-  onInvoiceCompleted: async (p) => {},
-  onInvoiceCanceled: async (p) => {},
-  onInvoiceUpdated: async (p) => {},
-
-  onSubscriptionCreated: async (p) => {},
-  onSubscriptionActivated: async (p) => {},
-  onSubscriptionInactivated: async (p) => {},
-  onSubscriptionCanceled: async (p) => {},
-  onSubscriptionFrozen: async (p) => {},
-  onSubscriptionCycleRenewalFailed: async (p) => {},
-  onSubscriptionCancelAtPeriodEnd: async (p) => {},
-  onSubscriptionFreezeNow: async (p) => {},
-  onSubscriptionUnfreezeNow: async (p) => {},
-  onSubscriptionUnfreezeFuture: async (p) => {},
-  onSubscriptionFreezeCancel: async (p) => {},
-
-  onPaymentLinkPayAttemptFailed: async (p) => {},
+  onPaymentSucceeded: async (event) => {},
+  onPaymentFailed: async (event) => {},
+  onSubscriptionActivated: async (event) => {},
+  onSubscriptionCanceled: async (event) => {},
+  onPayload: async (event) => {},
 });
 ```
 
-### Payload
+The plugin:
 
-```ts
-interface StreamPayWebhookPayload<T = StreamPayWebhookData> {
-  event_type: StreamPayEventType;
-  entity_type: "PAYMENT" | "INVOICE" | "SUBSCRIPTION" | "PAYMENT_LINK";
-  entity_id: string;
-  entity_url: string;
-  status: string;
-  data: T;
-  timestamp: string;          // ISO 8601
-}
-```
+- checks the webhook signature
+- rejects old signatures
+- deduplicates subscription sync and lifecycle callbacks
+- retries temporary failures
+- stores failed subscription events for admin replay
 
-Each handler is narrowed: `onPaymentSucceeded` only sees `event_type: "PAYMENT_SUCCEEDED"`, etc.
+The StreamPay SDK does not export webhook payload types. This package provides checked event
+types based on StreamPay's documented payloads.
 
-### Signature
-
-Header: `X-Webhook-Signature: t=<unix>,v1=<hex>` where hex is `HMAC_SHA256(secret, "${t}.${rawBody}")`.
-
-### Rolling rotation
+To rotate a secret:
 
 ```ts
 webhooks({
   secret: [
-    process.env.STREAMPAY_WEBHOOK_SECRET!,      // new
-    process.env.STREAMPAY_WEBHOOK_SECRET_OLD!,  // old
+    process.env.STREAMPAY_WEBHOOK_SECRET!,
+    process.env.STREAMPAY_WEBHOOK_SECRET_OLD!,
   ],
 });
 ```
 
-Drop the old one once the dashboard is fully cut over.
+Remove the old secret after StreamPay uses the new one.
 
-## Subscription row
+## What owns each job
+
+StreamPay owns:
+
+- charges
+- invoices
+- subscription state
+- trials
+- renewal attempts
+- cancellation timing
+
+The plugin owns:
+
+- Better Auth access checks
+- local subscription rows
+- plan features and limits
+- webhook checks and retries
+- checkout recovery
+
+Do not edit subscription rows by hand. Let provider responses and webhooks update them.
+
+## Errors
+
+Errors use stable codes:
 
 ```ts
-interface Subscription {
-  id: string;
-  referenceId: string;
-  streampaySubscriptionId: string | null;
-  streampayConsumerId: string | null;
-  plan: string;
-  group: string | null;
-  amountHalalat: number | null;
-  currency: string | null;
-  billingInterval: "WEEK" | "MONTH" | "QUARTER" | "YEAR" | null;
-  billingIntervalCount: number | null;
-  status: "incomplete" | "active" | "inactive" | "expired" | "canceled" | "frozen" | "past_due";
-  periodStart: Date | null;
-  periodEnd: Date | null;
-  cancelAtPeriodEnd: boolean;
-  endedAt: Date | null;
-  frozenAt: Date | null;
-  freezeEndAt: Date | null;
-  createdAt: Date;
-  updatedAt: Date;
+import { $ERROR_CODES } from "better-auth-streampay";
+
+if (error.code === $ERROR_CODES.SUBSCRIPTION_ALREADY_ACTIVE.code) {
+  // Show the current plan.
 }
 ```
 
-## Error codes
+Common codes include:
 
-```ts
-import { $ERROR_CODES, type StreamPayErrorCode } from "better-auth-streampay";
+- `VALIDATION_ERROR`
+- `FORBIDDEN`
+- `NOT_FOUND`
+- `SUBSCRIPTION_ALREADY_ACTIVE`
+- `SUBSCRIPTION_INVALID_STATE`
+- `SUBSCRIPTION_PLAN_CHANGE_ALREADY_SCHEDULED`
+- `WEBHOOK_REPLAY_IN_PROGRESS`
 
-if (err.code === $ERROR_CODES.SUBSCRIPTION_ALREADY_ACTIVE.code) {
-  // ...
-}
-```
-
-Buckets: `VALIDATION_ERROR`, `UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`, `CONSUMER_DUPLICATE`, `CONSUMER_HAS_ONGOING_ACTIVITY`, `INVOICE_INVALID_STATE`, `PAYMENT_DUPLICATE`, `PAYMENT_INVALID_STATE`, `PAYMENT_ALREADY_REFUNDED`, `PAYMENT_REFUND_FAILED`, `PAYMENT_GATEWAY_DECLINED`, `PAYMENT_GATEWAY_UNAVAILABLE`, `PAYMENT_METHOD_INVALID`, `PRODUCT_LOCKED`, `COUPON_LOCKED`, `SUBSCRIPTION_NOT_FOUND`, `SUBSCRIPTION_PLAN_NOT_FOUND`, `SUBSCRIPTION_ALREADY_ACTIVE`, `SUBSCRIPTION_INVALID_STATE`, `SUBSCRIPTION_FREEZE_NOT_ACTIVE`, `SUBSCRIPTION_REFERENCE_NOT_AUTHORIZED`, `UNKNOWN`.
-
-`mapToErrorCode(rawCode, status)` maps StreamPay's raw codes onto these buckets.
-
-## Standalone exports
-
-### Verify webhooks (no plugin)
+## Useful exports
 
 ```ts
 import {
-  verifyWebhook,
-  verifyWebhookOrThrow,
-  StreamPayWebhookError,
-} from "better-auth-streampay";
-
-const result = verifyWebhook({
-  secret: process.env.STREAMPAY_WEBHOOK_SECRET!,
-  rawBody,
-  signatureHeader: req.headers.get("x-webhook-signature"),
-  toleranceSeconds: 300,
-});
-
-if (!result.ok) {
-  // result.reason: MISSING_HEADER | MALFORMED_HEADER | INVALID_TIMESTAMP | EXPIRED | INVALID_SIGNATURE
-}
-```
-
-### Dispatch handlers manually
-
-```ts
-import { dispatchWebhook } from "better-auth-streampay";
-
-await dispatchWebhook(payload, {
-  onPayload: async (p) => {},
-  onPaymentSucceeded: async (p) => {},
-});
-```
-
-### Find consumers
-
-```ts
-import {
+  StreamPayAmount,
+  checkLimit,
   findConsumerByExternalId,
-  findConsumerByIdentifiers,
-} from "better-auth-streampay";
-
-const id = await findConsumerByExternalId(client, { externalId: "user-123" });
-
-const consumer = await findConsumerByIdentifiers(client, {
-  email: "user@example.com",
-  phone_number: "+966501234567",
-  external_id: "user-123",
-  iban: "SA...",
-});
-```
-
-### Format / parse SDK errors
-
-```ts
-import { formatStreamPayError, parseStreamPayError } from "better-auth-streampay";
-
-try {
-  await client.createConsumer(input);
-} catch (err) {
-  console.error(formatStreamPayError(err));
-  const { status, code, requestId, validationErrors } = parseStreamPayError(err);
-}
-```
-
-### Money
-
-```ts
-import { StreamPayAmount } from "better-auth-streampay";
-
-StreamPayAmount.toHalalat("99.00");   // 9900
-StreamPayAmount.toSAR(9900);          // "99.00"
-```
-
-### Event-type constants
-
-```ts
-import {
-  STREAMPAY_EVENT_TYPES,
-  STREAMPAY_PAYMENT_EVENT_TYPES,
-  STREAMPAY_INVOICE_EVENT_TYPES,
-  STREAMPAY_SUBSCRIPTION_EVENT_TYPES,
-  STREAMPAY_PAYMENT_LINK_EVENT_TYPES,
-  type StreamPayEventType,
-  type StreamPayEntityType,
-  type StreamPayWebhookPayload,
-  type WebhookHandler,
-  type WebhookHandlers,
+  formatStreamPayError,
+  hasFeature,
+  parseStreamPayError,
+  verifyWebhook,
 } from "better-auth-streampay";
 ```
 
-### Subscription helpers
+## Agent skill
 
-```ts
-import { hasFeature, checkLimit, subscriptionSchema } from "better-auth-streampay";
-
-const allowed = hasFeature(row, plan, "ai_calls");
-const quota   = checkLimit(row, plan, "seats", 8); // { allowed, limit, remaining }
-```
-
-## Endpoints summary
-
-| Key                       | Method | Path                               | Auth      | Plugin            |
-| ------------------------- | ------ | ---------------------------------- | --------- | ----------------- |
-| `checkout`                | POST   | `/checkout`                        | Optional  | `checkout()`      |
-| `state`                   | GET    | `/consumer/state`                  | Required  | `portal()`        |
-| `subscriptions`           | GET    | `/consumer/subscriptions/list`     | Required  | `portal()`        |
-| `invoices`                | GET    | `/consumer/invoices/list`          | Required  | `portal()`        |
-| `upgradeSubscription`     | POST   | `/subscription/upgrade`            | Required  | `subscriptions()` |
-| `subscriptionSuccess`     | GET    | `/subscription/success`            | Required  | `subscriptions()` |
-| `cancelSubscription`      | POST   | `/subscription/cancel`             | Required  | `subscriptions()` |
-| `changeSubscriptionPlan`  | POST   | `/subscription/change-plan`        | Required  | `subscriptions()` |
-| `freezeSubscription`      | POST   | `/subscription/freeze`             | Required  | `subscriptions()` |
-| `unfreezeSubscription`    | POST   | `/subscription/unfreeze`           | Required  | `subscriptions()` |
-| `listSubscriptions`       | GET    | `/subscription/list`               | Required  | `subscriptions()` |
-| `currentSubscription`     | GET    | `/subscription/current`            | Required  | `subscriptions()` |
-| `hasSubscriptionFeature`  | GET    | `/subscription/has-feature`        | Required  | `subscriptions()` |
-| `checkSubscriptionLimit`  | GET    | `/subscription/check-limit`        | Required  | `subscriptions()` |
-| `streampayWebhooks`       | POST   | `/streampay/webhooks`              | Signature | `webhooks()`      |
-| `admin*`                  | varied | `/admin/streampay/...`             | Role      | `admin()`         |
-
-## Scripts
+Install the included integration skill:
 
 ```bash
-pnpm test          # vitest
-pnpm typecheck     # tsc --noEmit
-pnpm lint          # biome check
-pnpm build         # tsup (ESM + CJS)
+npx skills add Genie-sa/better-auth-streampay
 ```
+
+Then ask your coding agent to add StreamPay to your Better Auth app.
 
 ## License
 

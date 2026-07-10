@@ -40,7 +40,6 @@ type SessionUserInput = User | UserWithRole | null | undefined;
 
 const DEFAULT_ADMIN_ROLES = ["admin"] as const;
 
-/** Options for `admin()`: role gating and back-office mutation hooks. */
 export interface AdminOptions {
 	adminRoles?: readonly string[];
 
@@ -100,7 +99,12 @@ function getAdapter(ctx: GenericEndpointContext): PluginAdapter {
 	return adapter as unknown as PluginAdapter;
 }
 
-const ForwardedBody = z.object({}).passthrough();
+function forwardedBody<T extends object>() {
+	return z.custom<T>(
+		(value) => value !== null && typeof value === "object" && !Array.isArray(value),
+		"Expected an object body.",
+	);
+}
 
 const PaymentsListQuery = z
 	.object({
@@ -131,13 +135,13 @@ function buildPaymentsEndpoints(client: StreamPayClient, adminOptions: AdminOpti
 			"/admin/streampay/payments/:id/refund",
 			{
 				method: "POST",
-				body: ForwardedBody,
+				body: forwardedBody<PaymentRefundRequest>(),
 				use: [sessionMiddleware],
 			},
 			async (ctx) => {
 				const user = await requireAdmin(ctx, adminOptions);
 				const paymentId = ctx.params.id;
-				const request = ctx.body as unknown as PaymentRefundRequest;
+				const request = ctx.body;
 
 				if (adminOptions.onRefund) {
 					await adminOptions.onRefund({ user, paymentId, request });
@@ -210,12 +214,12 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 			"/admin/streampay/subscriptions",
 			{
 				method: "POST",
-				body: ForwardedBody,
+				body: forwardedBody<SubscriptionCreate>(),
 				use: [sessionMiddleware],
 			},
 			async (ctx) => {
 				await requireAdmin(ctx, adminOptions);
-				const input = ctx.body as unknown as SubscriptionCreate;
+				const input = ctx.body;
 				try {
 					const subscription = await client.createSubscription(input);
 					return ctx.json(subscription);
@@ -229,13 +233,13 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 			"/admin/streampay/subscriptions/:id",
 			{
 				method: "PATCH",
-				body: ForwardedBody,
+				body: forwardedBody<SubscriptionUpdate>(),
 				use: [sessionMiddleware],
 			},
 			async (ctx) => {
 				const user = await requireAdmin(ctx, adminOptions);
 				const subscriptionId = ctx.params.id;
-				const patch = ctx.body as unknown as SubscriptionUpdate;
+				const patch = ctx.body;
 
 				if (adminOptions.onPlanChange) {
 					let current: SubscriptionDetailed;
@@ -316,13 +320,13 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 			"/admin/streampay/subscriptions/:id/cancel",
 			{
 				method: "POST",
-				body: ForwardedBody,
+				body: forwardedBody<SubscriptionCancel>(),
 				use: [sessionMiddleware],
 			},
 			async (ctx) => {
 				await requireAdmin(ctx, adminOptions);
 				const subscriptionId = ctx.params.id;
-				const input = ctx.body as unknown as SubscriptionCancel;
+				const input = ctx.body;
 				try {
 					const result = await client.cancelSubscription(subscriptionId, input);
 					await applySubscriptionProjection(
@@ -349,13 +353,13 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 			"/admin/streampay/subscriptions/:id/freeze",
 			{
 				method: "POST",
-				body: ForwardedBody,
+				body: forwardedBody<FreezeSubscriptionCreateRequest>(),
 				use: [sessionMiddleware],
 			},
 			async (ctx) => {
 				await requireAdmin(ctx, adminOptions);
 				const subscriptionId = ctx.params.id;
-				const input = ctx.body as unknown as FreezeSubscriptionCreateRequest;
+				const input = ctx.body;
 				try {
 					const freeze = await client.freezeSubscription(subscriptionId, input);
 					await syncSubscriptionFromUpstream(
@@ -404,13 +408,13 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 			"/admin/streampay/subscriptions/:id/freeze/:freezeId",
 			{
 				method: "PUT",
-				body: ForwardedBody,
+				body: forwardedBody<FreezeSubscriptionUpdateRequest>(),
 				use: [sessionMiddleware],
 			},
 			async (ctx) => {
 				await requireAdmin(ctx, adminOptions);
 				const { id: subscriptionId, freezeId } = ctx.params;
-				const input = ctx.body as unknown as FreezeSubscriptionUpdateRequest;
+				const input = ctx.body;
 				try {
 					const freeze = await client.updateSubscriptionFreeze(subscriptionId, freezeId, input);
 					await syncSubscriptionFromUpstream(
@@ -518,13 +522,13 @@ function buildConsumersEndpoints(client: StreamPayClient, adminOptions: AdminOpt
 			"/admin/streampay/consumers/:id",
 			{
 				method: "PATCH",
-				body: ForwardedBody,
+				body: forwardedBody<ConsumerUpdate>(),
 				use: [sessionMiddleware],
 			},
 			async (ctx) => {
 				await requireAdmin(ctx, adminOptions);
 				const consumerId = ctx.params.id;
-				const patch = ctx.body as unknown as ConsumerUpdate;
+				const patch = ctx.body;
 				try {
 					const consumer = await client.updateConsumer(consumerId, patch);
 					return ctx.json(consumer);
@@ -645,12 +649,12 @@ function buildProductsEndpoints(client: StreamPayClient, adminOptions: AdminOpti
 			"/admin/streampay/products",
 			{
 				method: "POST",
-				body: ForwardedBody,
+				body: forwardedBody<ProductCreate>(),
 				use: [sessionMiddleware],
 			},
 			async (ctx) => {
 				await requireAdmin(ctx, adminOptions);
-				const input = ctx.body as unknown as ProductCreate;
+				const input = ctx.body;
 				try {
 					const product = await client.createProduct(input);
 					return ctx.json(product);
@@ -706,13 +710,13 @@ function buildProductsEndpoints(client: StreamPayClient, adminOptions: AdminOpti
 			"/admin/streampay/products/:id",
 			{
 				method: "PUT",
-				body: ForwardedBody,
+				body: forwardedBody<ProductUpdate>(),
 				use: [sessionMiddleware],
 			},
 			async (ctx) => {
 				await requireAdmin(ctx, adminOptions);
 				const productId = ctx.params.id;
-				const patch = ctx.body as unknown as ProductUpdate;
+				const patch = ctx.body;
 				try {
 					const product = await client.updateProduct(productId, patch);
 					return ctx.json(product);
@@ -756,12 +760,12 @@ function buildCouponsEndpoints(client: StreamPayClient, adminOptions: AdminOptio
 			"/admin/streampay/coupons",
 			{
 				method: "POST",
-				body: ForwardedBody,
+				body: forwardedBody<CouponCreate>(),
 				use: [sessionMiddleware],
 			},
 			async (ctx) => {
 				await requireAdmin(ctx, adminOptions);
-				const input = ctx.body as unknown as CouponCreate;
+				const input = ctx.body;
 				try {
 					const coupon = await client.createCoupon(input);
 					return ctx.json(coupon);
@@ -817,13 +821,13 @@ function buildCouponsEndpoints(client: StreamPayClient, adminOptions: AdminOptio
 			"/admin/streampay/coupons/:id",
 			{
 				method: "PUT",
-				body: ForwardedBody,
+				body: forwardedBody<CouponUpdate>(),
 				use: [sessionMiddleware],
 			},
 			async (ctx) => {
 				await requireAdmin(ctx, adminOptions);
 				const couponId = ctx.params.id;
-				const patch = ctx.body as unknown as CouponUpdate;
+				const patch = ctx.body;
 				try {
 					const coupon = await client.updateCoupon(couponId, patch);
 					return ctx.json(coupon);
@@ -938,7 +942,7 @@ function buildWebhookEventsEndpoints(
 						...(where.length > 0 ? { where } : {}),
 						limit: size,
 						offset: (page - 1) * size,
-						sortBy: { field: "processedAt", direction: "desc" },
+						sortBy: { field: "receivedAt", direction: "desc" },
 					}),
 					adapter.count({
 						model: WEBHOOK_EVENT_MODEL,
@@ -1028,7 +1032,6 @@ function buildWebhookEventsEndpoints(
 	};
 }
 
-/** Admin back-office sub-plugin. Exposes role-gated refund and subscription-management endpoints. */
 export const admin =
 	(adminOptions: AdminOptions = {}) =>
 	(options: StreamPayOptions, registry?: StreamPayPluginRegistry) => {

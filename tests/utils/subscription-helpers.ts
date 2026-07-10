@@ -1,10 +1,5 @@
 import { vi } from "vitest";
-import type {
-	PluginAdapter,
-	Subscription,
-	SubscriptionStatus,
-	SyncContext,
-} from "../../src/plugins/subscriptions";
+import type { PluginAdapter, Subscription, SyncContext } from "../../src/plugins/subscriptions";
 import type { StreamPayWebhookPayload } from "../../src/webhooks/events";
 
 let nextId = 0;
@@ -20,7 +15,7 @@ export function createMockAdapter(): PluginAdapter & {
 	};
 
 	const uniqueByModel: Record<string, readonly string[]> = {
-		subscription: ["streampaySubscriptionId"],
+		subscription: ["activeSlotKey", "streampaySubscriptionId", "streampayPaymentLinkId"],
 		streampayWebhookEvent: ["eventId"],
 	};
 
@@ -34,13 +29,17 @@ export function createMockAdapter(): PluginAdapter & {
 		return true;
 	}
 
-	function assertUnique(model: string, data: Record<string, unknown>): void {
+	function assertUnique(
+		model: string,
+		data: Record<string, unknown>,
+		exclude?: Record<string, unknown>,
+	): void {
 		const uniques = uniqueByModel[model];
 		if (!uniques || !tables[model]) return;
 		for (const field of uniques) {
 			const value = data[field];
 			if (value === undefined || value === null) continue;
-			const clash = tables[model].find((row) => row[field] === value);
+			const clash = tables[model].find((row) => row !== exclude && row[field] === value);
 			if (clash) {
 				const err = new Error(`UNIQUE constraint failed: ${model}.${field}`) as Error & {
 					code?: string;
@@ -77,11 +76,13 @@ export function createMockAdapter(): PluginAdapter & {
 			model: string;
 			update: D;
 			where: Array<{ field: string; value: unknown }>;
-		}): Promise<T> {
+		}): Promise<T | null> {
 			const table = tables[args.model] ?? [];
 			const row = table.find((r) => matches(r, args.where));
-			if (!row) throw new Error(`no row in ${args.model} for ${JSON.stringify(args.where)}`);
-			Object.assign(row, args.update as Record<string, unknown>, { updatedAt: new Date() });
+			if (!row) return null;
+			const update = args.update as Record<string, unknown>;
+			assertUnique(args.model, { ...row, ...update }, row);
+			Object.assign(row, update, { updatedAt: new Date() });
 			return row as T;
 		},
 		async findOne<T>(args: {
@@ -170,21 +171,40 @@ export function createMockSubscriptionRow(overrides: Partial<Subscription> = {})
 	return {
 		id: overrides.id ?? `sub_row_${++nextId}`,
 		referenceId: overrides.referenceId ?? "user-123",
+		referenceType: overrides.referenceType ?? "user",
+		activeSlotKey: overrides.activeSlotKey ?? null,
 		streampaySubscriptionId: overrides.streampaySubscriptionId ?? null,
 		streampayConsumerId: overrides.streampayConsumerId ?? "cons_mocked",
+		streampayPaymentLinkId: overrides.streampayPaymentLinkId ?? null,
 		plan: overrides.plan ?? "pro",
+		planVersion: overrides.planVersion ?? null,
+		productId: overrides.productId ?? "prod_pro",
 		group: overrides.group ?? null,
-		amountHalalat: overrides.amountHalalat ?? 9900,
+		amountInSmallestUnit: overrides.amountInSmallestUnit ?? 9900,
+		originalAmountInSmallestUnit: overrides.originalAmountInSmallestUnit ?? 9900,
 		currency: overrides.currency ?? "SAR",
 		billingInterval: overrides.billingInterval ?? "MONTH",
 		billingIntervalCount: overrides.billingIntervalCount ?? 1,
-		status: (overrides.status ?? "incomplete") as SubscriptionStatus,
+		status: overrides.status ?? "incomplete",
+		providerStatus: overrides.providerStatus ?? null,
+		billingStatus: overrides.billingStatus ?? "current",
 		periodStart: overrides.periodStart ?? null,
 		periodEnd: overrides.periodEnd ?? null,
+		currentCycleNumber: overrides.currentCycleNumber ?? null,
+		trialStart: overrides.trialStart ?? null,
+		trialEnd: overrides.trialEnd ?? null,
 		cancelAtPeriodEnd: overrides.cancelAtPeriodEnd ?? false,
+		cancelAt: overrides.cancelAt ?? null,
+		cancelScheduledAt: overrides.cancelScheduledAt ?? null,
+		canceledAt: overrides.canceledAt ?? null,
+		pendingPlan: overrides.pendingPlan ?? null,
+		pendingProductId: overrides.pendingProductId ?? null,
+		pendingPlanEffectiveAt: overrides.pendingPlanEffectiveAt ?? null,
 		endedAt: overrides.endedAt ?? null,
 		frozenAt: overrides.frozenAt ?? null,
 		freezeEndAt: overrides.freezeEndAt ?? null,
+		providerUpdatedAt: overrides.providerUpdatedAt ?? null,
+		syncedAt: overrides.syncedAt ?? null,
 		createdAt: overrides.createdAt ?? now,
 		updatedAt: overrides.updatedAt ?? now,
 	};

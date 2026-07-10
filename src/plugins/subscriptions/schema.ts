@@ -5,6 +5,19 @@ export const subscriptionTable = {
 				type: "string",
 				required: true,
 				input: false,
+				index: true,
+			},
+			referenceType: {
+				type: "string",
+				required: false,
+				defaultValue: "user",
+				input: false,
+			},
+			activeSlotKey: {
+				type: "string",
+				required: false,
+				unique: true,
+				input: false,
 			},
 			streampaySubscriptionId: {
 				type: "string",
@@ -16,16 +29,37 @@ export const subscriptionTable = {
 				type: "string",
 				required: false,
 				input: false,
+				index: true,
+			},
+			streampayPaymentLinkId: {
+				type: "string",
+				required: false,
+				unique: true,
+				input: false,
 			},
 			plan: {
 				type: "string",
 				required: true,
 			},
-			group: {
+			planVersion: {
 				type: "string",
 				required: false,
 			},
-			amountHalalat: {
+			productId: {
+				type: "string",
+				required: false,
+				index: true,
+			},
+			group: {
+				type: "string",
+				required: false,
+				index: true,
+			},
+			amountInSmallestUnit: {
+				type: "number",
+				required: false,
+			},
+			originalAmountInSmallestUnit: {
 				type: "number",
 				required: false,
 			},
@@ -47,6 +81,17 @@ export const subscriptionTable = {
 				type: "string",
 				required: false,
 				defaultValue: "incomplete",
+				index: true,
+			},
+			providerStatus: {
+				type: "string",
+				required: false,
+			},
+			billingStatus: {
+				type: "string",
+				required: false,
+				defaultValue: "current",
+				index: true,
 			},
 			periodStart: {
 				type: "date",
@@ -56,10 +101,47 @@ export const subscriptionTable = {
 				type: "date",
 				required: false,
 			},
+			currentCycleNumber: {
+				type: "number",
+				required: false,
+			},
+			trialStart: {
+				type: "date",
+				required: false,
+			},
+			trialEnd: {
+				type: "date",
+				required: false,
+			},
 			cancelAtPeriodEnd: {
 				type: "boolean",
 				required: false,
 				defaultValue: false,
+			},
+			cancelAt: {
+				type: "date",
+				required: false,
+			},
+			cancelScheduledAt: {
+				type: "date",
+				required: false,
+			},
+			canceledAt: {
+				type: "date",
+				required: false,
+			},
+			pendingPlan: {
+				type: "string",
+				required: false,
+			},
+			pendingProductId: {
+				type: "string",
+				required: false,
+				index: true,
+			},
+			pendingPlanEffectiveAt: {
+				type: "date",
+				required: false,
 			},
 			endedAt: {
 				type: "date",
@@ -72,6 +154,26 @@ export const subscriptionTable = {
 			freezeEndAt: {
 				type: "date",
 				required: false,
+			},
+			providerUpdatedAt: {
+				type: "date",
+				required: false,
+			},
+			syncedAt: {
+				type: "date",
+				required: false,
+				index: true,
+			},
+			createdAt: {
+				type: "date",
+				required: false,
+				input: false,
+			},
+			updatedAt: {
+				type: "date",
+				required: false,
+				input: false,
+				index: true,
 			},
 		},
 	},
@@ -89,25 +191,50 @@ export const webhookEventTable = {
 				type: "string",
 				required: true,
 			},
-			processedAt: {
+			receivedAt: {
 				type: "date",
 				required: true,
 				index: true,
 			},
+			lastAttemptAt: {
+				type: "date",
+				required: false,
+				index: true,
+			},
+			nextAttemptAt: {
+				type: "date",
+				required: false,
+				index: true,
+			},
+			completedAt: {
+				type: "date",
+				required: false,
+				index: true,
+			},
+			deadLetteredAt: {
+				type: "date",
+				required: false,
+				index: true,
+			},
+			lockedAt: {
+				type: "date",
+				required: false,
+				index: true,
+			},
+			lockedBy: {
+				type: "string",
+				required: false,
+			},
 			status: {
 				type: "string",
 				required: false,
-				defaultValue: "completed",
+				defaultValue: "pending",
 				index: true,
 			},
 			attemptCount: {
 				type: "number",
 				required: false,
 				defaultValue: 1,
-			},
-			firstSeenAt: {
-				type: "date",
-				required: false,
 			},
 			rawPayload: {
 				type: "string",
@@ -120,6 +247,11 @@ export const webhookEventTable = {
 			lastError: {
 				type: "string",
 				required: false,
+			},
+			lastErrorCode: {
+				type: "string",
+				required: false,
+				index: true,
 			},
 		},
 	},

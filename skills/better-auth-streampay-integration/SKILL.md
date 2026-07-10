@@ -1,227 +1,177 @@
 ---
 name: better-auth-streampay-integration
-description: Wires the better-auth-streampay plugin into a Better Auth project — consumers, hosted checkout, billing portal, subscription tiers, admin back-office, and signed webhooks. Use when the user asks to add StreamPay to a Better Auth app, install better-auth-streampay, scaffold checkout / portal / subscriptions / admin / webhooks, migrate from Stripe / Paddle / Lemon Squeezy to StreamPay, replace bespoke StreamPay code with the plugin, or upgrade an existing install. Reads the plugin source and the user's repo first; interviews only for what detection can't answer.
+description: Add better-auth-streampay to a Better Auth app. Use for checkout, billing portal, subscriptions, admin billing tools, signed webhooks, database setup, and plugin updates.
 license: MIT
 metadata:
   author: Genie-sa
   homepage: https://github.com/Genie-sa/better-auth-streampay
 ---
 
-# Better Auth + StreamPay Integration
+# Better Auth and StreamPay
 
-## When to skip this skill
+Use this process to add or update the plugin.
 
-- No Better Auth in the repo — point the user at https://better-auth.com first.
-- The user only needs webhook signature verification with no plugin — use the standalone `verifyWebhook` export ([code-templates.md §Verifying webhooks without the plugin](references/code-templates.md#verifying-webhooks-without-the-plugin)).
+## Sources
 
-## Reference files
+Read these before changing code:
 
-| File | When to load |
-|---|---|
-| [plugins-overview.md](references/plugins-overview.md) | When the user asks "what does each piece do?" or "which do I need?" |
-| [interview-questions.md](references/interview-questions.md) | The thing-to-know decisions and phrasing templates for `AskUserQuestion` |
-| [plugin-reference.md](references/plugin-reference.md) | Option names and types for `streampay()` and every sub-plugin |
-| [webhook-events.md](references/webhook-events.md) | The list of events StreamPay sends and what to do with each |
-| [code-templates.md](references/code-templates.md) | Server / client / framework route / migration snippets |
-| [env-setup.md](references/env-setup.md) | Which env vars to set and where to get the values |
-| [troubleshooting.md](references/troubleshooting.md) | If something breaks, look here first |
+1. The app's auth, database, routes, client, and payment code.
+2. The installed package types in `node_modules/better-auth-streampay/dist`.
+3. The package [README](https://github.com/Genie-sa/better-auth-streampay#readme).
 
-External:
+Use the installed types for exact options and return values.
 
-- Plugin: https://github.com/Genie-sa/better-auth-streampay
-- StreamPay docs: https://docs.streampay.sa
-- Better Auth: https://better-auth.com
+Load [code-templates.md](references/code-templates.md) only when you need setup or route examples.
 
-## Instructions
+Load [troubleshooting.md](references/troubleshooting.md) only after a check fails.
 
-Most users picking up this skill aren't payment experts. Do the
-technical work yourself, ask only what the user can answer, explain
-choices in plain language, and check in before editing.
+## 1. Inspect the app
 
-### Working principles
+Find:
 
-- **Friendly tone.** Don't lecture or dump jargon. "We can do A or B — A is simpler, B is more flexible. Want me to pick?" beats "Compose the plan catalog with explicit `group` discriminators".
-- **Read first.** The plugin source under `node_modules/better-auth-streampay/dist` and the user's own repo answer most of the questions. Don't put work on the user that you can do yourself.
-- **Deep-read before client-side glue.** Cache invalidation, success-page handling, redirect detection depend entirely on the project's state library, router, and existing patterns. Read what they already use and mirror it — don't paste from training data.
-- **Suggest, don't dictate.** Propose a sensible default and let the user redirect: "I'd start with checkout + webhooks for a typical store. Sound good?"
-- **One question at a time.** Use `AskUserQuestion` per question. No giant forms.
-- **Confirm before editing.** Recap the plan in plain English, wait for "yes".
+- the file that calls `betterAuth()`
+- the Better Auth client file
+- the database tool, such as Drizzle or Prisma
+- the auth route
+- the package manager
+- the environment file
+- any current payment code
+- the page users return to after checkout
 
-### The plan
+Check the installed versions. The plugin needs:
 
-Copy this checklist; tick items as you go.
+- `better-auth ^1.5.0`
+- `@streamsdk/typescript ^1.1.3`
+- `zod ^3.24.0 || ^4.0.0`
 
-- [ ] Look at the user's repo
-- [ ] Read the plugin (once installed)
-- [ ] Ask any questions the repo didn't answer
-- [ ] Recap what you're about to do, get a "yes"
-- [ ] Install the plugin and write the changes
-- [ ] Set up env vars and run the database migration
-- [ ] Quick smoke test
+This step is done when every item above is known or does not exist.
 
-### Step 1 — Look at the repo
+## 2. Pick the needed parts
 
-Most of the interview is answerable by reading. Find:
+Use only what the app needs:
 
-- **Repo shape**: monorepo or single app. Auth and DB schema usually live in separate packages in monorepos.
-- **Framework**: Next.js (app vs pages), Hono, Elysia, Express, SvelteKit, TanStack Start, …
-- **ORM**: Drizzle, Prisma, or none (= Better Auth CLI manages schema).
-- **Better Auth file**: the file that calls `betterAuth(...)`. Note the pattern — inline vs factory — and the existing `plugins: [...]`. If `streampay()` is already there, stop and check with the user.
-- **Better Auth version**: must be `^1.4.0`. In monorepos check catalogs / workspace dependencies.
-- **Package manager**: from the lockfile.
-- **Client**: the file that calls `createAuthClient(...)`, if any.
-- **State / data layer + return-URL handling**: what powers client-side data (TanStack Query, SWR, router loaders, plain fetch, …) and whether the app already handles a payment return URL. Need this before any post-checkout glue.
-- **Handler mount**: where `/api/auth/*` is wired. If it only allows GET+POST, you'll need to widen to PATCH/PUT/DELETE for admin endpoints.
-- **Env file location**: monorepos often put env in `apps/<server>/.env`, not root.
-- **Existing payment code**: Stripe, Paddle, Lemon Squeezy, or bespoke StreamPay. If anything's there, list every touched file before proposing edits.
+| Part | Use it for |
+| --- | --- |
+| `checkout()` | Hosted payment links |
+| `portal()` | User billing reads |
+| `subscriptions()` | Plans, access, limits, and subscription actions |
+| `admin()` | Staff billing actions |
+| `webhooks()` | Signed event handling and subscription sync |
 
-### Step 2 — Read the plugin
+Do not add `admin()` unless the app has a real admin check.
 
-If the plugin isn't installed yet, install it first (Step 5's first
-action) — that's the easiest way to see real types. If you can't
-install yet, fetch from
-`https://github.com/Genie-sa/better-auth-streampay` and read `src/`.
+Use lazy consumer creation by default. Enable `createConsumerOnSignUp` only when StreamPay
+consumer creation should be allowed to block sign-up.
 
-Once available, skim:
+Ask the user only when the repo cannot answer a product choice, such as which plans or admin roles
+to use.
 
-- `dist/index.d.ts` — every option, every export
-- `dist/index.js` (or `src/`) — the actual endpoint paths each sub-plugin registers
-- `WebhookHandlers` type — the exact handler keys (e.g. `onPaymentSucceeded`)
+This step is done when each selected part has a clear reason.
 
-When this skill's references and the plugin source disagree, the
-source wins.
+## 3. Add the server plugin
 
-### Step 3 — Ask only what's unknown
+Create one StreamPay SDK client outside request handlers.
 
-Not a fixed form. Work out what's still unknown after Step 1 and the
-user's original request, then ask just those things — in the user's
-own words.
+Add `streampay()` to the existing Better Auth plugin list. Keep the app's current auth structure.
+Do not rewrite a factory into a new pattern.
 
-[interview-questions.md](references/interview-questions.md) is the menu of
-"things you might need to know" with signals that answer each one and
-suggested phrasing. Use it as a checklist of decisions, not a script.
+Add the selected parts to `use`.
 
-Rules of thumb:
+For subscriptions:
 
-- If the request itself answered it ("add subscriptions"), don't ask "do you want subscriptions?"
-- If the codebase shows it (framework, ORM, existing payment code, role plugin), don't ask
-- One `AskUserQuestion` per decision — never batch
-- Propose your best guess first: "I'd start with checkout + webhooks based on what you described — sound right?"
-- If the user is confused about a choice, load [plugins-overview.md](references/plugins-overview.md) and explain in one sentence per option
+- use real recurring StreamPay product IDs
+- use unique plan names and product IDs
+- store prices in the smallest currency unit
+- use a group when plans replace each other
+- add `authorizeReference` for organization or custom references
 
-### Step 4 — Recap, get a "yes"
+For webhooks:
 
-Show the user a short bullet list of what you plan to do — in plain
-English. Example:
+- read the secret from server environment
+- never expose it to the browser
+- add only handlers the app needs
 
-> Here's what I'll change:
-> - Install `better-auth-streampay` in `packages/auth`
-> - Add the plugin to your Better Auth config (checkout + webhooks)
-> - Add `STREAMPAY_API_KEY` and `STREAMPAY_WEBHOOK_SECRET` to `apps/server/.env`
-> - Regenerate your Drizzle schema and run a migration
->
-> Want me to go ahead?
+This step is done when the auth file typechecks and all selected parts appear once.
 
-If replacing existing payment code, also list every file that'll be
-touched. Wait for "yes" before editing.
+## 4. Add the client and route
 
-### Step 5 — Make the changes
+Add `streampayClient()` to the existing Better Auth client.
 
-1. **Install** `better-auth-streampay @streamsdk/typescript` in the workspace where `auth.ts` lives (in monorepos, that's usually the auth package, not the root). Make sure peers `better-auth ^1.4.0` and `zod ^3.24 || ^4` are present.
-2. **Edit the auth file**. Add only the sub-plugins the user picked. Templates: [code-templates.md](references/code-templates.md). Option names: [plugin-reference.md](references/plugin-reference.md).
-3. **For factory patterns** (`createAuth() { return betterAuth({...}) }`), add `streampay()` to the inner `plugins: [...]` array — don't refactor the function shape.
-4. **Initialize the StreamPay SDK once** at module scope and pass it in as `streampay({ client })`.
-5. **If there's a Better Auth client file**, add `streampayClient()` to its plugins array.
-6. **Write env vars** to the right `.env` (root for single apps, `apps/<server>/.env` for monorepos). Mirror in `.env.example` with empty values. See [env-setup.md](references/env-setup.md).
-7. **Database**:
-   - Better Auth CLI / no BYO schema: `npx @better-auth/cli migrate` adds plugin fields automatically.
-   - BYO Drizzle/Prisma: `npx @better-auth/cli generate --config <path/to/auth.ts>` first, then run the ORM migration. Confirm `user.streampayConsumerId` exists, plus `subscription` and `streampayWebhookEvent` if subscriptions are enabled.
-8. **Handler mount** at `/api/auth/*` with all HTTP methods (GET, POST, PATCH, PUT, DELETE). The webhook URL `/api/auth/streampay/webhooks` is automatic.
-9. **Wire the client to refresh after checkout.** Webhooks update the server; the client keeps rendering the stale tier until something tells it to refetch. On the return URL, call `authClient.subscriptionSuccess({ subscriptionId })` and invalidate whatever cache the project already uses for subscription reads. Don't invent the pattern — read their state/router setup and mirror it. Concept-only notes: [code-templates.md §After checkout — refreshing the client](references/code-templates.md#after-checkout--refreshing-the-client).
+Keep the current framework client import, such as React, Vue, Svelte, or Solid.
 
-### Step 6 — Quick smoke test
+Make sure the Better Auth route accepts every HTTP method used by the selected parts. Admin tools
+need `PATCH`, `PUT`, and `DELETE`.
 
-1. Run a typecheck.
-2. Boot the dev server. If subscriptions are on with malformed plans, the plugin throws at startup — show that error verbatim, it's helpful.
-3. Sign up a test user; confirm `streampayConsumerId` populates (or first checkout populates it, in lazy mode).
-4. If webhooks are on: have the user register `https://<their-host>/api/auth/streampay/webhooks` in the StreamPay dashboard, paste the secret into `STREAMPAY_WEBHOOK_SECRET`, then send a test event from the dashboard. Confirm a 200.
+The webhook URL is:
 
-**Local webhook testing.** StreamPay can't reach `localhost`. Expose
-the dev server publicly with one of:
+```text
+/api/auth/streampay/webhooks
+```
 
-- `cloudflared tunnel --url http://localhost:<port>` (no signup; URL rotates per restart)
-- `ngrok http <port>` (account required; stable URLs on paid plan)
+This step is done when the client types include the selected actions and the route accepts them.
 
-Register the public URL + `/api/auth/streampay/webhooks` in the
-dashboard, then paste the dashboard-shown signing secret into
-`STREAMPAY_WEBHOOK_SECRET`.
+## 5. Update the database
 
-### Step 7 — Wrap up
+Load the plugin before generating a schema.
 
-Send a friendly summary. Cover:
+For a new Better Auth managed database, run the Better Auth migration command.
 
-- Sub-plugins enabled
-- Webhook handler bodies the user still needs to fill in (TODOs)
-- Database changes
-- Action items for the StreamPay dashboard (create products, register the webhook URL)
+For Drizzle or Prisma, generate the Better Auth schema changes, review them, then run the app's
+normal database migration.
 
-Keep it short. Encourage the user to come back if anything errors.
+Check that:
 
-## Examples
+- `user.streampayConsumerId` exists
+- `subscription` exists when subscriptions are on
+- `streampayWebhookEvent` exists when webhook tracking is on
 
-### "Add StreamPay to my SaaS for subscriptions"
+This step is done when the schema matches the selected parts.
 
-Best opening guess, before asking anything: `subscriptions + webhooks
-+ portal`. Read the auth file, the package.json, the schema. If
-everything is detectable, the only question worth asking is the plan
-catalog — and even that may be skippable if the user mentions a
-pricing page or sends tier names.
+## 6. Handle checkout return
 
-### "I have a Stripe integration, switch to StreamPay"
+On the success page:
 
-Open with an inventory: list every Stripe-touching file before
-proposing edits. Ask the user what they want to keep, what they want
-replaced. Set expectations: payment methods don't transfer between
-providers; active subs need re-enrollment.
+1. Call `authClient.subscription.success` with the local subscription ID.
+2. Refresh the subscription data already used by the app.
+3. Show a short activating state while the webhook is still in flight.
 
-### "Just verify webhook signatures, no Better Auth wiring"
+Follow the app's current cache or router pattern. Do not add a second state system.
 
-Don't run the workflow. Point at the standalone `verifyWebhook` /
-`verifyWebhookOrThrow` exports and show a 5-line snippet from
-[code-templates.md §Verifying webhooks without the plugin](references/code-templates.md#verifying-webhooks-without-the-plugin).
+This step is done when a completed checkout updates the visible plan without a manual reload.
 
-## Common Pitfalls
+## 7. Verify
 
-| Pitfall | Avoidance |
-|---|---|
-| BYO Drizzle/Prisma schemas don't auto-add the plugin's `streampayConsumerId` / `subscription` / `streampayWebhookEvent` | Run `npx @better-auth/cli generate --config <path/to/auth.ts>` after installing, before the migration |
-| Handler mount only registers GET + POST | Admin endpoints use PATCH/PUT/DELETE — widen the methods |
-| Skipping `webhooks()` when subscriptions are enabled | Subscription state silently drifts. Webhooks aren't optional in this combo |
-| Inventing product UUIDs the user doesn't have yet | Leave placeholders; the user creates products in the StreamPay dashboard |
-| Reading the interview questions verbatim | They're decision templates — adapt them to the user's tone and request |
-| Eager-creating customers without verified email/phone + reclaim | Reclaim transfers billing history. Default to "don't reuse" unless verification is in place |
-| Editing files before recap | Always confirm scope first |
+Run:
 
-See [troubleshooting.md](references/troubleshooting.md) for runtime failure
-modes (signature errors, missing columns, plan validation, admin 405s,
-duplicate webhooks).
+1. typecheck
+2. tests
+3. production build
+4. database checks
+5. sandbox checkout
+6. signed webhook delivery
 
-## What this skill won't do
+When subscriptions are enabled, also test:
 
-- Create products, coupons, or webhook endpoints in the StreamPay dashboard — the user does that in the dashboard UI.
-- Fill in webhook handler bodies with business logic — leaves clearly-marked TODOs.
-- Manage or rotate API keys.
+- duplicate checkout reuse
+- active cancellation and uncancel
+- plan change and pending-change cancellation
+- freeze and unfreeze
+- current plan, feature, and limit reads
+- direct server calls through `auth.api`
 
-## Done when
+Check the database and logs after each action.
 
-- [ ] Detection notes recorded
-- [ ] Plugin source read for the surface being touched
-- [ ] Interview answered (or skipped via detection)
-- [ ] Plain-English recap shared and the user said yes
-- [ ] Dependencies installed (peers verified)
-- [ ] Auth file composes only the user-selected sub-plugins
-- [ ] Client updated (if there is one)
-- [ ] `.env` + `.env.example` updated
-- [ ] Migration run; tables/columns confirmed
-- [ ] Typecheck passes
-- [ ] Friendly summary delivered with clear next steps
+This step is done only when every selected flow has a result and no required process is still
+running.
+
+## Finish
+
+Report:
+
+- files changed
+- migration command or SQL script used
+- checks run
+- sandbox results
+- any StreamPay action that could not be tested
+
+Do not claim a StreamPay action passed when only a mock passed.

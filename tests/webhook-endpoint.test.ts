@@ -26,7 +26,7 @@ vi.mock("better-auth/api", () => ({
 }));
 
 import { webhooks } from "../src/plugins/webhooks";
-import type { WebhookHandler } from "../src/webhooks/dispatcher";
+import type { WebhookEnvelopeHandler, WebhookHandler } from "../src/webhooks/dispatcher";
 import { unwrapHandler } from "./utils/better-auth-mock";
 import { createTestStreamPayOptions } from "./utils/helpers";
 import {
@@ -67,12 +67,12 @@ describe("webhooks plugin", () => {
 
 	describe("webhook endpoint handler", () => {
 		let handler: (ctx: MockCtx) => Promise<WebhookResponse>;
-		let onPayload: Mock<WebhookHandler>;
+		let onPayload: Mock<WebhookEnvelopeHandler>;
 		let onPaymentSucceeded: Mock<WebhookHandler>;
 		let onInvoiceCompleted: Mock<WebhookHandler>;
 
 		beforeEach(() => {
-			onPayload = vi.fn<WebhookHandler>();
+			onPayload = vi.fn<WebhookEnvelopeHandler>();
 			onPaymentSucceeded = vi.fn<WebhookHandler>();
 			onInvoiceCompleted = vi.fn<WebhookHandler>();
 			const plugin = webhooks({
@@ -162,7 +162,25 @@ describe("webhooks plugin", () => {
 				request: makeWebhookRequest(body, signBody(body)),
 			});
 
-			await expect(handler(ctx)).rejects.toThrow(/missing `event_type`/);
+			await expect(handler(ctx)).rejects.toThrow(/valid StreamPay event envelope/);
+		});
+
+		it("rejects empty dedupe identifiers after signature verification", async () => {
+			const body = JSON.stringify({
+				event_type: "PAYMENT_SUCCEEDED",
+				entity_type: "PAYMENT",
+				entity_id: "",
+				entity_url: "",
+				status: "SUCCEEDED",
+				data: {},
+				timestamp: "",
+			});
+			const ctx = createMockContext({
+				request: makeWebhookRequest(body, signBody(body)),
+			});
+
+			await expect(handler(ctx)).rejects.toThrow(/valid StreamPay event envelope/);
+			expect(onPayload).not.toHaveBeenCalled();
 		});
 
 		it("still calls onPayload for unknown event types without routing", async () => {
@@ -183,6 +201,25 @@ describe("webhooks plugin", () => {
 			const result = await handler(ctx);
 
 			expect(result).toEqual({ received: true });
+			expect(onPayload).toHaveBeenCalledTimes(1);
+			expect(onPaymentSucceeded).not.toHaveBeenCalled();
+		});
+
+		it("does not route a known event with a mismatched entity type", async () => {
+			const body = JSON.stringify({
+				event_type: "PAYMENT_SUCCEEDED",
+				entity_type: "INVOICE",
+				entity_id: "x",
+				entity_url: "",
+				status: "SUCCEEDED",
+				data: {},
+				timestamp: new Date().toISOString(),
+			});
+			const ctx = createMockContext({
+				request: makeWebhookRequest(body, signBody(body)),
+			});
+
+			await expect(handler(ctx)).resolves.toEqual({ received: true });
 			expect(onPayload).toHaveBeenCalledTimes(1);
 			expect(onPaymentSucceeded).not.toHaveBeenCalled();
 		});
@@ -209,18 +246,16 @@ describe("webhooks plugin", () => {
 			);
 		});
 
-		it("refuses to run when the secret is an empty string", async () => {
-			const plugin = webhooks({ secret: "" });
-			const noSecretHandler = unwrapHandler<WebhookResponse>(
-				plugin(createTestStreamPayOptions({ client: mockClient })).endpoints.streampayWebhooks,
+		it("rejects empty webhook secrets during setup", () => {
+			expect(() => webhooks({ secret: "" })).toThrow(/only non-empty values/);
+			expect(() => webhooks({ secret: ["valid", ""] })).toThrow(/only non-empty values/);
+			expect(() => webhooks({ secret: [] })).toThrow(/only non-empty values/);
+		});
+
+		it("rejects invalid signature tolerance during setup", () => {
+			expect(() => webhooks({ secret: SECRET, toleranceSeconds: -1 })).toThrow(
+				/non-negative number/,
 			);
-			const body = JSON.stringify({ event_type: "PAYMENT_SUCCEEDED" });
-
-			const ctx = createMockContext({
-				request: makeWebhookRequest(body, signBody(body)),
-			});
-
-			await expect(noSecretHandler(ctx)).rejects.toThrow(/secret is not configured/);
 		});
 	});
 

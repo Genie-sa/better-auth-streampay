@@ -5,170 +5,118 @@ import type {
 	SubscriptionDetailed,
 	SubscriptionUpdate,
 } from "@streamsdk/typescript";
-import type { GenericEndpointContext } from "better-auth";
 import { APIError, createAuthEndpoint, sessionMiddleware } from "better-auth/api";
 import { z } from "zod";
 import { $ERROR_CODES } from "../../error-codes";
 import type { StreamPayOptions } from "../../types";
-import { StreamPayAmount } from "../../utils/amount";
 import { ensureConsumerForUser } from "../../utils/ensure-consumer";
 import { toAPIError } from "../../utils/errors";
 import { getLogger } from "../../utils/logger";
-import { asSessionUser, type StreamPaySessionUser } from "../../utils/session";
-import { checkLimit, hasFeature, type ResolvedPlans } from "./plans";
 import {
-	type PluginAdapter,
+	authorizeReference,
+	getAdapter,
+	requireConfirmedOwnedSubscription,
+	requireUser,
+} from "./access";
+import { deleteReservedSubscription, resumeOrReserveCheckoutSlot } from "./checkout-reservation";
+import {
+	configuredPlanForSubscription,
+	isAlreadyCanceledFreezeError,
+	subscriptionCouponIds,
+} from "./lifecycle";
+import type { ResolvedPlans } from "./plans";
+import { buildSubscriptionReadEndpoints } from "./reads";
+import {
+	projectSubscriptionAgainstExisting,
+	projectSubscriptionFields,
 	subscriptionItemProductId,
 	syncSubscriptionFromUpstream,
-} from "./sync";
+} from "./reconcile";
+import { isCheckoutSuccessStatus, isManageableSubscriptionStatus } from "./status";
 import {
 	PLAN_NAME_METADATA_KEY,
 	REFERENCE_ID_METADATA_KEY,
+	REFERENCE_TYPE_METADATA_KEY,
+	SUBSCRIPTION_ROW_ID_METADATA_KEY,
 	type Subscription,
+	type SubscriptionReferenceType,
 	type SubscriptionsOptions,
-	UPGRADE_IDEMPOTENCY_WINDOW_MS,
+	subscriptionSlotKey,
 } from "./types";
 
 const SUBSCRIPTION_MODEL = "subscription";
-
 const UpgradeBody = z.object({
 	plan: z.string().min(1),
 	referenceId: z.string().min(1).optional(),
+	referenceType: z.enum(["user", "organization", "custom"]).optional(),
 	successUrl: z.string().url().optional(),
 	failureUrl: z.string().url().optional(),
 });
 
 const SuccessQuery = z.object({
-	subscriptionId: z.string().uuid(),
-	callbackURL: z.string().url().optional(),
+	subscriptionId: z.string().min(1),
 });
 
 const CancelBody = z.object({
-	subscriptionId: z.string().uuid(),
+	subscriptionId: z.string().min(1),
 	cancelRelatedInvoices: z.boolean().optional(),
 	cancelAtPeriodEnd: z.boolean().optional(),
 });
 
-const ChangePlanBody = z.object({
-	plan: z.string().min(1),
-	mode: z.enum(["at_period_end", "immediate"]).optional(),
-	successUrl: z.string().url().optional(),
-	failureUrl: z.string().url().optional(),
-});
+const ChangePlanBody = z
+	.object({
+		subscriptionId: z.string().min(1),
+		plan: z.string().min(1),
+	})
+	.strict();
 
 const FreezeBody = z.object({
-	subscriptionId: z.string().uuid(),
+	subscriptionId: z.string().min(1),
 	freezeStartDatetime: z.string().datetime(),
 	freezeEndDatetime: z.string().datetime().nullable().optional(),
 	notes: z.string().optional(),
 });
 
 const UnfreezeBody = z.object({
-	subscriptionId: z.string().uuid(),
+	subscriptionId: z.string().min(1),
 });
 
-const CurrentQuery = z
-	.object({
-		group: z.string().min(1).optional(),
-	})
-	.optional();
-
-const HasFeatureQuery = z.object({
-	feature: z.string().min(1),
-	group: z.string().min(1).optional(),
+const CancelFreezeBody = z.object({
+	subscriptionId: z.string().min(1),
+	freezeId: z.string().min(1),
 });
 
-const CheckLimitQuery = z.object({
-	feature: z.string().min(1),
-	count: z.coerce.number().int().min(0),
-	group: z.string().min(1).optional(),
-});
+const SUCCESS_RECONCILIATION_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
-function requireUser(ctx: GenericEndpointContext): StreamPaySessionUser {
-	const user = asSessionUser(ctx.context.session?.user);
-	if (!user) {
-		throw new APIError("UNAUTHORIZED", {
-			message: "Subscription endpoints require an authenticated session.",
-		});
+function isCheckoutSubscriptionCandidate(
+	subscription: SubscriptionDetailed,
+	row: Subscription,
+	productId: string,
+): boolean {
+	if (subscription.organization_consumer_id !== row.streampayConsumerId) return false;
+	if (!isCheckoutSuccessStatus(subscription.status)) return false;
+	if (!subscription.items?.some((item) => subscriptionItemProductId(item) === productId)) {
+		return false;
 	}
-	if (user.isAnonymous) {
-		throw new APIError("UNAUTHORIZED", {
-			message: "Anonymous users cannot manage subscriptions.",
-		});
-	}
-	return user;
-}
 
-async function authorizeReference(
-	ctx: GenericEndpointContext,
-	user: StreamPaySessionUser,
-	referenceId: string,
-	action: "upgrade" | "cancel" | "freeze" | "unfreeze" | "read" | "change-plan",
-	subsOptions: SubscriptionsOptions,
-): Promise<void> {
-	if (referenceId === user.id) return;
-	if (!subsOptions.authorizeReference) {
-		throw new APIError("FORBIDDEN", {
-			code: $ERROR_CODES.FORBIDDEN.code,
-			message: "Cross-account subscription actions require an `authorizeReference` callback.",
-		});
+	const upstreamPaymentLinkId = subscription.latest_invoice?.payment_link_id;
+	if (
+		row.streampayPaymentLinkId &&
+		upstreamPaymentLinkId &&
+		upstreamPaymentLinkId !== row.streampayPaymentLinkId
+	) {
+		return false;
 	}
-	const ok = await subsOptions.authorizeReference({ user, referenceId, action }, ctx);
-	if (!ok) {
-		throw new APIError("FORBIDDEN", {
-			code: "SUBSCRIPTION_REFERENCE_NOT_AUTHORIZED",
-			message: "Not authorized for this subscription reference.",
-		});
+	if (row.streampayPaymentLinkId && upstreamPaymentLinkId === row.streampayPaymentLinkId) {
+		return true;
 	}
-}
 
-function getAdapter(ctx: GenericEndpointContext): PluginAdapter {
-	const adapter = ctx.context.adapter;
-	if (!adapter) {
-		throw new APIError("INTERNAL_SERVER_ERROR", {
-			message: "Better Auth adapter is not available on the request context.",
-		});
-	}
-	return adapter as unknown as PluginAdapter;
-}
-
-function echoSubscriptionPatch(
-	stream: SubscriptionDetailed,
-): Pick<SubscriptionUpdate, "items" | "coupons"> {
-	const items: SubscriptionUpdate["items"] = [];
-	for (const item of stream.items ?? []) {
-		const productId = item.product?.id;
-		const quantity = item.quantity;
-		if (!productId || quantity === undefined) continue;
-		items.push({ product_id: productId, quantity });
-	}
-	const coupons: SubscriptionUpdate["coupons"] = [];
-	for (const c of stream.coupon_calculation_metadata?.coupons ?? []) {
-		if (c.coupon_id) coupons.push(c.coupon_id);
-	}
-	return { items, coupons };
-}
-
-async function findOwnedSubscription(
-	ctx: GenericEndpointContext,
-	user: StreamPaySessionUser,
-	streampaySubscriptionId: string,
-	subsOptions: SubscriptionsOptions,
-	action: "cancel" | "freeze" | "unfreeze" | "change-plan",
-): Promise<Subscription> {
-	const adapter = getAdapter(ctx);
-	const row = await adapter.findOne<Subscription>({
-		model: SUBSCRIPTION_MODEL,
-		where: [{ field: "streampaySubscriptionId", value: streampaySubscriptionId }],
-	});
-	if (!row) {
-		throw new APIError("NOT_FOUND", {
-			code: "SUBSCRIPTION_NOT_FOUND",
-			message: "Subscription not found.",
-		});
-	}
-	await authorizeReference(ctx, user, row.referenceId, action, subsOptions);
-	return row;
+	if (!subscription.created_at || !(row.createdAt instanceof Date)) return false;
+	const createdAt = new Date(subscription.created_at).getTime();
+	return (
+		Number.isFinite(createdAt) &&
+		createdAt >= row.createdAt.getTime() - SUCCESS_RECONCILIATION_CLOCK_SKEW_MS
+	);
 }
 
 export function buildSubscriptionEndpoints(
@@ -179,6 +127,7 @@ export function buildSubscriptionEndpoints(
 	const client = options.client;
 
 	return {
+		...buildSubscriptionReadEndpoints(subsOptions, plansRef),
 		upgradeSubscription: createAuthEndpoint(
 			"/subscription/upgrade",
 			{
@@ -189,13 +138,15 @@ export function buildSubscriptionEndpoints(
 			async (ctx) => {
 				const user = requireUser(ctx);
 				const referenceId = ctx.body.referenceId ?? user.id;
-				await authorizeReference(ctx, user, referenceId, "upgrade", subsOptions);
+				const referenceType: SubscriptionReferenceType =
+					ctx.body.referenceType ?? (referenceId === user.id ? "user" : "custom");
+				await authorizeReference(ctx, user, referenceId, referenceType, "upgrade", subsOptions);
 
 				const plans = await plansRef();
 				const plan = plans.byName.get(ctx.body.plan);
 				if (!plan) {
 					throw new APIError("NOT_FOUND", {
-						code: "SUBSCRIPTION_PLAN_NOT_FOUND",
+						code: $ERROR_CODES.SUBSCRIPTION_PLAN_NOT_FOUND.code,
 						message: `Plan "${ctx.body.plan}" is not configured.`,
 					});
 				}
@@ -205,53 +156,132 @@ export function buildSubscriptionEndpoints(
 					model: SUBSCRIPTION_MODEL,
 					where: [
 						{ field: "referenceId", value: referenceId },
-						...(plan.group ? [{ field: "group", value: plan.group }] : []),
+						{ field: "referenceType", value: referenceType },
+						{ field: "group", value: plan.group ?? null },
 					],
 				});
-				const liveActive = existingActive.find(
-					(row) => row.status === "active" || row.status === "frozen" || row.status === "past_due",
+				const defaultTrialEligible = !existingActive.some(
+					(row) =>
+						row.trialStart instanceof Date ||
+						row.trialEnd instanceof Date ||
+						row.status === "trial_pending" ||
+						row.status === "trialing",
 				);
+				const trialEligible =
+					plan.trialPeriodDays === undefined
+						? false
+						: subsOptions.isTrialEligible
+							? await subsOptions.isTrialEligible(
+									{
+										user,
+										referenceId,
+										referenceType,
+										plan,
+										previousSubscriptions: existingActive,
+										defaultEligible: defaultTrialEligible,
+									},
+									ctx,
+								)
+							: defaultTrialEligible;
+				const liveActive = existingActive.find((row) => isManageableSubscriptionStatus(row.status));
 				if (liveActive) {
 					throw new APIError("CONFLICT", {
-						code: "SUBSCRIPTION_ALREADY_ACTIVE",
+						code: $ERROR_CODES.SUBSCRIPTION_ALREADY_ACTIVE.code,
 						message: plan.group
-							? `An active subscription already exists in plan group "${plan.group}". Cancel it before upgrading.`
-							: "An active subscription already exists. Cancel it before upgrading.",
+							? `An active subscription already exists in plan group "${plan.group}". Use the change-plan endpoint to move it.`
+							: "An active subscription already exists. Use the change-plan endpoint to move it.",
 					});
 				}
 
-				const now = Date.now();
-				const reuseCandidate = existingActive.find(
-					(row) =>
-						row.plan === plan.name &&
-						row.status === "incomplete" &&
-						row.createdAt instanceof Date &&
-						now - row.createdAt.getTime() < UPGRADE_IDEMPOTENCY_WINDOW_MS,
-				);
-				if (reuseCandidate) {
+				const activeSlotKey = subscriptionSlotKey(referenceType, referenceId, plan.group);
+				const reservation = await resumeOrReserveCheckoutSlot({
+					client,
+					adapter,
+					candidates: existingActive,
+					activeSlotKey,
+					planName: plan.name,
+					now: Date.now(),
+					log: getLogger(ctx),
+					createReservation: async () => {
+						const { consumerId } = await ensureConsumerForUser(
+							options,
+							{ context: ctx.context },
+							user,
+						);
+						return {
+							consumerId,
+							data: {
+								referenceId,
+								referenceType,
+								activeSlotKey,
+								streampaySubscriptionId: null,
+								plan: plan.name,
+								planVersion: plan.version ?? null,
+								productId: plan.productId,
+								group: plan.group ?? null,
+								streampayConsumerId: consumerId,
+								streampayPaymentLinkId: null,
+								status: "incomplete",
+								providerStatus: null,
+								billingStatus: "current",
+								amountInSmallestUnit: plan.priceInSmallestUnit,
+								originalAmountInSmallestUnit: plan.priceInSmallestUnit,
+								currency: plan.currency ?? "SAR",
+								billingInterval: plan.billingInterval,
+								billingIntervalCount: plan.billingIntervalCount ?? 1,
+								periodStart: null,
+								periodEnd: null,
+								currentCycleNumber: null,
+								trialStart: null,
+								trialEnd: null,
+								cancelAtPeriodEnd: false,
+								cancelAt: null,
+								cancelScheduledAt: null,
+								canceledAt: null,
+								pendingPlan: null,
+								pendingProductId: null,
+								pendingPlanEffectiveAt: null,
+								endedAt: null,
+								frozenAt: null,
+								freezeEndAt: null,
+								providerUpdatedAt: null,
+								syncedAt: null,
+								createdAt: new Date(),
+								updatedAt: new Date(),
+							} satisfies Omit<Subscription, "id">,
+						};
+					},
+				});
+				if (reservation.kind === "recovered") {
 					return ctx.json({
-						subscriptionId: reuseCandidate.id,
+						subscriptionId: reservation.row.id,
+						url: reservation.url,
+						redirect: true,
 						reused: true,
-						status: reuseCandidate.status,
-						plan: reuseCandidate.plan,
+						status: reservation.row.status,
+						plan: reservation.row.plan,
 					});
 				}
-
-				const ensureCtx = { context: ctx.context };
-				const { consumerId } = await ensureConsumerForUser(options, ensureCtx, user);
+				const { row, consumerId } = reservation;
 
 				const linkInput: CreatePaymentLinkDto = {
 					name: `Subscription — ${plan.name}`,
+					currency: plan.currency ?? "SAR",
 					items: [{ product_id: plan.productId, quantity: 1, allow_custom_quantity: false }],
 					max_number_of_payments: 1,
 					organization_consumer_id: consumerId,
 					custom_metadata: {
 						[PLAN_NAME_METADATA_KEY]: plan.name,
 						[REFERENCE_ID_METADATA_KEY]: referenceId,
+						[REFERENCE_TYPE_METADATA_KEY]: referenceType,
+						[SUBSCRIPTION_ROW_ID_METADATA_KEY]: row.id,
 					},
 				};
 				if (ctx.body.successUrl) linkInput.success_redirect_url = ctx.body.successUrl;
 				if (ctx.body.failureUrl) linkInput.failure_redirect_url = ctx.body.failureUrl;
+				if (plan.trialPeriodDays !== undefined && trialEligible) {
+					linkInput.trial_period_days = plan.trialPeriodDays;
+				}
 
 				let url: string | null;
 				let paymentLinkId: string;
@@ -265,6 +295,12 @@ export function buildSubscriptionEndpoints(
 					paymentLinkId = link.id;
 					url = client.getPaymentUrl(link);
 				} catch (err) {
+					await deleteReservedSubscription(
+						adapter,
+						row.id,
+						getLogger(ctx),
+						"createPaymentLink cleanup",
+					);
 					toAPIError(
 						{
 							logPrefix: `upgradeSubscription failed for plan=${plan.name} ref=${referenceId}:`,
@@ -277,31 +313,57 @@ export function buildSubscriptionEndpoints(
 
 				if (!url) {
 					getLogger(ctx).error(`createPaymentLink returned link=${paymentLinkId} with no url.`);
+					try {
+						await adapter.update({
+							model: SUBSCRIPTION_MODEL,
+							update: {
+								streampayPaymentLinkId: paymentLinkId,
+								status: "incomplete_expired",
+								activeSlotKey: null,
+								updatedAt: new Date(),
+							},
+							where: [{ field: "id", value: row.id }],
+						});
+					} catch (persistenceError) {
+						const message =
+							persistenceError instanceof Error
+								? persistenceError.message
+								: String(persistenceError);
+						getLogger(ctx).error(
+							`failed to mark unusable payment link=${paymentLinkId} expired for row=${row.id}: ${message}`,
+						);
+						await deleteReservedSubscription(
+							adapter,
+							row.id,
+							getLogger(ctx),
+							"unusable payment link cleanup",
+						);
+					}
 					throw new APIError("INTERNAL_SERVER_ERROR", {
 						message: "Payment link was created but no URL was returned.",
 					});
 				}
 
-				const row = await adapter.create<Subscription>({
-					model: SUBSCRIPTION_MODEL,
-					data: {
-						referenceId,
-						plan: plan.name,
-						group: plan.group ?? null,
-						streampayConsumerId: consumerId,
-						status: "incomplete",
-						amountHalalat: plan.priceHalalat,
-						currency: "SAR",
-						billingInterval: plan.billingInterval,
-						billingIntervalCount: plan.billingIntervalCount ?? 1,
-						cancelAtPeriodEnd: false,
-						createdAt: new Date(),
-						updatedAt: new Date(),
-					},
-				});
+				let updatedRow: Subscription | null = null;
+				try {
+					updatedRow = await adapter.update<Subscription>({
+						model: SUBSCRIPTION_MODEL,
+						update: {
+							streampayPaymentLinkId: paymentLinkId,
+							updatedAt: new Date(),
+						},
+						where: [{ field: "id", value: row.id }],
+					});
+				} catch (persistenceError) {
+					const message =
+						persistenceError instanceof Error ? persistenceError.message : String(persistenceError);
+					getLogger(ctx).error(
+						`failed to persist payment link=${paymentLinkId} for row=${row.id}: ${message}. Protected checkout metadata will reconcile the row from the webhook.`,
+					);
+				}
 
 				return ctx.json({
-					subscriptionId: row.id,
+					subscriptionId: updatedRow?.id ?? row.id,
 					url,
 					redirect: true,
 					reused: false,
@@ -327,11 +389,18 @@ export function buildSubscriptionEndpoints(
 				});
 				if (!row) {
 					throw new APIError("NOT_FOUND", {
-						code: "SUBSCRIPTION_NOT_FOUND",
+						code: $ERROR_CODES.SUBSCRIPTION_NOT_FOUND.code,
 						message: "Subscription not found.",
 					});
 				}
-				await authorizeReference(ctx, user, row.referenceId, "read", subsOptions);
+				await authorizeReference(
+					ctx,
+					user,
+					row.referenceId,
+					row.referenceType ?? "user",
+					"read",
+					subsOptions,
+				);
 
 				if (row.status !== "incomplete") {
 					return ctx.json({
@@ -352,32 +421,33 @@ export function buildSubscriptionEndpoints(
 						);
 						return ctx.json({ subscription: row, synced: false });
 					}
-					const list = await client.listSubscriptions({ page: 1, size: 100 });
-					const match = list.data?.find(
-						(sub) =>
-							sub.organization_consumer_id === row.streampayConsumerId &&
-							sub.status !== "CANCELED" &&
-							Array.isArray(sub.items) &&
-							sub.items.some((item) => subscriptionItemProductId(item) === plan.productId),
-					);
+					let page = 1;
+					let match: SubscriptionDetailed | undefined;
+					do {
+						const list = await client.listSubscriptions({
+							page,
+							size: 100,
+							organization_consumer_id: row.streampayConsumerId,
+						});
+						match = list.data?.find((sub) =>
+							isCheckoutSubscriptionCandidate(sub, row, plan.productId),
+						);
+						if (match || !list.pagination?.has_next_page) break;
+						page += 1;
+					} while (page <= 1000);
 					if (!match?.id) {
 						return ctx.json({ subscription: row, synced: false });
 					}
 					const updated = await adapter.update<Subscription>({
 						model: SUBSCRIPTION_MODEL,
 						update: {
-							streampaySubscriptionId: match.id,
-							status: match.status === "ACTIVE" ? "active" : "incomplete",
-							periodStart: match.current_period_start ? new Date(match.current_period_start) : null,
-							periodEnd: match.current_period_end ? new Date(match.current_period_end) : null,
-							amountHalalat: (() => {
-								if (!match.amount) return row.amountHalalat;
-								try {
-									return StreamPayAmount.toHalalat(match.amount);
-								} catch {
-									return row.amountHalalat;
-								}
-							})(),
+							...projectSubscriptionFields(match),
+							planVersion: plan.version ?? null,
+							productId: plan.productId,
+							billingStatus: "current",
+							activeSlotKey:
+								row.activeSlotKey ??
+								subscriptionSlotKey(row.referenceType ?? "user", row.referenceId, row.group),
 							updatedAt: new Date(),
 						},
 						where: [{ field: "id", value: row.id }],
@@ -401,67 +471,48 @@ export function buildSubscriptionEndpoints(
 				use: [sessionMiddleware],
 			},
 			async (ctx) => {
-				const user = requireUser(ctx);
-				const adapter = getAdapter(ctx);
-				const row = await findOwnedSubscription(
+				const { adapter, row } = await requireConfirmedOwnedSubscription(
 					ctx,
-					user,
 					ctx.body.subscriptionId,
 					subsOptions,
 					"cancel",
 				);
-				if (row.status === "canceled") {
-					throw new APIError("BAD_REQUEST", {
-						code: "SUBSCRIPTION_ALREADY_CANCELED",
-						message: "Subscription is already canceled.",
-					});
-				}
-				if (row.cancelAtPeriodEnd) {
-					throw new APIError("BAD_REQUEST", {
-						code: "SUBSCRIPTION_ALREADY_SCHEDULED_CANCEL",
-						message: "Subscription is already scheduled to cancel at period end.",
-					});
-				}
-				if (!row.streampaySubscriptionId) {
-					throw new APIError("BAD_REQUEST", {
-						code: "SUBSCRIPTION_INVALID_STATE",
-						message: "Subscription has not been confirmed by StreamPay yet.",
-					});
-				}
-
-				if (ctx.body.cancelAtPeriodEnd) {
-					try {
-						const stream = await client.getSubscription(row.streampaySubscriptionId);
-						const patch: SubscriptionUpdate = {
-							...echoSubscriptionPatch(stream),
-							until_cycle_number: stream.current_cycle_number ?? 1,
-						};
-						const result = await client.updateSubscription(row.streampaySubscriptionId, patch);
-						await adapter.update({
-							model: SUBSCRIPTION_MODEL,
-							update: {
-								cancelAtPeriodEnd: true,
-								updatedAt: new Date(),
-							},
-							where: [{ field: "id", value: row.id }],
-						});
-						return ctx.json(result);
-					} catch (err) {
-						toAPIError(
-							{
-								logPrefix: `cancelAtPeriodEnd failed for row=${row.id}:`,
-								userMessage: "Subscription cancel-at-period-end failed.",
-							},
-							err,
-							getLogger(ctx),
-						);
-					}
-				}
 
 				const payload: SubscriptionCancel = {
 					cancel_related_invoices: ctx.body.cancelRelatedInvoices ?? false,
 				};
 				try {
+					const stream = await client.getSubscription(row.streampaySubscriptionId);
+					if (stream.status === "CANCELED") {
+						await adapter.update({
+							model: SUBSCRIPTION_MODEL,
+							update: projectSubscriptionAgainstExisting(row, stream),
+							where: [{ field: "id", value: row.id }],
+						});
+						return ctx.json(stream);
+					}
+					if (ctx.body.cancelAtPeriodEnd === false && stream.status === "ACTIVE") {
+						throw new APIError("BAD_REQUEST", {
+							code: $ERROR_CODES.SUBSCRIPTION_IMMEDIATE_CANCEL_UNSUPPORTED.code,
+							message:
+								"StreamPay cancels active subscriptions at period end. Immediate cancellation is only available for inactive or trial subscriptions.",
+						});
+					}
+					if (stream.cancel_at_period_end && !ctx.body.cancelRelatedInvoices) {
+						await adapter.update({
+							model: SUBSCRIPTION_MODEL,
+							update: projectSubscriptionAgainstExisting(row, stream),
+							where: [{ field: "id", value: row.id }],
+						});
+						return ctx.json(stream);
+					}
+					if (ctx.body.cancelAtPeriodEnd === true && stream.status !== "ACTIVE") {
+						throw new APIError("BAD_REQUEST", {
+							code: $ERROR_CODES.SUBSCRIPTION_PERIOD_END_CANCEL_UNSUPPORTED.code,
+							message:
+								"StreamPay only schedules period-end cancellation for active subscriptions. This subscription would be canceled immediately.",
+						});
+					}
 					const result = await client.cancelSubscription(row.streampaySubscriptionId, payload);
 					await syncSubscriptionFromUpstream(
 						client,
@@ -469,6 +520,7 @@ export function buildSubscriptionEndpoints(
 						row.streampaySubscriptionId,
 						getLogger(ctx),
 						"cancelSubscription",
+						result,
 					);
 					return ctx.json(result);
 				} catch (err) {
@@ -492,163 +544,193 @@ export function buildSubscriptionEndpoints(
 				use: [sessionMiddleware],
 			},
 			async (ctx) => {
-				const user = requireUser(ctx);
-				const adapter = getAdapter(ctx);
+				const { adapter, row } = await requireConfirmedOwnedSubscription(
+					ctx,
+					ctx.body.subscriptionId,
+					subsOptions,
+					"change-plan",
+				);
 				const plans = await plansRef();
 				const nextPlan = plans.byName.get(ctx.body.plan);
 				if (!nextPlan) {
 					throw new APIError("NOT_FOUND", {
-						code: "SUBSCRIPTION_PLAN_NOT_FOUND",
+						code: $ERROR_CODES.SUBSCRIPTION_PLAN_NOT_FOUND.code,
 						message: `Plan "${ctx.body.plan}" is not configured.`,
 					});
 				}
-
-				const existing = await adapter.findMany<Subscription>({
-					model: SUBSCRIPTION_MODEL,
-					where: [
-						{ field: "referenceId", value: user.id },
-						...(nextPlan.group ? [{ field: "group", value: nextPlan.group }] : []),
-					],
-				});
-				const row = existing.find(
-					(r) => r.status === "active" || r.status === "frozen" || r.status === "past_due",
-				);
-				if (!row) {
-					throw new APIError("NOT_FOUND", {
-						code: "SUBSCRIPTION_NOT_FOUND",
-						message: "No active subscription to change plan from.",
-					});
-				}
-				await authorizeReference(ctx, user, row.referenceId, "change-plan", subsOptions);
-				if (!row.streampaySubscriptionId) {
-					throw new APIError("BAD_REQUEST", {
-						code: "SUBSCRIPTION_INVALID_STATE",
-						message: "Subscription has not been confirmed by StreamPay yet.",
-					});
-				}
-				if (row.plan === nextPlan.name) {
-					throw new APIError("BAD_REQUEST", {
-						code: "SUBSCRIPTION_ALREADY_ON_PLAN",
-						message: `Already on plan "${nextPlan.name}".`,
-					});
-				}
-
-				const mode = ctx.body.mode ?? "at_period_end";
-
-				if (mode === "immediate") {
-					try {
-						const stream = await client.getSubscription(row.streampaySubscriptionId);
-						const existingCoupons: SubscriptionUpdate["coupons"] = [];
-						for (const c of stream.coupon_calculation_metadata?.coupons ?? []) {
-							if (c.coupon_id) existingCoupons.push(c.coupon_id);
-						}
-						const patch: SubscriptionUpdate = {
-							items: [{ product_id: nextPlan.productId, quantity: 1 }],
-							coupons: existingCoupons,
-						};
-						const result = await client.updateSubscription(row.streampaySubscriptionId, patch);
+				try {
+					const stream = await client.getSubscription(row.streampaySubscriptionId);
+					const currentPlan = configuredPlanForSubscription(stream, plans);
+					const currentGroup = currentPlan?.group ?? row.group;
+					if (currentGroup !== (nextPlan.group ?? null)) {
+						throw new APIError("BAD_REQUEST", {
+							code: $ERROR_CODES.SUBSCRIPTION_PLAN_GROUP_MISMATCH.code,
+							message:
+								"A subscription can only change to another plan in the same configured group.",
+						});
+					}
+					if (stream.cancel_at_period_end) {
+						throw new APIError("CONFLICT", {
+							code: $ERROR_CODES.SUBSCRIPTION_ALREADY_SCHEDULED_CANCEL.code,
+							message:
+								"The subscription is scheduled to cancel. Uncancel it before scheduling a plan change.",
+						});
+					}
+					const currentProductIsRequestedPlan = stream.items?.some(
+						(item) => subscriptionItemProductId(item) === nextPlan.productId,
+					);
+					if (currentProductIsRequestedPlan && !stream.pending_change) {
+						throw new APIError("BAD_REQUEST", {
+							code: $ERROR_CODES.SUBSCRIPTION_ALREADY_ON_PLAN.code,
+							message: `Already on plan "${nextPlan.name}".`,
+						});
+					}
+					const pendingTargets = stream.pending_change?.target_items ?? [];
+					const pendingTargetIsRequestedPlan = pendingTargets.some(
+						(item) => subscriptionItemProductId(item) === nextPlan.productId,
+					);
+					if (pendingTargetIsRequestedPlan) {
 						await adapter.update({
 							model: SUBSCRIPTION_MODEL,
 							update: {
-								plan: nextPlan.name,
-								group: nextPlan.group ?? null,
-								updatedAt: new Date(),
+								...projectSubscriptionAgainstExisting(row, stream),
+								pendingPlan: nextPlan.name,
+								pendingProductId: nextPlan.productId,
+								pendingPlanEffectiveAt: stream.pending_change?.effective_at
+									? new Date(stream.pending_change.effective_at)
+									: null,
 							},
 							where: [{ field: "id", value: row.id }],
 						});
-						await syncSubscriptionFromUpstream(
-							client,
-							adapter,
-							row.streampaySubscriptionId,
-							getLogger(ctx),
-							"changeSubscriptionPlan",
-						);
 						return ctx.json({
-							mode: "immediate",
-							subscription: result,
+							mode: "at_period_end",
+							subscriptionId: row.id,
 							plan: nextPlan.name,
+							effectiveAt: stream.pending_change?.effective_at ?? null,
+							pendingChange: stream.pending_change,
+							reused: true,
 						});
-					} catch (err) {
-						toAPIError(
-							{
-								logPrefix: `change-plan (immediate) failed for row=${row.id}:`,
-								userMessage: "Plan change failed.",
-							},
-							err,
-							getLogger(ctx),
-						);
 					}
-				}
-
-				try {
-					const stream = await client.getSubscription(row.streampaySubscriptionId);
+					if (stream.pending_change) {
+						throw new APIError("CONFLICT", {
+							code: $ERROR_CODES.SUBSCRIPTION_PLAN_CHANGE_ALREADY_SCHEDULED.code,
+							message:
+								"A different plan change is already scheduled. Cancel it before scheduling another.",
+						});
+					}
 					const patch: SubscriptionUpdate = {
-						...echoSubscriptionPatch(stream),
-						until_cycle_number: stream.current_cycle_number ?? 1,
+						items: [{ product_id: nextPlan.productId, quantity: 1 }],
+						coupons: subscriptionCouponIds(stream),
+						recurring_interval: nextPlan.billingInterval,
+						recurring_interval_count: nextPlan.billingIntervalCount ?? 1,
 					};
-					await client.updateSubscription(row.streampaySubscriptionId, patch);
+					const result = await client.updateSubscription(row.streampaySubscriptionId, patch);
+					const effectiveAt =
+						result.pending_change?.effective_at ?? result.current_period_end ?? null;
 					await adapter.update({
 						model: SUBSCRIPTION_MODEL,
 						update: {
-							cancelAtPeriodEnd: true,
+							...projectSubscriptionAgainstExisting(row, result),
+							pendingPlan: nextPlan.name,
+							pendingProductId: nextPlan.productId,
+							pendingPlanEffectiveAt: effectiveAt ? new Date(effectiveAt) : null,
 							updatedAt: new Date(),
 						},
 						where: [{ field: "id", value: row.id }],
 					});
-
-					const ensureCtx = { context: ctx.context };
-					const { consumerId } = await ensureConsumerForUser(options, ensureCtx, user);
-					const linkInput: CreatePaymentLinkDto = {
-						name: `Plan change — ${nextPlan.name}`,
-						items: [
-							{
-								product_id: nextPlan.productId,
-								quantity: 1,
-								allow_custom_quantity: false,
-							},
-						],
-						max_number_of_payments: 1,
-						organization_consumer_id: consumerId,
-						custom_metadata: {
-							[PLAN_NAME_METADATA_KEY]: nextPlan.name,
-							[REFERENCE_ID_METADATA_KEY]: user.id,
-						},
-					};
-					if (ctx.body.successUrl) linkInput.success_redirect_url = ctx.body.successUrl;
-					if (ctx.body.failureUrl) linkInput.failure_redirect_url = ctx.body.failureUrl;
-					const link = await client.createPaymentLink(linkInput);
-					const url = client.getPaymentUrl(link);
-
-					const nextRow = await adapter.create<Subscription>({
-						model: SUBSCRIPTION_MODEL,
-						data: {
-							referenceId: user.id,
-							plan: nextPlan.name,
-							group: nextPlan.group ?? null,
-							streampayConsumerId: consumerId,
-							status: "incomplete",
-							amountHalalat: nextPlan.priceHalalat,
-							currency: "SAR",
-							billingInterval: nextPlan.billingInterval,
-							billingIntervalCount: nextPlan.billingIntervalCount ?? 1,
-							cancelAtPeriodEnd: false,
-							createdAt: new Date(),
-							updatedAt: new Date(),
-						},
-					});
-
 					return ctx.json({
 						mode: "at_period_end",
-						currentSubscriptionId: row.id,
-						nextSubscriptionId: nextRow.id,
-						url,
+						subscriptionId: row.id,
 						plan: nextPlan.name,
+						effectiveAt,
+						pendingChange: result.pending_change ?? null,
+						subscription: result,
+						reused: false,
 					});
 				} catch (err) {
 					toAPIError(
 						{
 							logPrefix: `change-plan (at_period_end) failed for row=${row.id}:`,
 							userMessage: "Plan change scheduling failed.",
+						},
+						err,
+						getLogger(ctx),
+					);
+				}
+			},
+		),
+
+		cancelSubscriptionPlanChange: createAuthEndpoint(
+			"/subscription/change-plan/cancel",
+			{
+				method: "POST",
+				body: UnfreezeBody,
+				use: [sessionMiddleware],
+			},
+			async (ctx) => {
+				const { adapter, row } = await requireConfirmedOwnedSubscription(
+					ctx,
+					ctx.body.subscriptionId,
+					subsOptions,
+					"cancel-plan-change",
+				);
+
+				try {
+					await client.deletePendingSubscriptionChange(row.streampaySubscriptionId);
+					const stream = await client.getSubscription(row.streampaySubscriptionId);
+					await adapter.update({
+						model: SUBSCRIPTION_MODEL,
+						update: {
+							...projectSubscriptionAgainstExisting(row, stream),
+							pendingPlan: null,
+							pendingProductId: null,
+							pendingPlanEffectiveAt: null,
+						},
+						where: [{ field: "id", value: row.id }],
+					});
+					return ctx.json({ canceled: true, subscription: stream });
+				} catch (err) {
+					toAPIError(
+						{
+							logPrefix: `cancel plan change failed for row=${row.id}:`,
+							userMessage: "Canceling the scheduled plan change failed.",
+						},
+						err,
+						getLogger(ctx),
+					);
+				}
+			},
+		),
+
+		uncancelSubscription: createAuthEndpoint(
+			"/subscription/uncancel",
+			{
+				method: "POST",
+				body: UnfreezeBody,
+				use: [sessionMiddleware],
+			},
+			async (ctx) => {
+				const { adapter, row } = await requireConfirmedOwnedSubscription(
+					ctx,
+					ctx.body.subscriptionId,
+					subsOptions,
+					"uncancel",
+				);
+
+				try {
+					await client.uncancelSubscription(row.streampaySubscriptionId);
+					const stream = await client.getSubscription(row.streampaySubscriptionId);
+					await adapter.update({
+						model: SUBSCRIPTION_MODEL,
+						update: projectSubscriptionAgainstExisting(row, stream),
+						where: [{ field: "id", value: row.id }],
+					});
+					return ctx.json({ uncanceled: true, subscription: stream });
+				} catch (err) {
+					toAPIError(
+						{
+							logPrefix: `uncancel subscription failed for row=${row.id}:`,
+							userMessage: "Restoring subscription renewal failed.",
 						},
 						err,
 						getLogger(ctx),
@@ -665,27 +747,12 @@ export function buildSubscriptionEndpoints(
 				use: [sessionMiddleware],
 			},
 			async (ctx) => {
-				const user = requireUser(ctx);
-				const adapter = getAdapter(ctx);
-				const row = await findOwnedSubscription(
+				const { adapter, row } = await requireConfirmedOwnedSubscription(
 					ctx,
-					user,
 					ctx.body.subscriptionId,
 					subsOptions,
 					"freeze",
 				);
-				if (row.status !== "active") {
-					throw new APIError("BAD_REQUEST", {
-						code: "SUBSCRIPTION_INVALID_STATE",
-						message: "Only active subscriptions can be frozen.",
-					});
-				}
-				if (!row.streampaySubscriptionId) {
-					throw new APIError("BAD_REQUEST", {
-						code: "SUBSCRIPTION_INVALID_STATE",
-						message: "Subscription has not been confirmed by StreamPay yet.",
-					});
-				}
 
 				const payload: FreezeSubscriptionCreateRequest = {
 					freeze_start_datetime: ctx.body.freezeStartDatetime,
@@ -728,27 +795,12 @@ export function buildSubscriptionEndpoints(
 				use: [sessionMiddleware],
 			},
 			async (ctx) => {
-				const user = requireUser(ctx);
-				const adapter = getAdapter(ctx);
-				const row = await findOwnedSubscription(
+				const { adapter, row } = await requireConfirmedOwnedSubscription(
 					ctx,
-					user,
 					ctx.body.subscriptionId,
 					subsOptions,
 					"unfreeze",
 				);
-				if (row.status !== "frozen") {
-					throw new APIError("BAD_REQUEST", {
-						code: "SUBSCRIPTION_NOT_FROZEN",
-						message: "Subscription is not currently frozen.",
-					});
-				}
-				if (!row.streampaySubscriptionId) {
-					throw new APIError("BAD_REQUEST", {
-						code: "SUBSCRIPTION_INVALID_STATE",
-						message: "Subscription has not been confirmed by StreamPay yet.",
-					});
-				}
 
 				const nowMs = Date.now();
 				try {
@@ -763,7 +815,7 @@ export function buildSubscriptionEndpoints(
 					});
 					if (!active?.id || !active.freeze_start_datetime) {
 						throw new APIError("BAD_REQUEST", {
-							code: "SUBSCRIPTION_NOT_FROZEN",
+							code: $ERROR_CODES.SUBSCRIPTION_FREEZE_NOT_ACTIVE.code,
 							message: "No active freeze period found to cancel.",
 						});
 					}
@@ -794,104 +846,51 @@ export function buildSubscriptionEndpoints(
 			},
 		),
 
-		listSubscriptions: createAuthEndpoint(
-			"/subscription/list",
+		cancelSubscriptionFreeze: createAuthEndpoint(
+			"/subscription/freeze/cancel",
 			{
-				method: "GET",
+				method: "POST",
+				body: CancelFreezeBody,
 				use: [sessionMiddleware],
 			},
 			async (ctx) => {
-				const user = requireUser(ctx);
-				const adapter = getAdapter(ctx);
-				const rows = await adapter.findMany<Subscription>({
-					model: SUBSCRIPTION_MODEL,
-					where: [{ field: "referenceId", value: user.id }],
-				});
-				const plans = await plansRef();
-				return ctx.json(
-					rows.map((row) => ({
-						...row,
-						plan: plans.byName.get(row.plan) ?? null,
-					})),
+				const { adapter, row } = await requireConfirmedOwnedSubscription(
+					ctx,
+					ctx.body.subscriptionId,
+					subsOptions,
+					"cancel-freeze",
 				);
-			},
-		),
 
-		currentSubscription: createAuthEndpoint(
-			"/subscription/current",
-			{
-				method: "GET",
-				query: CurrentQuery,
-				use: [sessionMiddleware],
-			},
-			async (ctx) => {
-				const user = requireUser(ctx);
-				const adapter = getAdapter(ctx);
-				const where: Array<{ field: string; value: unknown }> = [
-					{ field: "referenceId", value: user.id },
-				];
-				if (ctx.query?.group) {
-					where.push({ field: "group", value: ctx.query.group });
+				try {
+					const freezes = await client.listSubscriptionFreezes(row.streampaySubscriptionId);
+					if (!freezes.data?.some((freeze) => freeze.id === ctx.body.freezeId)) {
+						return ctx.json({ canceled: true, freezeId: ctx.body.freezeId, reused: true });
+					}
+					await client.deleteSubscriptionFreeze(row.streampaySubscriptionId, ctx.body.freezeId);
+					await syncSubscriptionFromUpstream(
+						client,
+						adapter,
+						row.streampaySubscriptionId,
+						getLogger(ctx),
+						"cancelSubscriptionFreeze",
+					);
+					return ctx.json({ canceled: true, freezeId: ctx.body.freezeId, reused: false });
+				} catch (err) {
+					if (isAlreadyCanceledFreezeError(err)) {
+						getLogger(ctx).info(
+							`cancel subscription freeze reused provider tombstone for row=${row.id} freeze=${ctx.body.freezeId}.`,
+						);
+						return ctx.json({ canceled: true, freezeId: ctx.body.freezeId, reused: true });
+					}
+					toAPIError(
+						{
+							logPrefix: `cancel subscription freeze failed for row=${row.id}:`,
+							userMessage: "Canceling the subscription freeze failed.",
+						},
+						err,
+						getLogger(ctx),
+					);
 				}
-				const rows = await adapter.findMany<Subscription>({
-					model: SUBSCRIPTION_MODEL,
-					where,
-				});
-				const live = rows.find(
-					(row) => row.status === "active" || row.status === "frozen" || row.status === "past_due",
-				);
-				if (!live) return ctx.json(null);
-				const plans = await plansRef();
-				return ctx.json({
-					...live,
-					plan: plans.byName.get(live.plan) ?? null,
-				});
-			},
-		),
-
-		hasSubscriptionFeature: createAuthEndpoint(
-			"/subscription/has-feature",
-			{
-				method: "GET",
-				query: HasFeatureQuery,
-				use: [sessionMiddleware],
-			},
-			async (ctx) => {
-				const user = requireUser(ctx);
-				const adapter = getAdapter(ctx);
-				const where: Array<{ field: string; value: unknown }> = [
-					{ field: "referenceId", value: user.id },
-				];
-				if (ctx.query.group) where.push({ field: "group", value: ctx.query.group });
-				const rows = await adapter.findMany<Subscription>({ model: SUBSCRIPTION_MODEL, where });
-				const plans = await plansRef();
-				const live = rows.find((row) => row.status === "active" || row.status === "frozen");
-				if (!live) return ctx.json({ hasFeature: false });
-				const plan = plans.byName.get(live.plan);
-				return ctx.json({ hasFeature: hasFeature(live, plan, ctx.query.feature) });
-			},
-		),
-
-		checkSubscriptionLimit: createAuthEndpoint(
-			"/subscription/check-limit",
-			{
-				method: "GET",
-				query: CheckLimitQuery,
-				use: [sessionMiddleware],
-			},
-			async (ctx) => {
-				const user = requireUser(ctx);
-				const adapter = getAdapter(ctx);
-				const where: Array<{ field: string; value: unknown }> = [
-					{ field: "referenceId", value: user.id },
-				];
-				if (ctx.query.group) where.push({ field: "group", value: ctx.query.group });
-				const rows = await adapter.findMany<Subscription>({ model: SUBSCRIPTION_MODEL, where });
-				const plans = await plansRef();
-				const live = rows.find((row) => row.status === "active" || row.status === "frozen");
-				if (!live) return ctx.json({ allowed: false, limit: 0, remaining: 0 });
-				const plan = plans.byName.get(live.plan);
-				return ctx.json(checkLimit(live, plan, ctx.query.feature, ctx.query.count));
 			},
 		),
 	};

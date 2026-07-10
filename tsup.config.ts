@@ -8,6 +8,6 @@ export default defineConfig({
   sourcemap: true,
   treeshake: true,
   splitting: false,
-  target: "node18",
+  target: "node20",
   external: ["better-auth", "@streamsdk/typescript", "zod"],
 });
