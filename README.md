@@ -2,6 +2,16 @@
 
 Add StreamPay payments and subscriptions to a Better Auth app.
 
+## Agent skill
+
+Install the included integration skill:
+
+```bash
+npx skills add Genie-sa/better-auth-streampay
+```
+
+Then ask your coding agent to add StreamPay to your Better Auth app.
+
 The plugin can:
 
 - create StreamPay consumers
@@ -452,16 +462,6 @@ import {
   verifyWebhook,
 } from "better-auth-streampay";
 ```
-
-## Agent skill
-
-Install the included integration skill:
-
-```bash
-npx skills add Genie-sa/better-auth-streampay
-```
-
-Then ask your coding agent to add StreamPay to your Better Auth app.
 
 ## License
 
