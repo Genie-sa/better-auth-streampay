@@ -93,8 +93,8 @@ const CheckoutRequestBody = z.object({
 						quantity: z.number().int().positive().optional(),
 					}),
 				)
-				.nonempty("`products` must contain at least one item."),
-			z.array(z.string().uuid()).nonempty("`products` must contain at least one item."),
+				.min(1, "`products` must contain at least one item."),
+			z.array(z.string().uuid()).min(1, "`products` must contain at least one item."),
 			z.string().uuid(),
 		])
 		.optional(),
