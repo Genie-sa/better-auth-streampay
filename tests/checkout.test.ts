@@ -249,6 +249,31 @@ describe("checkout plugin", () => {
 			expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
 		});
 
+		it("fails privately when resolveCheckout returns invalid payment fields", async () => {
+			const resolvedHandler = unwrapHandler<CheckoutResult>(
+				checkout({
+					resolveCheckout: () => ({
+						products: [{ productId: "not-a-uuid" }],
+					}),
+				})(createTestStreamPayOptions({ client: mockClient })).endpoints.checkout,
+			);
+			const ctx = createMockContext({ body: { referenceId: "order-1" } });
+
+			await expect(resolvedHandler(ctx)).rejects.toMatchObject({
+				code: "INTERNAL_SERVER_ERROR",
+				data: { message: "Checkout resolution produced invalid parameters." },
+			});
+			expect(ctx.context.logger.error).toHaveBeenCalledWith(
+				expect.stringContaining(
+					"[streampay] resolved checkout validation failed at: products.0.productId",
+				),
+			);
+			expect(ctx.context.logger.error).not.toHaveBeenCalledWith(
+				expect.stringContaining("not-a-uuid"),
+			);
+			expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
+		});
+
 		it("passes the exact provider payload to onCheckoutCreated", async () => {
 			const onCheckoutCreated = vi.fn();
 			const callbackHandler = unwrapHandler<CheckoutResult>(

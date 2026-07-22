@@ -218,6 +218,9 @@ Configuring `resolveCheckout` automatically makes product, pricing, coupon, expi
 redirect URL fields server-only. Requests that include those fields are rejected; without a
 resolver, the existing client-driven checkout behavior is unchanged.
 
+Invalid values returned by `resolveCheckout` produce a generic 500 response. Validation details are
+written to the server log without echoing the invalid values to the client.
+
 If `onCheckoutCreated` throws, checkout returns an error and the plugin attempts to deactivate the
 new payment link. Deactivation is best effort, so webhook handling should still reconcile unexpected
 links. Relative success and failure URLs resolve against the auth server; use absolute URLs when the

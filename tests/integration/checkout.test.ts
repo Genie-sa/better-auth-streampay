@@ -105,6 +105,31 @@ describe("checkout integration", () => {
 		);
 	});
 
+	it("returns 500 without calling StreamPay when resolved checkout fields are invalid", async () => {
+		const { auth, streamPayClient } = await createStreamPayTestInstance({
+			use: [
+				checkout({
+					resolveCheckout: () => ({
+						products: [{ productId: "not-a-uuid" }],
+					}),
+				}),
+			],
+		});
+
+		const response = await callAuthEndpoint(auth, "/checkout", {
+			method: "POST",
+			body: { referenceId: "order-invalid", redirect: false },
+		});
+
+		expect(response.status).toBe(500);
+		const responseBody = await readJson(response);
+		expect(responseBody).toMatchObject({
+			message: "Checkout resolution produced invalid parameters.",
+		});
+		expect(JSON.stringify(responseBody)).not.toContain("not-a-uuid");
+		expect(streamPayClient.createPaymentLink).not.toHaveBeenCalled();
+	});
+
 	it("deactivates checkout and preserves callback API errors through the real route", async () => {
 		const { auth, streamPayClient } = await createStreamPayTestInstance({
 			use: [

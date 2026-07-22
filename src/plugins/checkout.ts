@@ -209,13 +209,18 @@ function mergeCheckoutOverrides(
 	return effective;
 }
 
-function validateEffectiveCheckout(body: CheckoutParams): CheckoutParams {
+function validateEffectiveCheckout(body: CheckoutParams, logger: ScopedLogger): CheckoutParams {
 	const parsed = CheckoutBody.safeParse(body);
 	if (parsed.success) return parsed.data;
 
-	throw new APIError("BAD_REQUEST", {
-		code: "VALIDATION_ERROR",
-		message: parsed.error.issues[0]?.message ?? "Checkout parameters are invalid.",
+	const invalidPaths = [
+		...new Set(
+			parsed.error.issues.map((issue) => (issue.path.length > 0 ? issue.path.join(".") : "<root>")),
+		),
+	].join(", ");
+	logger.error(`resolved checkout validation failed at: ${invalidPaths}`);
+	throw new APIError("INTERNAL_SERVER_ERROR", {
+		message: "Checkout resolution produced invalid parameters.",
 	});
 }
 
@@ -310,7 +315,7 @@ export const checkout = (checkoutOptions: CheckoutOptions = {}) => {
 							}
 							effective = mergeCheckoutOverrides(ctx.body, overrides);
 						}
-						effective = validateEffectiveCheckout(effective);
+						effective = validateEffectiveCheckout(effective, getLogger(ctx));
 
 						const items = await resolveProducts(effective, checkoutOptions);
 						const consumerId = await resolveConsumerId(options, ctx, sessionUser);
