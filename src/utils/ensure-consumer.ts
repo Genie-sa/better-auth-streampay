@@ -1,5 +1,5 @@
 import type { ConsumerCreate } from "@streamsdk/typescript";
-import type { User } from "better-auth";
+import type { User, Where } from "better-auth";
 import { APIError } from "better-auth/api";
 import type {
 	ClaimExistingConsumerBy,
@@ -31,6 +31,9 @@ export interface StreamPayLoggerContext {
 
 export interface EnsureConsumerContext extends StreamPayLoggerContext {
 	context: StreamPayLoggerContext["context"] & {
+		adapter: {
+			findOne: <T = unknown>(input: { model: string; where: Where[] }) => Promise<T | null>;
+		};
 		internalAdapter: {
 			updateUser: (userId: string, data: Record<string, unknown>) => Promise<unknown>;
 		};
@@ -150,12 +153,17 @@ export async function ensureConsumerForUser(
 		if (isDuplicateConsumerError(err)) {
 			const reusedId = await resolveDuplicateConsumer(options, payload, ctx);
 			if (reusedId) {
+				await assertConsumerUnclaimed(ctx, reusedId, user.id);
 				try {
 					await options.client.updateConsumer(reusedId, { external_id: user.id });
 				} catch (backfillErr: unknown) {
 					getLogger(ctx).error(
 						`consumer external_id backfill failed for user=${user.id} consumer=${reusedId}: ${formatStreamPayError(backfillErr)}`,
 					);
+					throw new APIError("INTERNAL_SERVER_ERROR", {
+						code: "STREAMPAY_CONSUMER_LINK_WRITE_FAILED",
+						message: "StreamPay consumer linking failed. Please try again.",
+					});
 				}
 				await persistConsumerId(ctx, user.id, reusedId);
 				return { consumerId: reusedId, created: false };
@@ -171,11 +179,56 @@ export async function ensureConsumerForUser(
 	}
 }
 
+function consumerLinkUnavailable(): APIError {
+	return new APIError("INTERNAL_SERVER_ERROR", {
+		code: "STREAMPAY_CONSUMER_LINK_WRITE_FAILED",
+		message: "StreamPay consumer linking failed. Please try again.",
+	});
+}
+
+async function findConsumerOwner(
+	ctx: EnsureConsumerContext,
+	consumerId: string,
+): Promise<Record<string, unknown> | null> {
+	try {
+		return await ctx.context.adapter.findOne<Record<string, unknown>>({
+			model: "user",
+			where: [{ field: "streampayConsumerId", value: consumerId }],
+		});
+	} catch (err: unknown) {
+		getLogger(ctx).error(
+			`consumer ownership check failed for consumer=${consumerId}: ${formatStreamPayError(err)}`,
+		);
+		throw consumerLinkUnavailable();
+	}
+}
+
+async function assertConsumerUnclaimed(
+	ctx: EnsureConsumerContext,
+	consumerId: string,
+	userId: string,
+): Promise<void> {
+	const owner = await findConsumerOwner(ctx, consumerId);
+	if (!owner) return;
+
+	if (typeof owner.id !== "string") {
+		getLogger(ctx).error(`consumer ownership check returned a user without an id: ${consumerId}`);
+		throw consumerLinkUnavailable();
+	}
+	if (owner.id === userId) return;
+
+	throw new APIError("CONFLICT", {
+		code: "STREAMPAY_CONSUMER_LINK_CONFLICT",
+		message: "This StreamPay consumer is already linked to another account.",
+	});
+}
+
 async function persistConsumerId(
 	ctx: EnsureConsumerContext,
 	userId: string,
 	consumerId: string,
 ): Promise<void> {
+	await assertConsumerUnclaimed(ctx, consumerId, userId);
 	try {
 		await ctx.context.internalAdapter.updateUser(userId, {
 			streampayConsumerId: consumerId,
@@ -184,5 +237,7 @@ async function persistConsumerId(
 		getLogger(ctx).error(
 			`consumer link write failed for user=${userId}: ${formatStreamPayError(err)}`,
 		);
+		await assertConsumerUnclaimed(ctx, consumerId, userId);
+		throw consumerLinkUnavailable();
 	}
 }

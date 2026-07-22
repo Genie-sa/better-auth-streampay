@@ -7,8 +7,11 @@ export type { StreamPayHookContext } from "./hooks/consumer";
 export { type AdminOptions, admin } from "./plugins/admin";
 export {
 	CheckoutBody,
+	type CheckoutCreatedContext,
 	type CheckoutOptions,
+	type CheckoutOverrides,
 	type CheckoutParams,
+	type CheckoutResolutionContext,
 	checkout,
 	type StreamPayCustomFieldDefinition,
 	type StreamPayCustomFieldsSchema,

@@ -88,6 +88,69 @@ export function createAuth() {
 }
 ```
 
+## Server-authoritative checkout
+
+Use this shape when a local order determines what the customer may pay for:
+
+```ts
+import { APIError } from "better-auth/api";
+
+checkout({
+  authenticatedUsersOnly: true,
+  resolveCheckout: async ({ user, body }) => {
+    if (!user || !body.referenceId) {
+      throw new APIError("BAD_REQUEST", {
+        code: "ORDER_REFERENCE_REQUIRED",
+        message: "A valid order reference is required.",
+      });
+    }
+
+    const order = await loadAuthorizedOrder(user.id, body.referenceId);
+    if (!order) {
+      throw new APIError("FORBIDDEN", {
+        code: "ORDER_NOT_AVAILABLE",
+        message: "This order is not available for checkout.",
+      });
+    }
+
+    return {
+      products: [{ productId: order.productId, quantity: order.quantity }],
+      successUrl: `${process.env.APP_URL}/orders/${order.id}?checkout=success`,
+      failureUrl: `${process.env.APP_URL}/orders/${order.id}?checkout=failed`,
+      maxNumberOfPayments: 1,
+      validUntil: order.validUntil,
+      metadata: { flow: "store" },
+    };
+  },
+  onCheckoutCreated: async ({ referenceId, paymentLinkId, payload }) => {
+    if (!referenceId) throw new Error("resolved checkout is missing its order reference");
+
+    try {
+      await saveOrderPaymentLink({ referenceId, paymentLinkId, payload });
+    } catch (error) {
+      if (isOrderConflict(error)) {
+        throw new APIError("CONFLICT", {
+          code: "ORDER_WRITE_CONFLICT",
+          message: "This order already has a checkout.",
+        });
+      }
+      throw error;
+    }
+  },
+});
+```
+
+The client sends only the local reference and redirect preference:
+
+```ts
+await authClient.checkout({ referenceId: order.id, redirect: false });
+```
+
+`resolveCheckout` automatically rejects client-supplied payment fields; there is no trust flag to
+configure. Invalid resolver output is a generic 500 and logs only invalid field paths. If
+`onCheckoutCreated` throws, the plugin attempts to deactivate the new link, but that compensation
+is best effort. Keep the write idempotent and reconcile final order state from idempotent webhooks.
+
 ## Client
 
 ```ts

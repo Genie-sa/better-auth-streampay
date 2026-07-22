@@ -33,6 +33,7 @@ export const streampay = <O extends StreamPayOptions>(options: O) => {
 						type: "string",
 						required: false,
 						input: false,
+						unique: true,
 					},
 				},
 			},

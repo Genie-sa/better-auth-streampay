@@ -99,6 +99,38 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 			);
 		});
 
+		it("rejects a recovered consumer linked to another local user", async () => {
+			mockClient.listConsumers.mockResolvedValue(
+				createMockConsumerList([createMockConsumer({ id: "cons_prior", external_id: "user-1" })]),
+			);
+			const options = createTestStreamPayOptions({ client: mockClient });
+			const ctx = createMockContext();
+			vi.mocked(ctx.context.adapter.findOne).mockResolvedValue({ id: "user-other" });
+
+			await expect(
+				ensureConsumerForUser(options, ctx, { id: "user-1", email: "a@b.com" }),
+			).rejects.toMatchObject({
+				code: "CONFLICT",
+				errorCode: "STREAMPAY_CONSUMER_LINK_CONFLICT",
+			});
+			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
+			expect(mockClient.createConsumer).not.toHaveBeenCalled();
+		});
+
+		it("allows an idempotent recovered link owned by the same local user", async () => {
+			mockClient.listConsumers.mockResolvedValue(
+				createMockConsumerList([createMockConsumer({ id: "cons_prior", external_id: "user-1" })]),
+			);
+			const options = createTestStreamPayOptions({ client: mockClient });
+			const ctx = createMockContext();
+			vi.mocked(ctx.context.adapter.findOne).mockResolvedValue({ id: "user-1" });
+
+			await expect(
+				ensureConsumerForUser(options, ctx, { id: "user-1", email: "a@b.com" }),
+			).resolves.toEqual({ consumerId: "cons_prior", created: false });
+			expect(ctx.context.internalAdapter.updateUser).toHaveBeenCalled();
+		});
+
 		it("creates a consumer with external_id and persists the id on the user row", async () => {
 			mockClient.createConsumer.mockResolvedValue(
 				createMockConsumer({ id: "cons_new", external_id: "user-1" }),
@@ -151,6 +183,51 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 			expect(ctx.context.internalAdapter.updateUser).toHaveBeenCalled();
 		});
 
+		it("checks local ownership before reassigning a duplicate consumer", async () => {
+			mockClient.createConsumer.mockRejectedValue(
+				mockApiError(409, { error: { code: "DUPLICATE_CONSUMER" } }),
+			);
+			mockClient.listConsumers.mockResolvedValue(
+				createMockConsumerList([
+					createMockConsumer({ id: "cons_stranded", email: "a@b.com", external_id: "" }),
+				]),
+			);
+			const options = createTestStreamPayOptions({ client: mockClient });
+			const ctx = createMockContext();
+			vi.mocked(ctx.context.adapter.findOne).mockResolvedValue({ id: "user-other" });
+
+			await expect(
+				ensureConsumerForUser(options, ctx, { id: "user-1", email: "a@b.com" }),
+			).rejects.toMatchObject({
+				code: "CONFLICT",
+				errorCode: "STREAMPAY_CONSUMER_LINK_CONFLICT",
+			});
+			expect(mockClient.updateConsumer).not.toHaveBeenCalled();
+			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
+		});
+
+		it("fails closed when duplicate-consumer external_id backfill fails", async () => {
+			mockClient.createConsumer.mockRejectedValue(
+				mockApiError(409, { error: { code: "DUPLICATE_CONSUMER" } }),
+			);
+			mockClient.listConsumers.mockResolvedValue(
+				createMockConsumerList([
+					createMockConsumer({ id: "cons_stranded", email: "a@b.com", external_id: "" }),
+				]),
+			);
+			mockClient.updateConsumer.mockRejectedValue(new Error("provider write failed"));
+			const options = createTestStreamPayOptions({ client: mockClient });
+			const ctx = createMockContext();
+
+			await expect(
+				ensureConsumerForUser(options, ctx, { id: "user-1", email: "a@b.com" }),
+			).rejects.toMatchObject({
+				code: "INTERNAL_SERVER_ERROR",
+				errorCode: "STREAMPAY_CONSUMER_LINK_WRITE_FAILED",
+			});
+			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
+		});
+
 		it("handles DUPLICATE_CONSUMER when the existing consumer is already linked to the same user (idempotent)", async () => {
 			mockClient.createConsumer.mockRejectedValue(
 				mockApiError(409, { error: { code: "DUPLICATE_CONSUMER" } }, "POST", "/api/v2/consumers"),
@@ -199,21 +276,41 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 			});
 		});
 
-		it("logs but does not throw when writing streampayConsumerId back to the user row fails", async () => {
+		it("fails closed when writing streampayConsumerId to the user row fails", async () => {
 			mockClient.createConsumer.mockResolvedValue(createMockConsumer({ id: "cons_created" }));
 			const options = createTestStreamPayOptions({ client: mockClient });
 			const ctx = createMockContext();
 			ctx.context.internalAdapter.updateUser.mockRejectedValue(new Error("db down"));
 
-			const result = await ensureConsumerForUser(options, ctx, {
-				id: "user-1",
-				email: "a@b.com",
+			await expect(
+				ensureConsumerForUser(options, ctx, {
+					id: "user-1",
+					email: "a@b.com",
+				}),
+			).rejects.toMatchObject({
+				code: "INTERNAL_SERVER_ERROR",
+				errorCode: "STREAMPAY_CONSUMER_LINK_WRITE_FAILED",
 			});
-
-			expect(result).toEqual({ consumerId: "cons_created", created: true });
 			expect(ctx.context.logger.error).toHaveBeenCalledWith(
 				expect.stringContaining("link write failed"),
 			);
+		});
+
+		it("reports a concurrent unique-write loss as an ownership conflict", async () => {
+			mockClient.createConsumer.mockResolvedValue(createMockConsumer({ id: "cons_created" }));
+			const options = createTestStreamPayOptions({ client: mockClient });
+			const ctx = createMockContext();
+			ctx.context.internalAdapter.updateUser.mockRejectedValue(new Error("unique constraint"));
+			vi.mocked(ctx.context.adapter.findOne)
+				.mockResolvedValueOnce(null)
+				.mockResolvedValueOnce({ id: "user-other" });
+
+			await expect(
+				ensureConsumerForUser(options, ctx, { id: "user-1", email: "a@b.com" }),
+			).rejects.toMatchObject({
+				code: "CONFLICT",
+				errorCode: "STREAMPAY_CONSUMER_LINK_CONFLICT",
+			});
 		});
 	});
 

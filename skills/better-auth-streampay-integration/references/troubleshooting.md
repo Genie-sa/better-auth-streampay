@@ -34,6 +34,15 @@ If it stays empty after that:
 2. Check the StreamPay consumer call in server logs.
 3. Confirm the user is not anonymous.
 
+## Consumer linking returns 409 or 500
+
+`STREAMPAY_CONSUMER_LINK_CONFLICT` means another local user owns that StreamPay consumer ID. Do not
+overwrite either user row; resolve the account ownership conflict.
+
+`STREAMPAY_CONSUMER_LINK_WRITE_FAILED` means the ownership read or link write could not be proven
+safe. Check the database error and unique index, then retry after the database is healthy. Do not
+bypass the failure by creating a client-supplied consumer link.
+
 ## Missing table or column
 
 Load the plugin before generating the schema.
@@ -53,6 +62,35 @@ Check:
 1. The needed part is in `streampay({ use: [...] })`.
 2. Better Auth is mounted at `/api/auth/*`.
 3. Next.js uses a catch-all route such as `[...all]`.
+
+## Checkout rejects client fields
+
+`CHECKOUT_CLIENT_FIELDS_FORBIDDEN` is expected when `resolveCheckout` is configured. Send only:
+
+- `referenceId`
+- `redirect`
+
+Remove products, slugs, coupons, expiry, metadata, and redirect URLs from the browser request. There
+is no client-field trust option to enable.
+
+## Checkout resolution returns 500
+
+For `Checkout resolution failed.`, inspect the logged resolver exception.
+
+For `Checkout resolution produced invalid parameters.`, inspect the logged field paths and make the
+resolver return values accepted by the checkout schema. The response intentionally omits schema
+details.
+
+Neither failure calls StreamPay.
+
+## Checkout persistence fails
+
+Inspect the `onCheckoutCreated failed` log and the payment link in StreamPay. The plugin attempts to
+set the new link to `INACTIVE`, but compensation is best effort.
+
+Map expected domain conflicts to `APIError("CONFLICT", ...)` inside `onCheckoutCreated`. Keep unknown
+database errors as 500 responses, then reconcile the link through signed, idempotent webhook
+handling.
 
 ## Admin endpoint returns 405
 

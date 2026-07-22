@@ -1,3 +1,4 @@
+import type { BetterAuthPlugin, Where } from "better-auth";
 import { getTestInstance } from "better-auth/test";
 import { streampayClient as createStreamPayClientPlugin } from "../../src/client";
 import { streampay } from "../../src/streampay";
@@ -9,6 +10,7 @@ interface StreamPayTestInstanceOptions {
 	streamPayOptions?: Partial<Omit<StreamPayOptions, "client" | "use">>;
 	use?: StreamPayPlugins;
 	disableTestUser?: boolean;
+	additionalPlugins?: BetterAuthPlugin[];
 }
 
 type AuthSuccessContext = {
@@ -28,6 +30,11 @@ export interface StreamPayTestInstance {
 				findOne: <T>(input: {
 					model: string;
 					where: Array<{ field: string; value: unknown }>;
+				}) => Promise<T | null>;
+				update: <T>(input: {
+					model: string;
+					update: Record<string, unknown>;
+					where: Where[];
 				}) => Promise<T | null>;
 			};
 		}>;
@@ -58,10 +65,12 @@ export async function createStreamPayTestInstance({
 	streamPayOptions = {},
 	use = [],
 	disableTestUser = true,
+	additionalPlugins = [],
 }: StreamPayTestInstanceOptions = {}): Promise<StreamPayTestInstance> {
 	const instance = await getTestInstance(
 		{
 			plugins: [
+				...additionalPlugins,
 				streampay({
 					client,
 					use,

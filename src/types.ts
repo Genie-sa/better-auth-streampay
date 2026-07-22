@@ -29,6 +29,7 @@ import type {
 	SubscriptionDetailed,
 	SubscriptionListResponse,
 	SubscriptionUpdate,
+	UpdatePaymentLinkStatusDto,
 } from "@streamsdk/typescript";
 import type { UnionToIntersection, User } from "better-auth";
 import type { admin } from "./plugins/admin";
@@ -90,6 +91,10 @@ export interface StreamPayClient {
 	createPaymentLink(input: CreatePaymentLinkDto): Promise<PaymentLinkDetailed>;
 	listPaymentLinks(params?: PaginationParams): Promise<PaymentLinkListResponse>;
 	getPaymentLink(paymentLinkId: string): Promise<PaymentLinkDetailed>;
+	updatePaymentLinkStatus?(
+		paymentLinkId: string,
+		input: UpdatePaymentLinkStatusDto,
+	): Promise<PaymentLinkDetailed>;
 	getPaymentUrl(link: PaymentLinkDetailed): string | null;
 
 	createProduct(input: ProductCreate): Promise<ProductDto>;

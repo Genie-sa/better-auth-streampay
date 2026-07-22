@@ -24,6 +24,8 @@ export const $ERROR_CODES = defineErrorCodes({
 	FORBIDDEN: "You do not have permission to perform this action.",
 	NOT_FOUND: "The requested resource was not found.",
 	CONSUMER_DUPLICATE: "A consumer with one of the provided identifiers already exists.",
+	STREAMPAY_CONSUMER_LINK_CONFLICT: "This StreamPay consumer is already linked to another account.",
+	STREAMPAY_CONSUMER_LINK_WRITE_FAILED: "The StreamPay consumer link could not be saved.",
 	CONSUMER_HAS_ONGOING_ACTIVITY:
 		"The consumer has ongoing invoices or active subscriptions and cannot be modified.",
 	INVOICE_INVALID_STATE: "The invoice is in a state that forbids this action.",
@@ -36,6 +38,7 @@ export const $ERROR_CODES = defineErrorCodes({
 	PAYMENT_METHOD_INVALID: "The supplied payment method is invalid for this flow.",
 	PRODUCT_LOCKED: "The product is referenced by a finalized invoice and cannot be modified.",
 	COUPON_LOCKED: "The coupon is referenced by a finalized invoice and cannot be modified.",
+	CHECKOUT_CLIENT_FIELDS_FORBIDDEN: "Checkout fields must be resolved by the server.",
 	SUBSCRIPTION_NOT_FOUND: "The subscription does not exist.",
 	SUBSCRIPTION_PLAN_NOT_FOUND: "The requested subscription plan is not configured.",
 	SUBSCRIPTION_ALREADY_ACTIVE: "An active subscription already exists for this plan group.",
