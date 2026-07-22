@@ -46,6 +46,15 @@ describe("streampay plugin integration", () => {
 		>();
 	});
 
+	it("declares StreamPay consumer ids unique at the schema boundary", () => {
+		const plugin = streampay({ client: createMockStreamPayClient(), use: [] });
+
+		expect(plugin.schema.user.fields.streampayConsumerId).toMatchObject({
+			type: "string",
+			unique: true,
+		});
+	});
+
 	it("creates a StreamPay consumer on signup when eager mode is enabled", async () => {
 		const { auth, client, streamPayClient } = await createStreamPayTestInstance({
 			streamPayOptions: { createConsumerOnSignUp: true },

@@ -36,7 +36,7 @@ function getConfig(): {
 
 interface MeResponse {
 	user?: { email?: string };
-	organization?: { id?: string };
+	organization?: { id?: string; sandbox?: boolean };
 }
 
 function createHookContext(): StreamPayHookContext {
@@ -186,10 +186,18 @@ liveWriteDescribe("live StreamPay write smoke", () => {
 		if (!me.user?.email) {
 			throw new Error("/api/v2/me did not return user.email");
 		}
+		if (me.organization?.sandbox !== true) {
+			throw new Error("live write tests require a StreamPay sandbox organization");
+		}
 		orgOwnerEmail = me.user.email;
 	});
 
 	afterAll(async () => {
+		if (createdPaymentLinkId && client.updatePaymentLinkStatus) {
+			try {
+				await client.updatePaymentLinkStatus(createdPaymentLinkId, { status: "INACTIVE" });
+			} catch {}
+		}
 		if (!createdConsumerId) return;
 		try {
 			if (ownsConsumer) {
@@ -351,7 +359,26 @@ liveWriteDescribe("live StreamPay write smoke", () => {
 			if (!createdPaymentLinkId || !config.productId) {
 				throw new Error("prerequisite missing");
 			}
-			expect(createdPaymentLinkId).toMatch(/.+/);
+			const link = await client.getPaymentLink(createdPaymentLinkId);
+			const url = client.getPaymentUrl(link);
+			expect(url?.startsWith("https://")).toBe(true);
+		},
+	);
+
+	it.runIf(!!process.env.STREAMPAY_TEST_PRODUCT_ID)(
+		"updatePaymentLinkStatus deactivates the test payment link",
+		async () => {
+			if (!createdPaymentLinkId || !config.productId) {
+				throw new Error("prerequisite missing");
+			}
+			if (!client.updatePaymentLinkStatus) {
+				throw new Error("StreamPay client does not support payment-link status updates");
+			}
+			const updated = await client.updatePaymentLinkStatus(createdPaymentLinkId, {
+				status: "INACTIVE",
+			});
+			expect(updated.status).toBe("INACTIVE");
+			createdPaymentLinkId = null;
 		},
 	);
 

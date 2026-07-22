@@ -30,14 +30,15 @@ import type {
 	SubscriptionDetailed,
 	SubscriptionListResponse,
 	SubscriptionUpdate,
+	UpdatePaymentLinkStatusDto,
 } from "@streamsdk/typescript";
-import type { User } from "better-auth";
+import type { User, Where } from "better-auth";
 import type { Mock } from "vitest";
 import { vi } from "vitest";
 import type { StreamPayClient } from "../../src/types";
 
 export type MockedStreamPayClient = {
-	[K in keyof StreamPayClient]: ReturnType<typeof vi.fn<StreamPayClient[K]>>;
+	[K in keyof StreamPayClient]-?: ReturnType<typeof vi.fn<NonNullable<StreamPayClient[K]>>>;
 };
 
 export const createMockStreamPayClient = (): MockedStreamPayClient => ({
@@ -49,6 +50,10 @@ export const createMockStreamPayClient = (): MockedStreamPayClient => ({
 	createPaymentLink: vi.fn<(input: CreatePaymentLinkDto) => Promise<PaymentLinkDetailed>>(),
 	listPaymentLinks: vi.fn<(params?: PaginationParams) => Promise<PaymentLinkListResponse>>(),
 	getPaymentLink: vi.fn<(paymentLinkId: string) => Promise<PaymentLinkDetailed>>(),
+	updatePaymentLinkStatus:
+		vi.fn<
+			(paymentLinkId: string, input: UpdatePaymentLinkStatusDto) => Promise<PaymentLinkDetailed>
+		>(),
 	getPaymentUrl: vi.fn<(link: PaymentLinkDetailed) => string | null>(),
 	createProduct: vi.fn<(input: ProductCreate) => Promise<ProductDto>>(),
 	listProducts: vi.fn<(params?: PaginationParams) => Promise<ProductListResponse>>(),
@@ -139,7 +144,13 @@ export interface MockCtx {
 			updateUser: Mock<(...args: unknown[]) => Promise<void>>;
 			findUserById?: Mock<(userId: string) => Promise<unknown>>;
 		};
-		adapter?: unknown;
+		adapter: {
+			findOne: <T = unknown>(input: { model: string; where: Where[] }) => Promise<T | null>;
+			findMany?: unknown;
+			create?: unknown;
+			update?: unknown;
+			delete?: unknown;
+		};
 	};
 	request: Request;
 	headers: Headers;
@@ -165,7 +176,9 @@ export const createMockContext = (options: MockCtxOptions = {}): MockCtx => {
 				updateUser: vi.fn<(...args: unknown[]) => Promise<void>>().mockResolvedValue(undefined),
 			},
 			adapter: {
-				findOne: vi.fn().mockResolvedValue(null),
+				findOne: vi
+					.fn()
+					.mockResolvedValue(null) as unknown as MockCtx["context"]["adapter"]["findOne"],
 				findMany: vi.fn().mockResolvedValue([]),
 				create: vi.fn().mockResolvedValue(undefined),
 				update: vi.fn().mockResolvedValue(undefined),

@@ -102,6 +102,10 @@ npx @better-auth/cli generate --config path/to/auth.ts
 
 Then create and run your normal database migration.
 
+`streampayConsumerId` is unique. Before applying the generated unique index to an existing
+database, resolve any duplicate non-null consumer IDs. Checkout fails closed when a consumer link
+cannot be stored safely.
+
 ## Client setup
 
 ```ts
@@ -168,6 +172,56 @@ window.location.href = data.url;
 ```
 
 You can also pass StreamPay product IDs directly with `products`.
+
+### Server-authoritative checkout
+
+For a store, derive product IDs, quantities, coupons, expiry, and redirect URLs on the server:
+
+```ts
+import { APIError } from "better-auth/api";
+
+checkout({
+  authenticatedUsersOnly: true,
+
+  resolveCheckout: async ({ user, body }) => {
+    const order = await loadAuthorizedOrder(user?.id, body.referenceId);
+    if (!order) {
+      throw new APIError("FORBIDDEN", {
+        code: "ORDER_NOT_AVAILABLE",
+        message: "This order is not available for checkout.",
+      });
+    }
+
+    return {
+      products: [{ productId: order.productId, quantity: order.quantity }],
+      successUrl: `https://shop.example.com/orders/${order.id}?checkout=success`,
+      failureUrl: `https://shop.example.com/orders/${order.id}?checkout=failed`,
+      maxNumberOfPayments: 1,
+      validUntil: order.validUntil,
+      metadata: { flow: "store" },
+    };
+  },
+
+  onCheckoutCreated: async ({ referenceId, paymentLinkId, payload }) => {
+    await saveOrderPaymentLink({ referenceId, paymentLinkId, payload });
+  },
+});
+```
+
+The client then sends only app-owned reference data:
+
+```ts
+await authClient.checkout({ referenceId: order.id, redirect: false });
+```
+
+Configuring `resolveCheckout` automatically makes product, pricing, coupon, expiry, metadata, and
+redirect URL fields server-only. Requests that include those fields are rejected; without a
+resolver, the existing client-driven checkout behavior is unchanged.
+
+If `onCheckoutCreated` throws, checkout returns an error and the plugin attempts to deactivate the
+new payment link. Deactivation is best effort, so webhook handling should still reconcile unexpected
+links. Relative success and failure URLs resolve against the auth server; use absolute URLs when the
+storefront has a different origin.
 
 ## Billing portal
 
