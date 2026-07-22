@@ -392,6 +392,23 @@ describe("checkout plugin", () => {
 			expect(mockClient.updatePaymentLinkStatus).not.toHaveBeenCalled();
 		});
 
+		it("does not call onCheckoutCreated when payment-link creation fails", async () => {
+			const onCheckoutCreated = vi.fn();
+			const callbackHandler = unwrapHandler<CheckoutResult>(
+				checkout({ onCheckoutCreated })(createTestStreamPayOptions({ client: mockClient }))
+					.endpoints.checkout,
+			);
+			mockClient.createPaymentLink.mockRejectedValue(
+				mockApiError(500, { error: { message: "downstream failure" } }),
+			);
+
+			await expect(
+				callbackHandler(createMockContext({ body: { products: PRODUCT_ID } })),
+			).rejects.toThrow(/StreamPay checkout creation failed/);
+			expect(onCheckoutCreated).not.toHaveBeenCalled();
+			expect(mockClient.updatePaymentLinkStatus).not.toHaveBeenCalled();
+		});
+
 		it("fails with INTERNAL_SERVER_ERROR when StreamPay returns no URL", async () => {
 			mockClient.getPaymentUrl.mockReturnValue(null);
 			const ctx = createMockContext({ body: { products: PRODUCT_ID } });
