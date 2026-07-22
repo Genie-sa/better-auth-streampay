@@ -22,6 +22,8 @@ Read these before changing code:
 Use the installed types for exact options and return values.
 
 Load [code-templates.md](references/code-templates.md) only when you need setup or route examples.
+When checkout values come from app-owned orders, load its **Server-authoritative checkout** section
+before editing the auth config.
 
 Load [troubleshooting.md](references/troubleshooting.md) only after a check fails.
 
@@ -85,13 +87,27 @@ For subscriptions:
 - use a group when plans replace each other
 - add `authorizeReference` for organization or custom references
 
+For server-authoritative checkout:
+
+- use `resolveCheckout` so the client sends only an app-owned `referenceId` and `redirect`
+- authorize the signed-in user against that reference before deriving products, quantities,
+  coupons, expiry, metadata, and redirects
+- use `onCheckoutCreated` for the app's idempotent payment-link write
+- map expected app conflicts to `APIError`; leave unexpected failures as server errors
+
+Do not add a client-field trust switch. Configuring `resolveCheckout` enables strict field rejection
+automatically.
+
 For webhooks:
 
 - read the secret from server environment
 - never expose it to the browser
 - add only handlers the app needs
+- make custom handler side effects idempotent by StreamPay event ID; built-in event tracking
+  deduplicates subscription sync, not arbitrary custom effects
 
-This step is done when the auth file typechecks and all selected parts appear once.
+This step is done when the auth file typechecks, all selected parts appear once, and no
+server-authoritative checkout field is accepted from the client.
 
 ## 4. Add the client and route
 
@@ -121,11 +137,15 @@ normal database migration.
 
 Check that:
 
-- `user.streampayConsumerId` exists
+- `user.streampayConsumerId` exists with a unique constraint or index
 - `subscription` exists when subscriptions are on
 - `streampayWebhookEvent` exists when webhook tracking is on
 
-This step is done when the schema matches the selected parts.
+Before adding the unique consumer index to an existing database, query for duplicate non-null
+consumer IDs and resolve every duplicate. Do not apply the index until that query returns no rows.
+
+This step is done when the migrated database, not only the generated schema, contains every
+selected table, column, and unique constraint.
 
 ## 6. Handle checkout return
 
@@ -158,6 +178,19 @@ When subscriptions are enabled, also test:
 - freeze and unfreeze
 - current plan, feature, and limit reads
 - direct server calls through `auth.api`
+
+When server-authoritative checkout is enabled, also test:
+
+- a valid reference produces the server-derived StreamPay payload and persists its payment-link ID
+- a request containing product, coupon, expiry, metadata, or redirect fields is rejected before a
+  StreamPay call
+- invalid resolver output returns a generic 500 while the server log identifies invalid field paths
+- persistence failure preserves an intentional `APIError` and triggers best-effort link deactivation
+
+For authenticated consumer creation, confirm a database read or write failure aborts the request
+and two local users cannot retain the same StreamPay consumer ID.
+
+For custom webhook effects, replay the same signed event and confirm the effect happens once.
 
 Check the database and logs after each action.
 
