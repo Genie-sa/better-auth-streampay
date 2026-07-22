@@ -20,10 +20,23 @@ export type SubscriptionRecurringInterval = NonNullable<SubscriptionDetailed["re
 export type SubscriptionBillingStatus = "current" | "past_due";
 export type SubscriptionReferenceType = "user" | "organization" | "custom";
 
+/** Controls per-seat checkout without conflating billed seats with entitlement limits. */
+export interface StreamPaySeatBilling {
+	/** Initial quantity when an upgrade request omits `seats`. Defaults to `minimum`, then 1. */
+	default?: number;
+	/** Smallest allowed seat count. Defaults to 1. */
+	minimum?: number;
+	/** Largest allowed seat count. Omit for no application-level maximum. */
+	maximum?: number;
+	/** Lets the customer edit quantity on StreamPay's hosted checkout. Defaults to false. */
+	customerEditable?: boolean;
+}
+
 /** `productId` must reference a recurring StreamPay product matching `billingInterval`. */
 export interface StreamPayPlan<Limits extends Record<string, unknown> = Record<string, unknown>> {
 	name: string;
 	productId: string;
+	/** Price for one seat/item in the currency's smallest unit. */
 	priceInSmallestUnit: number;
 	currency?: CreatePaymentLinkDto["currency"];
 	version?: string;
@@ -31,6 +44,7 @@ export interface StreamPayPlan<Limits extends Record<string, unknown> = Record<s
 	billingIntervalCount?: number;
 	trialPeriodDays?: number;
 	group?: string;
+	seatBilling?: StreamPaySeatBilling;
 	limits?: Limits;
 }
 
@@ -51,6 +65,8 @@ export interface Subscription {
 	planVersion: string | null;
 	productId: string | null;
 	group: string | null;
+	/** Authoritative quantity for the configured plan product. Legacy rows default to 1. */
+	seats: number;
 	amountInSmallestUnit: number | null;
 	originalAmountInSmallestUnit: number | null;
 	currency: CurrencyCode | null;
@@ -71,6 +87,9 @@ export interface Subscription {
 	pendingPlan: string | null;
 	pendingProductId: string | null;
 	pendingPlanEffectiveAt: Date | null;
+	/** Seat count that StreamPay will apply with the pending change, if any. */
+	pendingSeats: number | null;
+	pendingSeatsEffectiveAt: Date | null;
 	endedAt: Date | null;
 	frozenAt: Date | null;
 	freezeEndAt: Date | null;
@@ -121,6 +140,7 @@ export interface AuthorizeReferenceContext {
 		| "cancel-freeze"
 		| "read"
 		| "change-plan"
+		| "update-seats"
 		| "cancel-plan-change";
 }
 

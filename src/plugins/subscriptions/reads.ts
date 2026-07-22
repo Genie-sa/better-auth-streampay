@@ -34,6 +34,16 @@ const CheckLimitQuery = z.object({
 	group: z.string().min(1).optional(),
 });
 
+function presentSubscription(row: Subscription, plans: ResolvedPlans) {
+	return {
+		...row,
+		// The column is nullable during safe rolling migrations. Keep the public
+		// contract stable while applications backfill legacy rows to one seat.
+		seats: row.seats ?? 1,
+		plan: plans.byName.get(row.plan) ?? null,
+	};
+}
+
 async function resolveLiveSubscription(
 	ctx: GenericEndpointContext,
 	query: {
@@ -97,12 +107,7 @@ export function buildSubscriptionReadEndpoints(
 					],
 				});
 				const plans = await plansRef();
-				return ctx.json(
-					rows.map((row) => ({
-						...row,
-						plan: plans.byName.get(row.plan) ?? null,
-					})),
-				);
+				return ctx.json(rows.map((row) => presentSubscription(row, plans)));
 			},
 		),
 
@@ -122,7 +127,7 @@ export function buildSubscriptionReadEndpoints(
 				);
 				if (!live) return ctx.json(null);
 				const plans = await plansRef();
-				return ctx.json({ ...live, plan: plans.byName.get(live.plan) ?? null });
+				return ctx.json(presentSubscription(live, plans));
 			},
 		),
 

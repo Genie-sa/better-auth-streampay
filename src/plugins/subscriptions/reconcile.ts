@@ -1,5 +1,7 @@
 import type { SubscriptionDetailed } from "@streamsdk/typescript";
+import { APIError } from "better-auth/api";
 import { z } from "zod";
+import { $ERROR_CODES } from "../../error-codes";
 import type { PluginAdapter } from "./adapter";
 import type { ResolvedPlans } from "./plans";
 import { isTerminalSubscriptionStatus, toLocalStatus } from "./status";
@@ -140,7 +142,13 @@ export function projectSubscriptionFields(sub: SubscriptionDetailed): Partial<Su
 
 export function parseDate(value: string | null | undefined): Date | null {
 	if (!value) return null;
-	const date = new Date(value);
+	// StreamPay webhook timestamps currently omit an RFC 3339 timezone suffix even
+	// though they represent UTC. Letting Date parse those values directly makes
+	// reconciliation depend on the host timezone (and can make a fresh event look
+	// hours stale). Provider values that already carry an offset remain unchanged.
+	const normalized =
+		/[T ]/.test(value) && !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? `${value}Z` : value;
+	const date = new Date(normalized);
 	return Number.isNaN(date.getTime()) ? null : date;
 }
 
@@ -187,6 +195,7 @@ const SubscriptionItemSchema = z
 	.object({
 		product: z.object({ id: z.string() }).passthrough().optional(),
 		product_id: z.string().optional(),
+		quantity: z.number().optional(),
 	})
 	.passthrough();
 
@@ -194,6 +203,14 @@ export function subscriptionItemProductId(item: unknown): string | null {
 	const parsed = SubscriptionItemSchema.safeParse(item);
 	if (!parsed.success) return null;
 	return parsed.data.product?.id ?? parsed.data.product_id ?? null;
+}
+
+export function subscriptionItemQuantity(item: unknown): number | null {
+	const parsed = SubscriptionItemSchema.safeParse(item);
+	if (!parsed.success || parsed.data.quantity === undefined) return null;
+	return Number.isSafeInteger(parsed.data.quantity) && parsed.data.quantity > 0
+		? parsed.data.quantity
+		: null;
 }
 
 export function inferPlanFromItems(sub: SubscriptionDetailed, plans: ResolvedPlans): string | null {
@@ -205,7 +222,14 @@ function inferPlanFromItemList(items: readonly unknown[], plans: ResolvedPlans):
 	const productIds = new Set(
 		items.map(subscriptionItemProductId).filter((id): id is string => Boolean(id)),
 	);
-	return plans.list.find((plan) => productIds.has(plan.productId))?.name ?? null;
+	const matches = plans.list.filter((plan) => productIds.has(plan.productId));
+	if (matches.length > 1) {
+		throw new APIError("INTERNAL_SERVER_ERROR", {
+			code: $ERROR_CODES.SUBSCRIPTION_INVALID_STATE.code,
+			message: "StreamPay returned a subscription containing multiple configured plan products.",
+		});
+	}
+	return matches[0]?.name ?? null;
 }
 
 export function projectPlanFields(
@@ -218,18 +242,40 @@ export function projectPlanFields(
 		| "planVersion"
 		| "productId"
 		| "group"
+		| "seats"
 		| "pendingPlan"
 		| "pendingProductId"
 		| "pendingPlanEffectiveAt"
+		| "pendingSeats"
+		| "pendingSeatsEffectiveAt"
 	>
 > {
 	const currentPlan = inferPlanFromItems(sub, plans);
-	const currentProductId = subscriptionItemProductId(sub.items?.[0]);
-	const pendingPlan = Array.isArray(sub.pending_change?.target_items)
+	const configuredCurrent = currentPlan ? plans.byName.get(currentPlan) : undefined;
+	const currentItem = configuredCurrent
+		? sub.items?.find((item) => subscriptionItemProductId(item) === configuredCurrent.productId)
+		: sub.items?.[0];
+	const currentProductId = subscriptionItemProductId(currentItem);
+	const currentSeats = currentItem ? (subscriptionItemQuantity(currentItem) ?? 1) : null;
+	const inferredPendingPlan = Array.isArray(sub.pending_change?.target_items)
 		? inferPlanFromItemList(sub.pending_change.target_items, plans)
 		: null;
-	const pendingProductId = subscriptionItemProductId(sub.pending_change?.target_items?.[0]);
-	const configuredCurrent = currentPlan ? plans.byName.get(currentPlan) : undefined;
+	const configuredPending = inferredPendingPlan ? plans.byName.get(inferredPendingPlan) : undefined;
+	const pendingItem = configuredPending
+		? sub.pending_change?.target_items?.find(
+				(item) => subscriptionItemProductId(item) === configuredPending.productId,
+			)
+		: currentProductId
+			? sub.pending_change?.target_items?.find(
+					(item) => subscriptionItemProductId(item) === currentProductId,
+				)
+			: sub.pending_change?.target_items?.[0];
+	const pendingProductId = subscriptionItemProductId(pendingItem);
+	const pendingSeats = pendingItem ? (subscriptionItemQuantity(pendingItem) ?? 1) : null;
+	const pendingEffectiveAt = parseDate(sub.pending_change?.effective_at);
+	const planChanges =
+		Boolean(inferredPendingPlan) &&
+		(inferredPendingPlan !== currentPlan || pendingProductId !== currentProductId);
 	return {
 		...(currentPlan
 			? {
@@ -241,8 +287,11 @@ export function projectPlanFields(
 			: currentProductId
 				? { productId: currentProductId }
 				: {}),
-		pendingPlan,
-		pendingProductId,
-		pendingPlanEffectiveAt: parseDate(sub.pending_change?.effective_at),
+		...(currentSeats === null ? {} : { seats: currentSeats }),
+		pendingPlan: planChanges ? inferredPendingPlan : null,
+		pendingProductId: planChanges ? pendingProductId : null,
+		pendingPlanEffectiveAt: planChanges ? pendingEffectiveAt : null,
+		pendingSeats,
+		pendingSeatsEffectiveAt: pendingSeats === null ? null : pendingEffectiveAt,
 	};
 }

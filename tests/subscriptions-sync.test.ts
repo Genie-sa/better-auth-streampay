@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { parseDate, projectPlanFields } from "../src/plugins/subscriptions/reconcile";
 import {
 	claimOrAdvanceWebhookEvent,
 	claimWebhookEventForReplay,
@@ -53,6 +54,28 @@ describe("syncWebhookPayload", () => {
 	beforeEach(() => {
 		client = createMockStreamPayClient();
 		vi.clearAllMocks();
+	});
+
+	it("treats timezone-less StreamPay timestamps as UTC", () => {
+		expect(parseDate("2026-07-22T14:06:06.213425")?.toISOString()).toBe("2026-07-22T14:06:06.213Z");
+		expect(parseDate("2026-07-22T17:06:06.213+03:00")?.toISOString()).toBe(
+			"2026-07-22T14:06:06.213Z",
+		);
+	});
+
+	it("rejects ambiguous provider state with multiple configured plan products", () => {
+		expect(() =>
+			projectPlanFields(
+				{
+					id: "sub_ambiguous",
+					items: [
+						{ product_id: "prod_pro", quantity: 2 },
+						{ product_id: "prod_pro_plus", quantity: 2 },
+					],
+				},
+				resolvedPlansWithUpgrade(),
+			),
+		).toThrow(/multiple configured plan products/);
 	});
 
 	describe("event lifecycle via streampayWebhookEvent state machine", () => {
@@ -1196,6 +1219,50 @@ describe("syncWebhookPayload", () => {
 			expect(callback).toHaveBeenCalledTimes(1);
 		});
 
+		it("projects a quantity-only pending change as seats without inventing a plan change", async () => {
+			const ctx = createMockSyncContext();
+			await ctx.adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					streampaySubscriptionId: "sub_seat_change",
+					plan: "pro",
+					seats: 3,
+					status: "active",
+				}),
+			});
+			client.getSubscription.mockResolvedValue({
+				id: "sub_seat_change",
+				status: "ACTIVE",
+				organization_consumer_id: "cons_1",
+				items: [{ product_id: "prod_pro", quantity: 3 }],
+				pending_change: {
+					id: "pending_seats",
+					effective_at: "2026-06-01T00:00:00Z",
+					target_items: [{ product_id: "prod_pro", quantity: 9 }],
+				},
+			});
+
+			await syncWebhookPayload(
+				ctx,
+				createMockWebhookPayload({
+					event_type: "SUBSCRIPTION_PLAN_CHANGE_SCHEDULED",
+					entity_id: "sub_seat_change",
+				}),
+				client,
+				resolvedPlans(),
+				{},
+			);
+
+			expect(ctx.adapter.tables.subscription?.[0]).toMatchObject({
+				plan: "pro",
+				seats: 3,
+				pendingPlan: null,
+				pendingProductId: null,
+				pendingSeats: 9,
+				pendingSeatsEffectiveAt: new Date("2026-06-01T00:00:00Z"),
+			});
+		});
+
 		it("applies the new plan when a scheduled change takes effect", async () => {
 			const ctx = createMockSyncContext();
 			await ctx.adapter.create({
@@ -1232,6 +1299,45 @@ describe("syncWebhookPayload", () => {
 				pendingPlanEffectiveAt: null,
 			});
 			expect(callback).toHaveBeenCalledTimes(1);
+		});
+
+		it("applies the authoritative seat quantity and clears pending seats", async () => {
+			const ctx = createMockSyncContext();
+			await ctx.adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					streampaySubscriptionId: "sub_seats_applied",
+					plan: "pro",
+					seats: 3,
+					pendingSeats: 9,
+					pendingSeatsEffectiveAt: new Date("2026-06-01T00:00:00Z"),
+					status: "active",
+				}),
+			});
+			client.getSubscription.mockResolvedValue({
+				id: "sub_seats_applied",
+				status: "ACTIVE",
+				organization_consumer_id: "cons_1",
+				items: [{ product_id: "prod_pro", quantity: 9 }],
+			});
+
+			await syncWebhookPayload(
+				ctx,
+				createMockWebhookPayload({
+					event_type: "SUBSCRIPTION_PLAN_UPDATED",
+					entity_id: "sub_seats_applied",
+				}),
+				client,
+				resolvedPlans(),
+				{},
+			);
+
+			expect(ctx.adapter.tables.subscription?.[0]).toMatchObject({
+				plan: "pro",
+				seats: 9,
+				pendingSeats: null,
+				pendingSeatsEffectiveAt: null,
+			});
 		});
 
 		it.each([

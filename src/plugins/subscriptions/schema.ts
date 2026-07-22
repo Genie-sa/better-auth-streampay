@@ -55,6 +55,11 @@ export const subscriptionTable = {
 				required: false,
 				index: true,
 			},
+			seats: {
+				type: "number",
+				required: false,
+				defaultValue: 1,
+			},
 			amountInSmallestUnit: {
 				type: "number",
 				required: false,
@@ -140,6 +145,14 @@ export const subscriptionTable = {
 				index: true,
 			},
 			pendingPlanEffectiveAt: {
+				type: "date",
+				required: false,
+			},
+			pendingSeats: {
+				type: "number",
+				required: false,
+			},
+			pendingSeatsEffectiveAt: {
 				type: "date",
 				required: false,
 			},

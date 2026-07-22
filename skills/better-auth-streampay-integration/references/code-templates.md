@@ -55,7 +55,8 @@ export const auth = betterAuth({
               priceInSmallestUnit: 9900,
               billingInterval: "MONTH",
               group: "main",
-              limits: { seats: 10 },
+              seatBilling: { default: 3, minimum: 1, maximum: 100 },
+              limits: { reports: true },
             },
           ],
         }),
@@ -213,16 +214,17 @@ app.all("/api/auth/*", toNodeHandler(auth));
 New Better Auth managed database:
 
 ```bash
-npx @better-auth/cli migrate --config path/to/auth.ts
+npx auth@latest migrate --config path/to/auth.ts
 ```
 
 Drizzle or Prisma:
 
 ```bash
-npx @better-auth/cli generate --config path/to/auth.ts
+npx auth@latest generate --config path/to/auth.ts
 ```
 
-Then run the app's normal database migration.
+Then review and run the app's normal database migration. For an existing subscription table,
+backfill `subscription.seats` to `1` in that application-owned migration.
 
 ## Checkout return
 
