@@ -58,16 +58,19 @@ export async function resumeOrReserveCheckoutSlot(args: {
 	}>;
 	activeSlotKey: string;
 	planName: string;
+	seats: number;
 	now: number;
 	log: { error: (message: string) => void; warn: (message: string) => void };
 }): Promise<
 	| { kind: "recovered"; row: Subscription; url: string }
 	| { kind: "reserved"; row: Subscription; consumerId: string }
 > {
-	const { client, adapter, candidates, activeSlotKey, planName, now, log } = args;
+	const { client, adapter, candidates, activeSlotKey, planName, seats, now, log } = args;
+	const matchesCheckout = (row: Subscription) =>
+		row.plan === planName && (row.seats ?? 1) === seats;
 	const reuseCandidate = candidates.find(
 		(row) =>
-			row.plan === planName &&
+			matchesCheckout(row) &&
 			row.status === "incomplete" &&
 			Boolean(row.streampayPaymentLinkId) &&
 			row.createdAt instanceof Date &&
@@ -112,21 +115,23 @@ export async function resumeOrReserveCheckoutSlot(args: {
 		});
 		if (reserved?.status !== "incomplete") throw err;
 
-		let recovery: Awaited<ReturnType<typeof recoverCheckoutUrl>>;
-		try {
-			recovery = await recoverCheckoutUrl(client, reserved);
-		} catch (recoveryError) {
-			toAPIError(
-				{
-					logPrefix: `resume concurrent subscription checkout failed for row=${reserved.id}:`,
-					userMessage: "Unable to resume subscription checkout.",
-				},
-				recoveryError,
-				log,
-			);
-		}
-		if (recovery.kind === "recovered") {
-			return { kind: "recovered", row: reserved, url: recovery.url };
+		if (matchesCheckout(reserved)) {
+			let recovery: Awaited<ReturnType<typeof recoverCheckoutUrl>>;
+			try {
+				recovery = await recoverCheckoutUrl(client, reserved);
+			} catch (recoveryError) {
+				toAPIError(
+					{
+						logPrefix: `resume concurrent subscription checkout failed for row=${reserved.id}:`,
+						userMessage: "Unable to resume subscription checkout.",
+					},
+					recoveryError,
+					log,
+				);
+			}
+			if (recovery.kind === "recovered") {
+				return { kind: "recovered", row: reserved, url: recovery.url };
+			}
 		}
 
 		const reservationIsStale =

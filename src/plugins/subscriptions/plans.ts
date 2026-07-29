@@ -14,35 +14,81 @@ export interface ResolvedPlans {
 	byName: Map<string, StreamPayPlanLike>;
 }
 
-const PlanSchema = z.object({
-	name: z.string().min(1, "every plan must have a non-empty `name`."),
-	productId: z.string().min(1, "missing a non-empty `productId`."),
-	priceInSmallestUnit: z.custom<number>(
-		(value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
-		"must have a non-negative safe-integer `priceInSmallestUnit`.",
-	),
-	currency: z.enum(["SAR", "USD", "EUR", "GBP", "AED", "BHD", "KWD", "OMR", "QAR"]).optional(),
-	version: z.string().min(1, "has an empty `version`.").optional(),
-	billingInterval: z.custom<(typeof SUBSCRIPTION_INTERVALS)[number]>(
-		(value) =>
-			typeof value === "string" && SUBSCRIPTION_INTERVALS.some((interval) => interval === value),
-		"has invalid `billingInterval`. Expected one of: WEEK, MONTH, QUARTER, YEAR.",
-	),
-	billingIntervalCount: z
-		.number()
-		.refine((n) => Number.isInteger(n) && n >= 1, {
-			message: "has invalid `billingIntervalCount` — must be a positive integer.",
-		})
-		.optional(),
-	trialPeriodDays: z
-		.number()
-		.refine((n) => Number.isInteger(n) && n >= 1 && n <= 365, {
-			message: "has invalid `trialPeriodDays` — must be an integer from 1 to 365.",
-		})
-		.optional(),
-	group: z.string().min(1, "has an empty `group`.").optional(),
-	limits: z.record(z.string(), z.unknown()).optional(),
-});
+const PlanSchema = z
+	.object({
+		name: z.string().min(1, "every plan must have a non-empty `name`."),
+		productId: z.string().min(1, "missing a non-empty `productId`."),
+		priceInSmallestUnit: z.custom<number>(
+			(value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
+			"must have a non-negative safe-integer `priceInSmallestUnit`.",
+		),
+		currency: z.enum(["SAR", "USD", "EUR", "GBP", "AED", "BHD", "KWD", "OMR", "QAR"]).optional(),
+		version: z.string().min(1, "has an empty `version`.").optional(),
+		billingInterval: z.custom<(typeof SUBSCRIPTION_INTERVALS)[number]>(
+			(value) =>
+				typeof value === "string" && SUBSCRIPTION_INTERVALS.some((interval) => interval === value),
+			"has invalid `billingInterval`. Expected one of: WEEK, MONTH, QUARTER, YEAR.",
+		),
+		billingIntervalCount: z
+			.number()
+			.refine((n) => Number.isInteger(n) && n >= 1, {
+				message: "has invalid `billingIntervalCount` — must be a positive integer.",
+			})
+			.optional(),
+		trialPeriodDays: z
+			.number()
+			.refine((n) => Number.isInteger(n) && n >= 1 && n <= 365, {
+				message: "has invalid `trialPeriodDays` — must be an integer from 1 to 365.",
+			})
+			.optional(),
+		group: z.string().min(1, "has an empty `group`.").optional(),
+		seatBilling: z
+			.object({
+				default: z.number().safe().int().positive().optional(),
+				minimum: z.number().safe().int().positive().optional(),
+				maximum: z.number().safe().int().positive().optional(),
+				customerEditable: z.boolean().optional(),
+			})
+			.optional(),
+		limits: z.record(z.string(), z.unknown()).optional(),
+	})
+	.superRefine((plan, ctx) => {
+		const seats = plan.seatBilling;
+		if (!seats) return;
+		const minimum = seats.minimum ?? 1;
+		const defaultSeats = seats.default ?? minimum;
+		if (seats.maximum !== undefined && seats.maximum < minimum) {
+			ctx.addIssue({
+				code: "custom",
+				path: ["seatBilling", "maximum"],
+				message: "must be greater than or equal to `minimum`.",
+			});
+		}
+		if (defaultSeats < minimum || (seats.maximum !== undefined && defaultSeats > seats.maximum)) {
+			ctx.addIssue({
+				code: "custom",
+				path: ["seatBilling", "default"],
+				message: "must be within the configured minimum and maximum.",
+			});
+		}
+		if (seats.customerEditable && (seats.minimum === undefined || seats.maximum === undefined)) {
+			ctx.addIssue({
+				code: "custom",
+				path: ["seatBilling", "customerEditable"],
+				message: "requires explicit `minimum` and `maximum` bounds for hosted checkout editing.",
+			});
+		}
+		if (
+			seats.maximum !== undefined &&
+			!Number.isSafeInteger(plan.priceInSmallestUnit * seats.maximum)
+		) {
+			ctx.addIssue({
+				code: "custom",
+				path: ["seatBilling", "maximum"],
+				message: "produces an unsafe total with `priceInSmallestUnit`.",
+			});
+		}
+	});
 
 const PlansSchema = z
 	.array(PlanSchema)

@@ -41,6 +41,7 @@ export type {
 	AuthorizeReferenceContext,
 	StreamPayPlan,
 	StreamPayPlanLike,
+	StreamPaySeatBilling,
 	Subscription,
 	SubscriptionBillingStatus,
 	SubscriptionCallback,

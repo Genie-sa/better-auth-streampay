@@ -1,6 +1,6 @@
 ---
 name: better-auth-streampay-integration
-description: Add better-auth-streampay to a Better Auth app. Use for checkout, billing portal, subscriptions, admin billing tools, signed webhooks, database setup, and plugin updates.
+description: Integrate better-auth-streampay for checkout, subscriptions, billing, admin tools, signed webhooks, or database changes.
 license: MIT
 metadata:
   author: Genie-sa
@@ -13,7 +13,7 @@ Use this process to add or update the plugin.
 
 ## Sources
 
-Read these before changing code:
+Read before changing code:
 
 1. The app's auth, database, routes, client, and payment code.
 2. The installed package types in `node_modules/better-auth-streampay/dist`.
@@ -86,6 +86,8 @@ For subscriptions:
 - store prices in the smallest currency unit
 - use a group when plans replace each other
 - add `authorizeReference` for organization or custom references
+- configure billed quantity with `seatBilling`, not entitlement `limits`
+- set explicit minimum and maximum bounds when `customerEditable` is true
 
 For server-authoritative checkout:
 
@@ -132,14 +134,16 @@ Load the plugin before generating a schema.
 
 For a new Better Auth managed database, run the Better Auth migration command.
 
-For Drizzle or Prisma, generate the Better Auth schema changes, review them, then run the app's
-normal database migration.
+For an existing database (and always for Drizzle or Prisma), generate the Better Auth schema
+changes, review them, then run the app's normal database migration. Do not let the plugin run DDL
+at startup or request time.
 
 Check that:
 
 - `user.streampayConsumerId` exists with a unique constraint or index
 - `subscription` exists when subscriptions are on
 - `streampayWebhookEvent` exists when webhook tracking is on
+- `subscription.seats` is backfilled to `1` when upgrading existing subscription rows
 
 Before adding the unique consumer index to an existing database, query for duplicate non-null
 consumer IDs and resolve every duplicate. Do not apply the index until that query returns no rows.
@@ -175,6 +179,7 @@ When subscriptions are enabled, also test:
 - duplicate checkout reuse
 - active cancellation and uncancel
 - plan change and pending-change cancellation
+- fixed/editable seat checkout, seat updates, and current/pending reconciliation
 - freeze and unfreeze
 - current plan, feature, and limit reads
 - direct server calls through `auth.api`

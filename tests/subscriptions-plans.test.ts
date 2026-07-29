@@ -104,6 +104,46 @@ describe("validatePlansShape", () => {
 		}
 		expect(() => validatePlansShape([{ ...baseline, group: "" }])).toThrow(/empty `group`/);
 	});
+
+	it("accepts fixed and explicitly bounded customer-editable seat billing", () => {
+		expect(() =>
+			validatePlansShape([{ ...baseline, seatBilling: { default: 3, minimum: 2, maximum: 100 } }]),
+		).not.toThrow();
+		expect(() =>
+			validatePlansShape([
+				{
+					...baseline,
+					seatBilling: {
+						default: 3,
+						minimum: 1,
+						maximum: 100,
+						customerEditable: true,
+					},
+				},
+			]),
+		).not.toThrow();
+	});
+
+	it("rejects unsafe or contradictory seat billing configuration", () => {
+		expect(() =>
+			validatePlansShape([{ ...baseline, seatBilling: { minimum: 5, maximum: 4 } }]),
+		).toThrow(/greater than or equal/);
+		expect(() =>
+			validatePlansShape([{ ...baseline, seatBilling: { default: 11, minimum: 1, maximum: 10 } }]),
+		).toThrow(/within the configured minimum/);
+		expect(() =>
+			validatePlansShape([{ ...baseline, seatBilling: { customerEditable: true } }]),
+		).toThrow(/requires explicit/);
+		expect(() =>
+			validatePlansShape([
+				{
+					...baseline,
+					priceInSmallestUnit: Number.MAX_SAFE_INTEGER,
+					seatBilling: { maximum: 2 },
+				},
+			]),
+		).toThrow(/unsafe total/);
+	});
 });
 
 describe("hasFeature / checkLimit", () => {

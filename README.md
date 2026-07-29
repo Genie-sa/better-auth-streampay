@@ -71,7 +71,7 @@ export const auth = betterAuth({
               productId: "your-recurring-product-id",
               priceInSmallestUnit: 9900,
               billingInterval: "MONTH",
-              limits: { seats: 10 },
+              limits: { reports: true },
             },
           ],
         }),
@@ -91,16 +91,18 @@ Only add the parts you use.
 For a new Better Auth managed database:
 
 ```bash
-npx @better-auth/cli migrate --config path/to/auth.ts
+npx auth@latest migrate --config path/to/auth.ts
 ```
 
 For Drizzle or Prisma:
 
 ```bash
-npx @better-auth/cli generate --config path/to/auth.ts
+npx auth@latest generate --config path/to/auth.ts
 ```
 
-Then create and run your normal database migration.
+Review the generated schema, then use your normal migration process. The plugin declares the
+schema but never changes your database at runtime. For an existing subscription table, backfill
+`seats` to `1` in the same migration.
 
 `streampayConsumerId` is unique. Before applying the generated unique index to an existing
 database, resolve any duplicate non-null consumer IDs. Checkout fails closed when a consumer link
@@ -254,7 +256,12 @@ subscriptions({
       billingIntervalCount: 1,
       trialPeriodDays: 7,
       group: "main",
-      limits: { seats: 10, reports: true },
+      seatBilling: {
+        default: 3,
+        minimum: 1,
+        maximum: 100,
+      },
+      limits: { projects: 50, reports: true },
     },
   ],
 
@@ -267,6 +274,10 @@ subscriptions({
 Plan names and product IDs must be unique. Prices use the smallest currency unit. For SAR,
 `9900` means `99.00 SAR`.
 
+`priceInSmallestUnit` is the price per seat. `seatBilling` controls billed quantity; `limits`
+controls application access. Set `customerEditable: true` with explicit minimum and maximum bounds
+to let customers change quantity in hosted checkout.
+
 The plugin gives one trial per user and plan group by default. Use `isTrialEligible` when your
 app needs a stricter or more flexible rule.
 
@@ -275,6 +286,7 @@ app needs a stricter or more flexible rule.
 ```ts
 const { data } = await authClient.subscription.upgrade({
   plan: "pro-monthly",
+  seats: 5,
 });
 
 window.location.href = data.url;
@@ -296,9 +308,15 @@ Then refresh the subscription data used by your UI.
 await authClient.subscription.changePlan({
   subscriptionId,
   plan: "pro-yearly",
+  seats: 8, // optional; defaults to the current quantity
 });
 
-await authClient.subscription.changePlan.cancel({ subscriptionId });
+await authClient.subscription.updateSeats({
+  subscriptionId,
+  seats: 12,
+});
+
+await authClient.subscription.pendingChange.cancel({ subscriptionId });
 
 await authClient.subscription.cancel({
   subscriptionId,
@@ -307,6 +325,10 @@ await authClient.subscription.cancel({
 
 await authClient.subscription.uncancel({ subscriptionId });
 ```
+
+StreamPay applies quantity and plan changes at period end. Read the active quantity from `seats`
+and the scheduled quantity from `pendingSeats`. The older
+`authClient.subscription.changePlan.cancel()` action remains available.
 
 StreamPay cancels an active subscription at the end of its current period. Trial and inactive
 subscriptions are canceled at once.
@@ -339,12 +361,17 @@ const feature = await authClient.subscription.hasFeature({
   query: { feature: "reports", group: "main" },
 });
 
-const seats = await authClient.subscription.checkLimit({
-  query: { feature: "seats", count: 4, group: "main" },
+const projects = await authClient.subscription.checkLimit({
+  query: { feature: "projects", count: 4, group: "main" },
 });
 ```
 
+`checkLimit` reads configured entitlements. Use `current.data?.seats` for licensed-member counts.
+
 Pass `group` for grouped plans. Leave it out only for a plan without a group.
+
+See [the subscription data model](docs/subscriptions.md) for columns, lifecycle, and migration
+details.
 
 By default, `active`, `trialing`, `frozen`, and `past_due` subscriptions can use plan
 features. Change this with `accessStatuses`.

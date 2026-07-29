@@ -23,15 +23,20 @@ import {
 	configuredPlanForSubscription,
 	isAlreadyCanceledFreezeError,
 	subscriptionCouponIds,
+	subscriptionItemsForUpdate,
 } from "./lifecycle";
 import type { ResolvedPlans } from "./plans";
 import { buildSubscriptionReadEndpoints } from "./reads";
 import {
+	parseDate,
+	projectPlanFields,
 	projectSubscriptionAgainstExisting,
 	projectSubscriptionFields,
 	subscriptionItemProductId,
+	subscriptionItemQuantity,
 	syncSubscriptionFromUpstream,
 } from "./reconcile";
+import { buildSeatCheckoutItem, quotedSeatTotal, resolveSeatCount } from "./seats";
 import { isCheckoutSuccessStatus, isManageableSubscriptionStatus } from "./status";
 import {
 	PLAN_NAME_METADATA_KEY,
@@ -45,13 +50,16 @@ import {
 } from "./types";
 
 const SUBSCRIPTION_MODEL = "subscription";
-const UpgradeBody = z.object({
-	plan: z.string().min(1),
-	referenceId: z.string().min(1).optional(),
-	referenceType: z.enum(["user", "organization", "custom"]).optional(),
-	successUrl: z.string().url().optional(),
-	failureUrl: z.string().url().optional(),
-});
+const UpgradeBody = z
+	.object({
+		plan: z.string().min(1),
+		seats: z.number().int().positive().safe().optional(),
+		referenceId: z.string().min(1).optional(),
+		referenceType: z.enum(["user", "organization", "custom"]).optional(),
+		successUrl: z.string().url().optional(),
+		failureUrl: z.string().url().optional(),
+	})
+	.strict();
 
 const SuccessQuery = z.object({
 	subscriptionId: z.string().min(1),
@@ -67,6 +75,14 @@ const ChangePlanBody = z
 	.object({
 		subscriptionId: z.string().min(1),
 		plan: z.string().min(1),
+		seats: z.number().int().positive().safe().optional(),
+	})
+	.strict();
+
+const UpdateSeatsBody = z
+	.object({
+		subscriptionId: z.string().min(1),
+		seats: z.number().int().positive().safe(),
 	})
 	.strict();
 
@@ -112,9 +128,9 @@ function isCheckoutSubscriptionCandidate(
 	}
 
 	if (!subscription.created_at || !(row.createdAt instanceof Date)) return false;
-	const createdAt = new Date(subscription.created_at).getTime();
+	const createdAt = parseDate(subscription.created_at)?.getTime();
 	return (
-		Number.isFinite(createdAt) &&
+		createdAt !== undefined &&
 		createdAt >= row.createdAt.getTime() - SUCCESS_RECONCILIATION_CLOCK_SKEW_MS
 	);
 }
@@ -125,6 +141,69 @@ export function buildSubscriptionEndpoints(
 	plansRef: () => Promise<ResolvedPlans>,
 ) {
 	const client = options.client;
+	const cancelPendingChangeEndpoint = <Path extends string>(path: Path) =>
+		createAuthEndpoint(
+			path,
+			{
+				method: "POST",
+				body: UnfreezeBody,
+				use: [sessionMiddleware],
+			},
+			async (ctx) => {
+				const { adapter, row } = await requireConfirmedOwnedSubscription(
+					ctx,
+					ctx.body.subscriptionId,
+					subsOptions,
+					"cancel-plan-change",
+				);
+
+				try {
+					const plans = await plansRef();
+					const current = await client.getSubscription(row.streampaySubscriptionId);
+					if (!current.pending_change) {
+						await adapter.update({
+							model: SUBSCRIPTION_MODEL,
+							update: {
+								...projectSubscriptionAgainstExisting(row, current),
+								...projectPlanFields(current, plans),
+								pendingPlan: null,
+								pendingProductId: null,
+								pendingPlanEffectiveAt: null,
+								pendingSeats: null,
+								pendingSeatsEffectiveAt: null,
+							},
+							where: [{ field: "id", value: row.id }],
+						});
+						return ctx.json({ canceled: true, reused: true, subscription: current });
+					}
+					await client.deletePendingSubscriptionChange(row.streampaySubscriptionId);
+					const stream = await client.getSubscription(row.streampaySubscriptionId);
+					await adapter.update({
+						model: SUBSCRIPTION_MODEL,
+						update: {
+							...projectSubscriptionAgainstExisting(row, stream),
+							...projectPlanFields(stream, plans),
+							pendingPlan: null,
+							pendingProductId: null,
+							pendingPlanEffectiveAt: null,
+							pendingSeats: null,
+							pendingSeatsEffectiveAt: null,
+						},
+						where: [{ field: "id", value: row.id }],
+					});
+					return ctx.json({ canceled: true, reused: false, subscription: stream });
+				} catch (err) {
+					toAPIError(
+						{
+							logPrefix: `cancel pending subscription change failed for row=${row.id}:`,
+							userMessage: "Canceling the pending subscription change failed.",
+						},
+						err,
+						getLogger(ctx),
+					);
+				}
+			},
+		);
 
 	return {
 		...buildSubscriptionReadEndpoints(subsOptions, plansRef),
@@ -150,6 +229,8 @@ export function buildSubscriptionEndpoints(
 						message: `Plan "${ctx.body.plan}" is not configured.`,
 					});
 				}
+				const seats = resolveSeatCount(plan, ctx.body.seats);
+				const quotedTotal = quotedSeatTotal(plan, seats);
 
 				const adapter = getAdapter(ctx);
 				const existingActive = await adapter.findMany<Subscription>({
@@ -200,6 +281,7 @@ export function buildSubscriptionEndpoints(
 					candidates: existingActive,
 					activeSlotKey,
 					planName: plan.name,
+					seats,
 					now: Date.now(),
 					log: getLogger(ctx),
 					createReservation: async () => {
@@ -219,13 +301,14 @@ export function buildSubscriptionEndpoints(
 								planVersion: plan.version ?? null,
 								productId: plan.productId,
 								group: plan.group ?? null,
+								seats,
 								streampayConsumerId: consumerId,
 								streampayPaymentLinkId: null,
 								status: "incomplete",
 								providerStatus: null,
 								billingStatus: "current",
-								amountInSmallestUnit: plan.priceInSmallestUnit,
-								originalAmountInSmallestUnit: plan.priceInSmallestUnit,
+								amountInSmallestUnit: quotedTotal,
+								originalAmountInSmallestUnit: quotedTotal,
 								currency: plan.currency ?? "SAR",
 								billingInterval: plan.billingInterval,
 								billingIntervalCount: plan.billingIntervalCount ?? 1,
@@ -241,6 +324,8 @@ export function buildSubscriptionEndpoints(
 								pendingPlan: null,
 								pendingProductId: null,
 								pendingPlanEffectiveAt: null,
+								pendingSeats: null,
+								pendingSeatsEffectiveAt: null,
 								endedAt: null,
 								frozenAt: null,
 								freezeEndAt: null,
@@ -260,6 +345,7 @@ export function buildSubscriptionEndpoints(
 						reused: true,
 						status: reservation.row.status,
 						plan: reservation.row.plan,
+						seats: reservation.row.seats ?? 1,
 					});
 				}
 				const { row, consumerId } = reservation;
@@ -267,7 +353,7 @@ export function buildSubscriptionEndpoints(
 				const linkInput: CreatePaymentLinkDto = {
 					name: `Subscription — ${plan.name}`,
 					currency: plan.currency ?? "SAR",
-					items: [{ product_id: plan.productId, quantity: 1, allow_custom_quantity: false }],
+					items: [buildSeatCheckoutItem(plan, seats)],
 					max_number_of_payments: 1,
 					organization_consumer_id: consumerId,
 					custom_metadata: {
@@ -369,6 +455,7 @@ export function buildSubscriptionEndpoints(
 					reused: false,
 					status: "incomplete",
 					plan: plan.name,
+					seats,
 				});
 			},
 		),
@@ -442,6 +529,7 @@ export function buildSubscriptionEndpoints(
 						model: SUBSCRIPTION_MODEL,
 						update: {
 							...projectSubscriptionFields(match),
+							...projectPlanFields(match, plans),
 							planVersion: plan.version ?? null,
 							productId: plan.productId,
 							billingStatus: "current",
@@ -560,8 +648,15 @@ export function buildSubscriptionEndpoints(
 				}
 				try {
 					const stream = await client.getSubscription(row.streampaySubscriptionId);
-					const currentPlan = configuredPlanForSubscription(stream, plans);
-					const currentGroup = currentPlan?.group ?? row.group;
+					const currentPlan =
+						configuredPlanForSubscription(stream, plans) ?? plans.byName.get(row.plan);
+					if (!currentPlan) {
+						throw new APIError("BAD_REQUEST", {
+							code: $ERROR_CODES.SUBSCRIPTION_INVALID_STATE.code,
+							message: "The current StreamPay product is not a configured subscription plan.",
+						});
+					}
+					const currentGroup = currentPlan.group ?? row.group;
 					if (currentGroup !== (nextPlan.group ?? null)) {
 						throw new APIError("BAD_REQUEST", {
 							code: $ERROR_CODES.SUBSCRIPTION_PLAN_GROUP_MISMATCH.code,
@@ -576,29 +671,46 @@ export function buildSubscriptionEndpoints(
 								"The subscription is scheduled to cancel. Uncancel it before scheduling a plan change.",
 						});
 					}
-					const currentProductIsRequestedPlan = stream.items?.some(
-						(item) => subscriptionItemProductId(item) === nextPlan.productId,
+					const currentItem = stream.items?.find(
+						(item) => subscriptionItemProductId(item) === currentPlan.productId,
 					);
-					if (currentProductIsRequestedPlan && !stream.pending_change) {
+					const currentSeats = currentItem
+						? (subscriptionItemQuantity(currentItem) ?? 1)
+						: row.seats;
+					const nextSeats = resolveSeatCount(nextPlan, ctx.body.seats ?? currentSeats ?? 1);
+					const currentProductIsRequestedPlan = currentPlan.productId === nextPlan.productId;
+					if (
+						currentProductIsRequestedPlan &&
+						currentSeats === nextSeats &&
+						!stream.pending_change
+					) {
 						throw new APIError("BAD_REQUEST", {
 							code: $ERROR_CODES.SUBSCRIPTION_ALREADY_ON_PLAN.code,
-							message: `Already on plan "${nextPlan.name}".`,
+							message: `Already on plan "${nextPlan.name}" with ${nextSeats} seats.`,
 						});
 					}
 					const pendingTargets = stream.pending_change?.target_items ?? [];
-					const pendingTargetIsRequestedPlan = pendingTargets.some(
+					const pendingTarget = pendingTargets.find(
 						(item) => subscriptionItemProductId(item) === nextPlan.productId,
 					);
-					if (pendingTargetIsRequestedPlan) {
+					const pendingTargetMatches =
+						Boolean(pendingTarget) && (subscriptionItemQuantity(pendingTarget) ?? 1) === nextSeats;
+					if (pendingTargetMatches) {
+						const effectiveAt = stream.pending_change?.effective_at ?? null;
 						await adapter.update({
 							model: SUBSCRIPTION_MODEL,
 							update: {
 								...projectSubscriptionAgainstExisting(row, stream),
-								pendingPlan: nextPlan.name,
-								pendingProductId: nextPlan.productId,
-								pendingPlanEffectiveAt: stream.pending_change?.effective_at
-									? new Date(stream.pending_change.effective_at)
-									: null,
+								...projectPlanFields(stream, plans),
+								pendingPlan: currentPlan.productId === nextPlan.productId ? null : nextPlan.name,
+								pendingProductId:
+									currentPlan.productId === nextPlan.productId ? null : nextPlan.productId,
+								pendingPlanEffectiveAt:
+									currentPlan.productId !== nextPlan.productId && effectiveAt
+										? parseDate(effectiveAt)
+										: null,
+								pendingSeats: nextSeats,
+								pendingSeatsEffectiveAt: parseDate(effectiveAt),
 							},
 							where: [{ field: "id", value: row.id }],
 						});
@@ -606,7 +718,8 @@ export function buildSubscriptionEndpoints(
 							mode: "at_period_end",
 							subscriptionId: row.id,
 							plan: nextPlan.name,
-							effectiveAt: stream.pending_change?.effective_at ?? null,
+							seats: nextSeats,
+							effectiveAt,
 							pendingChange: stream.pending_change,
 							reused: true,
 						});
@@ -619,29 +732,40 @@ export function buildSubscriptionEndpoints(
 						});
 					}
 					const patch: SubscriptionUpdate = {
-						items: [{ product_id: nextPlan.productId, quantity: 1 }],
+						items: subscriptionItemsForUpdate(
+							stream,
+							currentPlan.productId,
+							nextPlan.productId,
+							nextSeats,
+						),
 						coupons: subscriptionCouponIds(stream),
 						recurring_interval: nextPlan.billingInterval,
 						recurring_interval_count: nextPlan.billingIntervalCount ?? 1,
 					};
 					const result = await client.updateSubscription(row.streampaySubscriptionId, patch);
-					const effectiveAt =
-						result.pending_change?.effective_at ?? result.current_period_end ?? null;
+					const pending = Boolean(result.pending_change);
+					const effectiveAt = result.pending_change?.effective_at ?? null;
+					const planProjection = projectPlanFields(result, plans);
 					await adapter.update({
 						model: SUBSCRIPTION_MODEL,
 						update: {
 							...projectSubscriptionAgainstExisting(row, result),
-							pendingPlan: nextPlan.name,
-							pendingProductId: nextPlan.productId,
-							pendingPlanEffectiveAt: effectiveAt ? new Date(effectiveAt) : null,
+							...planProjection,
 							updatedAt: new Date(),
 						},
 						where: [{ field: "id", value: row.id }],
 					});
+					const providerPlan = pending
+						? (planProjection.pendingPlan ?? planProjection.plan ?? row.plan)
+						: (planProjection.plan ?? row.plan);
+					const providerSeats = pending
+						? (planProjection.pendingSeats ?? nextSeats)
+						: (planProjection.seats ?? row.seats ?? nextSeats);
 					return ctx.json({
-						mode: "at_period_end",
+						mode: pending ? "at_period_end" : "immediate",
 						subscriptionId: row.id,
-						plan: nextPlan.name,
+						plan: providerPlan,
+						seats: providerSeats,
 						effectiveAt,
 						pendingChange: result.pending_change ?? null,
 						subscription: result,
@@ -660,11 +784,11 @@ export function buildSubscriptionEndpoints(
 			},
 		),
 
-		cancelSubscriptionPlanChange: createAuthEndpoint(
-			"/subscription/change-plan/cancel",
+		updateSubscriptionSeats: createAuthEndpoint(
+			"/subscription/update-seats",
 			{
 				method: "POST",
-				body: UnfreezeBody,
+				body: UpdateSeatsBody,
 				use: [sessionMiddleware],
 			},
 			async (ctx) => {
@@ -672,34 +796,123 @@ export function buildSubscriptionEndpoints(
 					ctx,
 					ctx.body.subscriptionId,
 					subsOptions,
-					"cancel-plan-change",
+					"update-seats",
 				);
-
+				const plans = await plansRef();
 				try {
-					await client.deletePendingSubscriptionChange(row.streampaySubscriptionId);
 					const stream = await client.getSubscription(row.streampaySubscriptionId);
+					const plan = configuredPlanForSubscription(stream, plans) ?? plans.byName.get(row.plan);
+					if (!plan) {
+						throw new APIError("BAD_REQUEST", {
+							code: $ERROR_CODES.SUBSCRIPTION_INVALID_STATE.code,
+							message: "The current StreamPay product is not a configured subscription plan.",
+						});
+					}
+					if (stream.cancel_at_period_end) {
+						throw new APIError("CONFLICT", {
+							code: $ERROR_CODES.SUBSCRIPTION_ALREADY_SCHEDULED_CANCEL.code,
+							message: "Uncancel the subscription before scheduling a seat change.",
+						});
+					}
+					const seats = resolveSeatCount(plan, ctx.body.seats);
+					const currentItem = stream.items?.find(
+						(item) => subscriptionItemProductId(item) === plan.productId,
+					);
+					const currentSeats = currentItem
+						? (subscriptionItemQuantity(currentItem) ?? 1)
+						: row.seats;
+					const pendingTarget = stream.pending_change?.target_items?.find(
+						(item) => subscriptionItemProductId(item) === plan.productId,
+					);
+					if (stream.pending_change) {
+						if (pendingTarget && (subscriptionItemQuantity(pendingTarget) ?? 1) === seats) {
+							const effectiveAt = stream.pending_change.effective_at ?? null;
+							await adapter.update({
+								model: SUBSCRIPTION_MODEL,
+								update: {
+									...projectSubscriptionAgainstExisting(row, stream),
+									...projectPlanFields(stream, plans),
+								},
+								where: [{ field: "id", value: row.id }],
+							});
+							return ctx.json({
+								mode: "at_period_end",
+								subscriptionId: row.id,
+								seats,
+								effectiveAt,
+								pendingChange: stream.pending_change,
+								reused: true,
+							});
+						}
+						throw new APIError("CONFLICT", {
+							code: $ERROR_CODES.SUBSCRIPTION_SEAT_CHANGE_ALREADY_SCHEDULED.code,
+							message:
+								"A different subscription change is pending. Cancel it before scheduling this seat count.",
+						});
+					}
+					if (currentSeats === seats) {
+						await adapter.update({
+							model: SUBSCRIPTION_MODEL,
+							update: {
+								...projectSubscriptionAgainstExisting(row, stream),
+								...projectPlanFields(stream, plans),
+							},
+							where: [{ field: "id", value: row.id }],
+						});
+						return ctx.json({
+							mode: "current",
+							subscriptionId: row.id,
+							seats,
+							effectiveAt: null,
+							pendingChange: null,
+							reused: true,
+						});
+					}
+					const patch: SubscriptionUpdate = {
+						items: subscriptionItemsForUpdate(stream, plan.productId, plan.productId, seats),
+						coupons: subscriptionCouponIds(stream),
+					};
+					const result = await client.updateSubscription(row.streampaySubscriptionId, patch);
+					const pending = Boolean(result.pending_change);
+					const effectiveAt = result.pending_change?.effective_at ?? null;
+					const planProjection = projectPlanFields(result, plans);
 					await adapter.update({
 						model: SUBSCRIPTION_MODEL,
 						update: {
-							...projectSubscriptionAgainstExisting(row, stream),
-							pendingPlan: null,
-							pendingProductId: null,
-							pendingPlanEffectiveAt: null,
+							...projectSubscriptionAgainstExisting(row, result),
+							...planProjection,
+							updatedAt: new Date(),
 						},
 						where: [{ field: "id", value: row.id }],
 					});
-					return ctx.json({ canceled: true, subscription: stream });
+					const providerSeats = pending
+						? (planProjection.pendingSeats ?? seats)
+						: (planProjection.seats ?? row.seats ?? seats);
+					return ctx.json({
+						mode: pending ? "at_period_end" : "immediate",
+						subscriptionId: row.id,
+						seats: providerSeats,
+						effectiveAt,
+						pendingChange: result.pending_change ?? null,
+						subscription: result,
+						reused: false,
+					});
 				} catch (err) {
 					toAPIError(
 						{
-							logPrefix: `cancel plan change failed for row=${row.id}:`,
-							userMessage: "Canceling the scheduled plan change failed.",
+							logPrefix: `update-seats failed for row=${row.id}:`,
+							userMessage: "Seat change scheduling failed.",
 						},
 						err,
 						getLogger(ctx),
 					);
 				}
 			},
+		),
+
+		cancelSubscriptionPlanChange: cancelPendingChangeEndpoint("/subscription/change-plan/cancel"),
+		cancelSubscriptionPendingChange: cancelPendingChangeEndpoint(
+			"/subscription/pending-change/cancel",
 		),
 
 		uncancelSubscription: createAuthEndpoint(
@@ -807,11 +1020,11 @@ export function buildSubscriptionEndpoints(
 					const freezes = await client.listSubscriptionFreezes(row.streampaySubscriptionId);
 					const active = freezes.data?.find((freeze) => {
 						if (!freeze.id || !freeze.freeze_start_datetime) return false;
-						const start = new Date(freeze.freeze_start_datetime).getTime();
+						const start = parseDate(freeze.freeze_start_datetime)?.getTime();
 						const end = freeze.freeze_end_datetime
-							? new Date(freeze.freeze_end_datetime).getTime()
+							? parseDate(freeze.freeze_end_datetime)?.getTime()
 							: Number.POSITIVE_INFINITY;
-						return start <= nowMs && nowMs <= end;
+						return start !== undefined && end !== undefined && start <= nowMs && nowMs <= end;
 					});
 					if (!active?.id || !active.freeze_start_datetime) {
 						throw new APIError("BAD_REQUEST", {

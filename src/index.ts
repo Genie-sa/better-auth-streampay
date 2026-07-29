@@ -34,6 +34,7 @@ export {
 	type StreamPayPlan,
 	type StreamPayPlanLike,
 	type StreamPayPluginRegistry,
+	type StreamPaySeatBilling,
 	SUBSCRIPTION_ROW_ID_METADATA_KEY,
 	type Subscription,
 	type SubscriptionBillingStatus,

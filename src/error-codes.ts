@@ -50,6 +50,9 @@ export const $ERROR_CODES = defineErrorCodes({
 	SUBSCRIPTION_ALREADY_SCHEDULED_CANCEL:
 		"The subscription is already scheduled to cancel at period end.",
 	SUBSCRIPTION_ALREADY_ON_PLAN: "The subscription is already on the requested plan.",
+	SUBSCRIPTION_SEAT_COUNT_INVALID: "The requested seat count is invalid for this plan.",
+	SUBSCRIPTION_SEAT_CHANGE_ALREADY_SCHEDULED:
+		"A different subscription change is already scheduled.",
 	SUBSCRIPTION_IMMEDIATE_CANCEL_UNSUPPORTED:
 		"StreamPay does not support immediate cancellation for active subscriptions.",
 	SUBSCRIPTION_PERIOD_END_CANCEL_UNSUPPORTED:
