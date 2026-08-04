@@ -6,6 +6,7 @@ import type { PluginAdapter } from "./adapter";
 import type {
 	AuthorizeReferenceContext,
 	Subscription,
+	SubscriptionBillingIdentity,
 	SubscriptionReferenceType,
 	SubscriptionsOptions,
 } from "./types";
@@ -27,6 +28,15 @@ export function requireUser(ctx: GenericEndpointContext): StreamPaySessionUser {
 	return user;
 }
 
+export function defaultReferenceType(
+	user: StreamPaySessionUser,
+	referenceId: string,
+	billingIdentity: SubscriptionBillingIdentity | undefined,
+): SubscriptionReferenceType {
+	if (billingIdentity === "reference") return "user";
+	return referenceId === user.id ? "user" : "custom";
+}
+
 export function resolveReference(
 	user: StreamPaySessionUser,
 	query:
@@ -36,11 +46,12 @@ export function resolveReference(
 		  }
 		| null
 		| undefined,
+	billingIdentity?: SubscriptionBillingIdentity,
 ): { referenceId: string; referenceType: SubscriptionReferenceType } {
 	const referenceId = query?.referenceId ?? user.id;
 	return {
 		referenceId,
-		referenceType: query?.referenceType ?? (referenceId === user.id ? "user" : "custom"),
+		referenceType: query?.referenceType ?? defaultReferenceType(user, referenceId, billingIdentity),
 	};
 }
 
@@ -69,6 +80,46 @@ export async function authorizeReference(
 			message: "Not authorized for this subscription reference.",
 		});
 	}
+}
+
+export async function loadReferenceUser(
+	ctx: GenericEndpointContext,
+	referenceId: string,
+): Promise<StreamPaySessionUser> {
+	const row = await getAdapter(ctx).findOne<unknown>({
+		model: "user",
+		where: [{ field: "id", value: referenceId }],
+	});
+	const referenceUser = asSessionUser(row);
+	if (!referenceUser) {
+		throw new APIError("NOT_FOUND", {
+			code: $ERROR_CODES.SUBSCRIPTION_REFERENCE_USER_NOT_FOUND.code,
+			message: "The referenced user does not exist.",
+		});
+	}
+	if (referenceUser.isAnonymous) {
+		throw new APIError("BAD_REQUEST", {
+			code: $ERROR_CODES.SUBSCRIPTION_REFERENCE_USER_NOT_BILLABLE.code,
+			message: "Anonymous users cannot be billed for subscriptions.",
+		});
+	}
+	return referenceUser;
+}
+
+export async function resolveBillingUser(
+	ctx: GenericEndpointContext,
+	user: StreamPaySessionUser,
+	referenceId: string,
+	referenceType: SubscriptionReferenceType,
+	billingIdentity: SubscriptionBillingIdentity | undefined,
+): Promise<StreamPaySessionUser> {
+	if (billingIdentity !== "reference") return user;
+	if (referenceId === user.id && referenceType === "user") return user;
+	if (referenceType === "user") return loadReferenceUser(ctx, referenceId);
+	throw new APIError("BAD_REQUEST", {
+		code: $ERROR_CODES.SUBSCRIPTION_REFERENCE_NOT_BILLABLE.code,
+		message: `Subscription checkout cannot resolve a StreamPay consumer for referenceType "${referenceType}". Only "user" references have a billing identity.`,
+	});
 }
 
 export function getAdapter(ctx: GenericEndpointContext): PluginAdapter {

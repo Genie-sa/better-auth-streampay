@@ -741,7 +741,7 @@ describe("subscriptions() endpoints", () => {
 			});
 		});
 
-		it("honors authorizeReference returning true", async () => {
+		it("honors authorizeReference returning true and bills the acting user by default", async () => {
 			const authorizeReference = vi.fn().mockResolvedValue(true);
 			const plugin = buildSubsPlugin([PRO_PLAN], mockClient, { authorizeReference });
 			const handler = unwrapHandler(plugin.endpoints.upgradeSubscription);
@@ -763,6 +763,137 @@ describe("subscriptions() endpoints", () => {
 				}),
 				expect.anything(),
 			);
+			expect(mockClient.createPaymentLink).toHaveBeenCalledWith(
+				expect.objectContaining({ organization_consumer_id: "cons_me" }),
+			);
+		});
+
+		it("bills the referenced user's consumer, not the acting user's", async () => {
+			const authorizeReference = vi.fn().mockResolvedValue(true);
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient, {
+				authorizeReference,
+				billingIdentity: "reference",
+			});
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscription);
+
+			mockClient.createPaymentLink.mockResolvedValue({ id: "pl_ref", url: "https://x" });
+			mockClient.getPaymentUrl.mockReturnValue("https://x");
+
+			const adapter = createMockAdapter();
+			adapter.tables.user = [
+				{ id: "user-other", email: "other@example.com", streampayConsumerId: "cons_other" },
+			];
+
+			const { ctx } = setupCtx({
+				adapter,
+				user: { id: "user-me", streampayConsumerId: "cons_me" },
+				body: { plan: "pro", referenceId: "user-other", referenceType: "user" },
+			});
+
+			await expect(handler(ctx)).resolves.toBeDefined();
+			expect(mockClient.createPaymentLink).toHaveBeenCalledWith(
+				expect.objectContaining({ organization_consumer_id: "cons_other" }),
+			);
+			expect(getSubscriptionRows(adapter)[0]).toMatchObject({
+				referenceId: "user-other",
+				streampayConsumerId: "cons_other",
+			});
+		});
+
+		it("provisions a consumer for the referenced user when they have none", async () => {
+			const authorizeReference = vi.fn().mockResolvedValue(true);
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient, {
+				authorizeReference,
+				billingIdentity: "reference",
+			});
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscription);
+
+			mockClient.createPaymentLink.mockResolvedValue({ id: "pl_prov", url: "https://x" });
+			mockClient.getPaymentUrl.mockReturnValue("https://x");
+			mockClient.listConsumers.mockResolvedValue({ data: [], pagination: {} });
+			mockClient.createConsumer.mockResolvedValue({ id: "cons_new" });
+
+			const adapter = createMockAdapter();
+			adapter.tables.user = [
+				{ id: "user-other", email: "other@example.com", streampayConsumerId: null },
+			];
+
+			const { ctx } = setupCtx({
+				adapter,
+				user: { id: "user-me", streampayConsumerId: "cons_me" },
+				body: { plan: "pro", referenceId: "user-other", referenceType: "user" },
+			});
+
+			await expect(handler(ctx)).resolves.toBeDefined();
+			expect(mockClient.createConsumer).toHaveBeenCalledWith(
+				expect.objectContaining({ external_id: "user-other", email: "other@example.com" }),
+			);
+			expect(ctx.context.internalAdapter.updateUser).toHaveBeenCalledWith("user-other", {
+				streampayConsumerId: "cons_new",
+			});
+			expect(mockClient.createPaymentLink).toHaveBeenCalledWith(
+				expect.objectContaining({ organization_consumer_id: "cons_new" }),
+			);
+		});
+
+		it("rejects a user reference that does not exist", async () => {
+			const authorizeReference = vi.fn().mockResolvedValue(true);
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient, {
+				authorizeReference,
+				billingIdentity: "reference",
+			});
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscription);
+
+			const { ctx } = setupCtx({
+				user: { id: "user-me", streampayConsumerId: "cons_me" },
+				body: { plan: "pro", referenceId: "user-ghost", referenceType: "user" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({
+				errorCode: "SUBSCRIPTION_REFERENCE_USER_NOT_FOUND",
+			});
+			expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
+		});
+
+		it("rejects an anonymous user reference", async () => {
+			const authorizeReference = vi.fn().mockResolvedValue(true);
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient, {
+				authorizeReference,
+				billingIdentity: "reference",
+			});
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscription);
+
+			const adapter = createMockAdapter();
+			adapter.tables.user = [{ id: "user-anon", email: "anon@example.com", isAnonymous: true }];
+
+			const { ctx } = setupCtx({
+				adapter,
+				user: { id: "user-me", streampayConsumerId: "cons_me" },
+				body: { plan: "pro", referenceId: "user-anon", referenceType: "user" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({
+				errorCode: "SUBSCRIPTION_REFERENCE_USER_NOT_BILLABLE",
+			});
+		});
+
+		it("rejects non-user references that have no billing identity", async () => {
+			const authorizeReference = vi.fn().mockResolvedValue(true);
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient, {
+				authorizeReference,
+				billingIdentity: "reference",
+			});
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscription);
+
+			const { ctx } = setupCtx({
+				user: { id: "user-me", streampayConsumerId: "cons_me" },
+				body: { plan: "pro", referenceId: "org-1", referenceType: "organization" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({
+				errorCode: "SUBSCRIPTION_REFERENCE_NOT_BILLABLE",
+			});
+			expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
 		});
 
 		it("requires authorization when a custom reference happens to equal the user id", async () => {
@@ -2279,6 +2410,44 @@ describe("subscriptions() endpoints", () => {
 	});
 
 	describe("listSubscriptions / currentSubscription", () => {
+		it("under reference billing, the referenced user sees the row in their own reads", async () => {
+			const authorizeReference = vi.fn().mockResolvedValue(true);
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient, {
+				authorizeReference,
+				billingIdentity: "reference",
+			});
+
+			mockClient.createPaymentLink.mockResolvedValue({ id: "pl_rt", url: "https://x" });
+			mockClient.getPaymentUrl.mockReturnValue("https://x");
+
+			const adapter = createMockAdapter();
+			adapter.tables.user = [
+				{ id: "user-other", email: "other@example.com", streampayConsumerId: "cons_other" },
+			];
+
+			const upgrade = unwrapHandler(plugin.endpoints.upgradeSubscription);
+			const { ctx: buyerCtx } = setupCtx({
+				adapter,
+				user: { id: "user-me", streampayConsumerId: "cons_me" },
+				body: { plan: "pro", referenceId: "user-other" },
+			});
+			await upgrade(buyerCtx);
+
+			// The target reads with no query params — the default referenceType must match
+			// the one checkout wrote, or their own subscription is invisible to them.
+			const list = unwrapHandler<Array<Record<string, unknown>>>(
+				plugin.endpoints.listSubscriptions,
+			);
+			const { ctx: targetCtx } = setupCtx({
+				adapter,
+				user: { id: "user-other", streampayConsumerId: "cons_other" },
+			});
+
+			const result = await list(targetCtx);
+			expect(result).toHaveLength(1);
+			expect(result[0]).toMatchObject({ referenceId: "user-other", referenceType: "user" });
+		});
+
 		it("listSubscriptions returns rows scoped to user.id with plan info", async () => {
 			const plugin = buildSubsPlugin([PRO_PLAN, BASIC_PLAN], mockClient);
 			const handler = unwrapHandler<Array<Record<string, unknown>>>(

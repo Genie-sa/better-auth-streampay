@@ -14,9 +14,11 @@ import { toAPIError } from "../../utils/errors";
 import { getLogger } from "../../utils/logger";
 import {
 	authorizeReference,
+	defaultReferenceType,
 	getAdapter,
 	requireConfirmedOwnedSubscription,
 	requireUser,
+	resolveBillingUser,
 } from "./access";
 import { deleteReservedSubscription, resumeOrReserveCheckoutSlot } from "./checkout-reservation";
 import {
@@ -218,7 +220,8 @@ export function buildSubscriptionEndpoints(
 				const user = requireUser(ctx);
 				const referenceId = ctx.body.referenceId ?? user.id;
 				const referenceType: SubscriptionReferenceType =
-					ctx.body.referenceType ?? (referenceId === user.id ? "user" : "custom");
+					ctx.body.referenceType ??
+					defaultReferenceType(user, referenceId, subsOptions.billingIdentity);
 				await authorizeReference(ctx, user, referenceId, referenceType, "upgrade", subsOptions);
 
 				const plans = await plansRef();
@@ -274,6 +277,14 @@ export function buildSubscriptionEndpoints(
 					});
 				}
 
+				const billingUser = await resolveBillingUser(
+					ctx,
+					user,
+					referenceId,
+					referenceType,
+					subsOptions.billingIdentity,
+				);
+
 				const activeSlotKey = subscriptionSlotKey(referenceType, referenceId, plan.group);
 				const reservation = await resumeOrReserveCheckoutSlot({
 					client,
@@ -288,7 +299,7 @@ export function buildSubscriptionEndpoints(
 						const { consumerId } = await ensureConsumerForUser(
 							options,
 							{ context: ctx.context },
-							user,
+							billingUser,
 						);
 						return {
 							consumerId,

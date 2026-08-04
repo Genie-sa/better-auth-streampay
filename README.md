@@ -419,6 +419,39 @@ subscriptions({
 
 Without this callback, cross-account actions return `FORBIDDEN`.
 
+### Who gets billed
+
+By default, checkout bills the acting user's StreamPay consumer whatever the reference points
+at. Set `billingIdentity: "reference"` to bill the user named by `referenceId` instead:
+
+```ts
+subscriptions({
+  plans,
+  authorizeReference,
+  billingIdentity: "reference",
+});
+```
+
+```ts
+await auth.api.upgradeSubscription({
+  body: { plan: "pro", referenceId: targetUserId },
+  headers,
+});
+```
+
+That bills `targetUserId`'s consumer, provisioning one if they have none. `authorizeReference`
+is still the only gate — the consumer is derived from the reference it already approved, never
+from the request body.
+
+Under `"reference"`, `referenceType` defaults to `"user"` rather than `"custom"`, so ownership
+and billing land on the same identity and the subscription appears in the target user's own
+reads with no query params.
+
+Only `"user"` references have a billing identity. Under `"reference"`, upgrading with a
+`referenceType` of `"organization"` or `"custom"` returns `SUBSCRIPTION_REFERENCE_NOT_BILLABLE`,
+since those have no StreamPay consumer to charge. Both types still work for reads and for
+managing existing subscriptions.
+
 ## Admin
 
 `admin()` adds billing actions for payments, subscriptions, freezes, consumers, invoices,

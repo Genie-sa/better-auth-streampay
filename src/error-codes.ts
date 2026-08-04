@@ -65,6 +65,10 @@ export const $ERROR_CODES = defineErrorCodes({
 	SUBSCRIPTION_FREEZE_NOT_ACTIVE: "No active freeze period was found for this subscription.",
 	SUBSCRIPTION_REFERENCE_NOT_AUTHORIZED:
 		"You are not authorized to act on this subscription reference.",
+	SUBSCRIPTION_REFERENCE_USER_NOT_FOUND: "The referenced user does not exist.",
+	SUBSCRIPTION_REFERENCE_USER_NOT_BILLABLE: "The referenced user cannot be billed.",
+	SUBSCRIPTION_REFERENCE_NOT_BILLABLE:
+		"This reference type has no billing identity. Only user references can be billed.",
 	WEBHOOK_REPLAY_IN_PROGRESS: "This webhook event is already being replayed.",
 	UNKNOWN: "An unexpected error occurred.",
 });

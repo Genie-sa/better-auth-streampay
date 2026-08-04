@@ -19,6 +19,7 @@ export type SubscriptionRecurringInterval = NonNullable<SubscriptionDetailed["re
 
 export type SubscriptionBillingStatus = "current" | "past_due";
 export type SubscriptionReferenceType = "user" | "organization" | "custom";
+export type SubscriptionBillingIdentity = "session" | "reference";
 
 /** Controls per-seat checkout without conflating billed seats with entitlement limits. */
 export interface StreamPaySeatBilling {
@@ -181,6 +182,9 @@ interface SubscriptionsOptionsBase extends SubscriptionCallbacks {
 
 	/** Enabled by default, so lifecycle callbacks must tolerate repeated delivery. */
 	retryOnCallbackError?: boolean;
+
+	/** Which StreamPay consumer a subscription checkout is billed to. */
+	billingIdentity?: SubscriptionBillingIdentity;
 
 	/** Defaults to active, trialing, frozen, and past_due; changes affect access control. */
 	accessStatuses?: readonly SubscriptionStatus[];
