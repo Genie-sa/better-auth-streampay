@@ -152,6 +152,50 @@ configure. Invalid resolver output is a generic 500 and logs only invalid field 
 `onCheckoutCreated` throws, the plugin attempts to deactivate the new link, but that compensation
 is best effort. Keep the write idempotent and reconcile final order state from idempotent webhooks.
 
+## Bill another user or organization
+
+These endpoints have no HTTP route. Only server code can call them. Check permission first.
+
+```ts
+// Subscription checkout billed to any user (referenceType defaults to "user"):
+const { url } = await auth.api.upgradeSubscriptionForReference({
+  body: { plan: "pro", referenceId: targetUserId },
+});
+
+// Subscription checkout billed to an organization:
+await auth.api.upgradeSubscriptionForReference({
+  body: { plan: "team", referenceId: orgId, referenceType: "organization", seats: 10 },
+});
+
+// One-time payment link billed to a user or organization:
+await auth.api.checkoutForReference({
+  body: { slug: "consulting-hour", referenceId: orgId, referenceType: "organization" },
+});
+```
+
+Organization billing needs this option on `streampay()`:
+
+```ts
+streampay({
+  client: streamPayClient,
+  organization: {
+    enabled: true,
+    // Only when the StreamPay account requires contact fields on consumers:
+    getBillingDetails: async ({ organization }) => ({
+      phone_number: await billingPhoneFor(organization.id),
+    }),
+  },
+  use: [/* ... */],
+});
+```
+
+Run the database step again after enabling it: the option adds
+`organization.streampayConsumerId`.
+
+Send the returned `url` to whoever completes payment. Typed failures:
+`SUBSCRIPTION_ORG_BILLING_NOT_ENABLED`, `ORG_NOT_FOUND`, `BILLING_CONTACT_REQUIRED`,
+`SUBSCRIPTION_REFERENCE_USER_NOT_FOUND`, `SUBSCRIPTION_REFERENCE_USER_NOT_BILLABLE`.
+
 ## Client
 
 ```ts

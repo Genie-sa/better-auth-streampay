@@ -1,6 +1,6 @@
 ---
 name: better-auth-streampay-integration
-description: Integrate better-auth-streampay for checkout, subscriptions, billing, admin tools, signed webhooks, or database changes.
+description: Integrate better-auth-streampay for checkout, subscriptions, organization billing, server-initiated billing for another user or org, admin tools, signed webhooks, or database changes.
 license: MIT
 metadata:
   author: Genie-sa
@@ -42,7 +42,7 @@ Find:
 
 Check the installed versions. The plugin needs:
 
-- `better-auth ^1.5.0`
+- `better-auth ^1.6.23`
 - `@streamsdk/typescript ^1.1.3`
 - `zod ^3.24.0 || ^4.0.0`
 
@@ -61,6 +61,15 @@ Use only what the app needs:
 | `webhooks()` | Signed event handling and subscription sync |
 
 Do not add `admin()` unless the app has a real admin check.
+
+Who pays is fixed, not configured: **HTTP endpoints bill the signed-in user; server-only
+endpoints bill the reference** (a user or an organization). When the app must bill someone
+other than the signed-in user — admin tools, cron jobs, webhook-driven flows — use the
+server-only endpoints `upgradeSubscriptionForReference` and `checkoutForReference`. They have
+no HTTP route; the app's own server code is the gate.
+
+Turn on `organization: { enabled: true }` in the `streampay()` options only when the app bills
+organizations. It adds a `streampayConsumerId` column to the organization model.
 
 Use lazy consumer creation by default. Enable `createConsumerOnSignUp` only when StreamPay
 consumer creation should be allowed to block sign-up.
@@ -99,6 +108,18 @@ For server-authoritative checkout:
 
 Do not add a client-field trust switch. Configuring `resolveCheckout` enables strict field rejection
 automatically.
+
+For server-only billing (billing another user or an organization):
+
+- call `auth.api.upgradeSubscriptionForReference` or `auth.api.checkoutForReference` from
+  server code only, after the app's own permission check
+- never expose these calls through an unauthenticated route
+- for organizations, add `organization.getBillingDetails` when the StreamPay account requires
+  contact fields on consumers; the plugin owns `name`, `email`, and `external_id`
+- deliver the returned payment link to whoever completes payment
+
+Load the **Bill another user or organization** section of
+[code-templates.md](references/code-templates.md) for the exact shapes.
 
 For webhooks:
 
@@ -141,6 +162,7 @@ at startup or request time.
 Check that:
 
 - `user.streampayConsumerId` exists with a unique constraint or index
+- `organization.streampayConsumerId` exists when organization billing is on
 - `subscription` exists when subscriptions are on
 - `streampayWebhookEvent` exists when webhook tracking is on
 - `subscription.seats` is backfilled to `1` when upgrading existing subscription rows
@@ -191,6 +213,12 @@ When server-authoritative checkout is enabled, also test:
   StreamPay call
 - invalid resolver output returns a generic 500 while the server log identifies invalid field paths
 - persistence failure preserves an intentional `APIError` and triggers best-effort link deactivation
+
+When server-only billing is enabled, also test:
+
+- the payment link is billed to the reference's consumer, not the caller's
+- an organization gets one consumer, stored on its row and reused on the next checkout
+- the app route that calls these endpoints rejects callers without permission
 
 For authenticated consumer creation, confirm a database read or write failure aborts the request
 and two local users cannot retain the same StreamPay consumer ID.
