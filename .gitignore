@@ -13,3 +13,4 @@ examples/**/node_modules
 examples/**/.output
 examples/**/.tanstack
 examples/**/dist
+pnpm-workspace.yaml

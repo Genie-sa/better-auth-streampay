@@ -69,7 +69,9 @@ server-only endpoints `upgradeSubscriptionForReference` and `checkoutForReferenc
 no HTTP route; the app's own server code is the gate.
 
 Turn on `organization: { enabled: true }` in the `streampay()` options only when the app bills
-organizations. It adds a `streampayConsumerId` column to the organization model.
+organizations. It needs the Better Auth organization plugin and adds a `streampayConsumerId`
+column to the organization model. If the organization plugin uses a custom table name, set the
+same name in `organization.modelName` — startup fails with instructions when they differ.
 
 Use lazy consumer creation by default. Enable `createConsumerOnSignUp` only when StreamPay
 consumer creation should be allowed to block sign-up.
@@ -218,6 +220,7 @@ When server-only billing is enabled, also test:
 
 - the payment link is billed to the reference's consumer, not the caller's
 - an organization gets one consumer, stored on its row and reused on the next checkout
+- a `checkoutForReference` link allows one payment unless `maxNumberOfPayments` was set
 - the app route that calls these endpoints rejects callers without permission
 
 For authenticated consumer creation, confirm a database read or write failure aborts the request

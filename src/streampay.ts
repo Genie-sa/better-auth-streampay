@@ -9,18 +9,45 @@ import type { StreamPayPluginRegistry } from "./plugins/subscriptions";
 import type { StreamPayEndpoints, StreamPayOptions } from "./types";
 import { version as PACKAGE_VERSION } from "./version";
 
-const organizationBillingSchema = {
-	organization: {
-		fields: {
-			streampayConsumerId: {
-				type: "string",
-				required: false,
-				input: false,
-				unique: true,
+function assertOrganizationBillingConfig(
+	options: StreamPayOptions,
+	plugins: readonly Pick<BetterAuthPlugin, "id" | "schema">[] | undefined,
+): void {
+	if (!options.organization?.enabled) return;
+
+	const organizationPlugin = plugins?.find((plugin) => plugin.id === "organization");
+	if (!organizationPlugin && !options.organization.modelName) {
+		throw new Error(
+			"streampay: `organization.enabled` needs the Better Auth organization plugin. " +
+				"Install it, or point `organization.modelName` at your own organization table.",
+		);
+	}
+
+	const pluginModelName = organizationPlugin?.schema?.organization?.modelName;
+	const effectiveModelName = options.organization.modelName ?? "organization";
+	if (pluginModelName && pluginModelName !== effectiveModelName) {
+		throw new Error(
+			`streampay: the organization plugin stores organizations in "${pluginModelName}" ` +
+				`but StreamPay organization billing would use "${effectiveModelName}". ` +
+				`Set \`organization.modelName: "${pluginModelName}"\` on the streampay() options.`,
+		);
+	}
+}
+
+const organizationBillingSchema = (modelName: string | undefined) =>
+	({
+		organization: {
+			...(modelName ? { modelName } : {}),
+			fields: {
+				streampayConsumerId: {
+					type: "string",
+					required: false,
+					input: false,
+					unique: true,
+				},
 			},
 		},
-	},
-} as const;
+	}) as const;
 
 export const streampay = <O extends StreamPayOptions>(options: O) => {
 	const registry: StreamPayPluginRegistry = {};
@@ -50,10 +77,13 @@ export const streampay = <O extends StreamPayOptions>(options: O) => {
 					},
 				},
 			},
-			...(options.organization?.enabled ? organizationBillingSchema : {}),
+			...(options.organization?.enabled
+				? organizationBillingSchema(options.organization.modelName)
+				: {}),
 			...extraSchema,
 		},
-		init() {
+		init(ctx) {
+			assertOrganizationBillingConfig(options, ctx.options.plugins);
 			return {
 				options: {
 					databaseHooks: {

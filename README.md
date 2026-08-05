@@ -441,11 +441,23 @@ streampay({
 });
 ```
 
-This contributes a `streampayConsumerId` column to the `organization` model (run
+Org billing needs the Better Auth `organization()` plugin — the plugin refuses to start
+without it. It contributes a `streampayConsumerId` column to the `organization` model (run
 `npx @better-auth/cli generate` after enabling). A server-initiated org checkout then bills the
 organization's own consumer — provisioned on first checkout with the org's name and no
 invented contact details, and reused for every renewal after that, no matter who started the
-checkout.
+checkout. Two concurrent first checkouts settle on one consumer: the first claim wins and the
+other request reuses it.
+
+If your organization plugin uses a custom table name, pass the same name here:
+
+```ts
+organization({ schema: { organization: { modelName: "orgs" } } }),
+streampay({ client, organization: { enabled: true, modelName: "orgs" }, use: [/* ... */] }),
+```
+
+Plugin schema contributions each restate the table name, so leaving `modelName` off would reset
+a custom name — the plugin detects that mismatch at startup and tells you exactly what to set.
 
 StreamPay consumers created this way carry `external_id: "ref:organization:<orgId>"`. If your
 provider account requires contact details on consumers, supply them server-side:
@@ -482,6 +494,11 @@ await sendCheckoutEmail(targetUserId, url);
 `referenceType` defaults to `"user"`; pass `"organization"` to start an org checkout the same
 way. The returned `url` is a StreamPay payment link — deliver it to whoever completes payment.
 
+A pending checkout is only resumed when it bills the same consumer — a link created for one
+payer is never handed to another. Organization upgrades grant no trial when `isTrialEligible`
+is configured, because that policy is asked about users; without the callback, the default
+first-subscription trial still applies.
+
 ### Server-initiated payment links
 
 `checkoutForReference` is the one-time-payment counterpart: server code creates a payment link
@@ -495,10 +512,12 @@ const { url } = await auth.api.checkoutForReference({
 ```
 
 It accepts the same product/pricing fields as `checkout` (minus `redirect`), requires
-`referenceId`, and defaults `referenceType` to `"user"`. The link's `custom_metadata` carries
-the validated `referenceId` and `referenceType`, so webhook handlers can attribute the payment.
-`resolveCheckout` and `authenticatedUsersOnly` do not apply — the trusted caller supplies all
-fields directly.
+`referenceId`, and defaults `referenceType` to `"user"`. Because the link is locked to one
+consumer, it allows **one payment by default** — pass `maxNumberOfPayments` to allow more. The
+link's `custom_metadata` carries the validated `referenceId` and `referenceType`, and
+`onCheckoutCreated` receives both (plus the resolved user for user targets), so handlers can
+attribute the payment. `resolveCheckout` and `authenticatedUsersOnly` do not apply — the
+trusted caller supplies all fields directly.
 
 ## Admin
 

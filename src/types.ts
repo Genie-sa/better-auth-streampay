@@ -180,6 +180,15 @@ export interface BillingOrganization {
 export interface OrganizationBillingOptions {
 	enabled: boolean;
 
+	/**
+	 * Physical table name of the organization model. Set this to the same value
+	 * as the Better Auth organization plugin's `schema.organization.modelName`
+	 * when that plugin uses a custom table name — plugin schema contributions
+	 * each restate the model name, so omitting it here would reset a custom
+	 * name back to `organization`.
+	 */
+	modelName?: string;
+
 	/** Contact and tax fields for org consumers; core identity fields are plugin-owned. */
 	getBillingDetails?: (
 		data: { organization: BillingOrganization },

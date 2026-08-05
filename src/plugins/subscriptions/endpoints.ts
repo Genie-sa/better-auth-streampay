@@ -262,18 +262,22 @@ export function buildSubscriptionEndpoints(
 		const trialEligible =
 			plan.trialPeriodDays === undefined
 				? false
-				: subsOptions.isTrialEligible && trialUser
-					? await subsOptions.isTrialEligible(
-							{
-								user: trialUser,
-								referenceId,
-								referenceType,
-								plan,
-								previousSubscriptions: existingActive,
-								defaultEligible: defaultTrialEligible,
-							},
-							ctx,
-						)
+				: subsOptions.isTrialEligible
+					? trialUser
+						? await subsOptions.isTrialEligible(
+								{
+									user: trialUser,
+									referenceId,
+									referenceType,
+									plan,
+									previousSubscriptions: existingActive,
+									defaultEligible: defaultTrialEligible,
+								},
+								ctx,
+							)
+						: // The app has a trial policy but there is no user to ask it about
+							// (server-initiated organization billing): grant no trial.
+							false
 					: defaultTrialEligible;
 		const liveActive = existingActive.find((row) => isManageableSubscriptionStatus(row.status));
 		if (liveActive) {
@@ -286,6 +290,7 @@ export function buildSubscriptionEndpoints(
 		}
 
 		const activeSlotKey = subscriptionSlotKey(referenceType, referenceId, plan.group);
+		const { consumerId } = await ensureConsumerForBillingAccount(options, ctx, billing);
 		const reservation = await resumeOrReserveCheckoutSlot({
 			client,
 			adapter,
@@ -293,55 +298,52 @@ export function buildSubscriptionEndpoints(
 			activeSlotKey,
 			planName: plan.name,
 			seats,
+			consumerId,
 			now: Date.now(),
 			log: getLogger(ctx),
 			createReservation: async () => {
-				const { consumerId } = await ensureConsumerForBillingAccount(options, ctx, billing);
 				return {
-					consumerId,
-					data: {
-						referenceId,
-						referenceType,
-						activeSlotKey,
-						streampaySubscriptionId: null,
-						plan: plan.name,
-						planVersion: plan.version ?? null,
-						productId: plan.productId,
-						group: plan.group ?? null,
-						seats,
-						streampayConsumerId: consumerId,
-						streampayPaymentLinkId: null,
-						status: "incomplete",
-						providerStatus: null,
-						billingStatus: "current",
-						amountInSmallestUnit: quotedTotal,
-						originalAmountInSmallestUnit: quotedTotal,
-						currency: plan.currency ?? "SAR",
-						billingInterval: plan.billingInterval,
-						billingIntervalCount: plan.billingIntervalCount ?? 1,
-						periodStart: null,
-						periodEnd: null,
-						currentCycleNumber: null,
-						trialStart: null,
-						trialEnd: null,
-						cancelAtPeriodEnd: false,
-						cancelAt: null,
-						cancelScheduledAt: null,
-						canceledAt: null,
-						pendingPlan: null,
-						pendingProductId: null,
-						pendingPlanEffectiveAt: null,
-						pendingSeats: null,
-						pendingSeatsEffectiveAt: null,
-						endedAt: null,
-						frozenAt: null,
-						freezeEndAt: null,
-						providerUpdatedAt: null,
-						syncedAt: null,
-						createdAt: new Date(),
-						updatedAt: new Date(),
-					} satisfies Omit<Subscription, "id">,
-				};
+					referenceId,
+					referenceType,
+					activeSlotKey,
+					streampaySubscriptionId: null,
+					plan: plan.name,
+					planVersion: plan.version ?? null,
+					productId: plan.productId,
+					group: plan.group ?? null,
+					seats,
+					streampayConsumerId: consumerId,
+					streampayPaymentLinkId: null,
+					status: "incomplete",
+					providerStatus: null,
+					billingStatus: "current",
+					amountInSmallestUnit: quotedTotal,
+					originalAmountInSmallestUnit: quotedTotal,
+					currency: plan.currency ?? "SAR",
+					billingInterval: plan.billingInterval,
+					billingIntervalCount: plan.billingIntervalCount ?? 1,
+					periodStart: null,
+					periodEnd: null,
+					currentCycleNumber: null,
+					trialStart: null,
+					trialEnd: null,
+					cancelAtPeriodEnd: false,
+					cancelAt: null,
+					cancelScheduledAt: null,
+					canceledAt: null,
+					pendingPlan: null,
+					pendingProductId: null,
+					pendingPlanEffectiveAt: null,
+					pendingSeats: null,
+					pendingSeatsEffectiveAt: null,
+					endedAt: null,
+					frozenAt: null,
+					freezeEndAt: null,
+					providerUpdatedAt: null,
+					syncedAt: null,
+					createdAt: new Date(),
+					updatedAt: new Date(),
+				} satisfies Omit<Subscription, "id">;
 			},
 		});
 		if (reservation.kind === "recovered") {
@@ -355,7 +357,7 @@ export function buildSubscriptionEndpoints(
 				seats: reservation.row.seats ?? 1,
 			};
 		}
-		const { row, consumerId } = reservation;
+		const { row } = reservation;
 
 		const linkInput: CreatePaymentLinkDto = {
 			name: `Subscription — ${plan.name}`,

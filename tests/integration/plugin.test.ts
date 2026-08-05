@@ -1,5 +1,6 @@
 import type { CouponCreate, ProductCreate, SubscriptionCancel } from "@streamsdk/typescript";
 import type { User } from "better-auth";
+import { organization } from "better-auth/plugins";
 import { getTestInstance } from "better-auth/test";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { streampayClient } from "../../src/client";
@@ -108,5 +109,79 @@ describe("streampay plugin integration", () => {
 		expect(clientPlugin).toBeDefined();
 		expect($ERROR_CODES.CONSUMER_DUPLICATE.code).toBe("CONSUMER_DUPLICATE");
 		expect(clientPlugin.$ERROR_CODES.CONSUMER_DUPLICATE.code).toBe("CONSUMER_DUPLICATE");
+	});
+
+	describe("organization billing configuration", () => {
+		it("keeps the schema working with the organization plugin's default table name", async () => {
+			const { auth } = await getTestInstance({
+				plugins: [
+					organization(),
+					streampay({
+						client: createMockStreamPayClient(),
+						organization: { enabled: true },
+						use: [],
+					}),
+				],
+			});
+			const ctx = await auth.$context;
+			expect(ctx.tables.organization?.modelName).toBe("organization");
+			expect(ctx.tables.organization?.fields.streampayConsumerId).toMatchObject({
+				unique: true,
+			});
+			expect(ctx.tables.organization?.fields.name).toBeDefined();
+		});
+
+		it("keeps a custom organization table name when modelName is configured", async () => {
+			const { auth } = await getTestInstance({
+				plugins: [
+					organization({ schema: { organization: { modelName: "orgs" } } }),
+					streampay({
+						client: createMockStreamPayClient(),
+						organization: { enabled: true, modelName: "orgs" },
+						use: [],
+					}),
+				],
+			});
+			const ctx = await auth.$context;
+			expect(ctx.tables.organization?.modelName).toBe("orgs");
+			expect(ctx.tables.organization?.fields.streampayConsumerId).toMatchObject({
+				unique: true,
+			});
+		});
+
+		it("fails fast when the organization plugin uses a custom table name the billing options do not", async () => {
+			await expect(
+				(async () => {
+					const { auth } = await getTestInstance({
+						plugins: [
+							organization({ schema: { organization: { modelName: "orgs" } } }),
+							streampay({
+								client: createMockStreamPayClient(),
+								organization: { enabled: true },
+								use: [],
+							}),
+						],
+					});
+					await auth.$context;
+				})(),
+			).rejects.toThrow(/organization\.modelName/);
+		});
+
+		it("fails fast when organization billing is enabled without the organization plugin", async () => {
+			await expect(
+				(async () => {
+					const { auth } = await getTestInstance({
+						plugins: [
+							streampay({
+								client: createMockStreamPayClient(),
+								organization: { enabled: true },
+								use: [],
+							}),
+						],
+					});
+					await auth.$context;
+				})(),
+			).rejects.toThrow(/organization plugin/);
+		});
 	});
 });

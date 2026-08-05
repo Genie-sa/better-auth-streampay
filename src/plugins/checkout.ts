@@ -50,6 +50,11 @@ export interface CheckoutOverrides {
 export interface CheckoutCreatedContext {
 	user: CheckoutUser | null;
 	referenceId?: string;
+	/**
+	 * Present only for `checkoutForReference` calls, where `referenceId` is the
+	 * billed user or organization id rather than an app-owned order reference.
+	 */
+	referenceType?: "user" | "organization";
 	paymentLinkId: string;
 	url: string;
 	/** The exact payload sent to StreamPay. */
@@ -381,6 +386,9 @@ async function createCheckoutPaymentLink(
 					if (effective.referenceId !== undefined) {
 						callbackData.referenceId = effective.referenceId;
 					}
+					if (args.referenceType !== undefined) {
+						callbackData.referenceType = args.referenceType;
+					}
 					await checkoutOptions.onCheckoutCreated(callbackData, ctx);
 				} catch (err: unknown) {
 					if (err instanceof APIError) throw err;
@@ -497,12 +505,17 @@ export const checkout = (checkoutOptions: CheckoutOptions = {}) => {
 						);
 						const { consumerId } = await ensureConsumerForBillingAccount(options, ctx, billing);
 
-						const items = await resolveProducts(ctx.body, checkoutOptions);
+						const effective: CheckoutParams = {
+							...ctx.body,
+							maxNumberOfPayments: ctx.body.maxNumberOfPayments ?? 1,
+						};
+						const items = await resolveProducts(effective, checkoutOptions);
 						const { url, id } = await createCheckoutPaymentLink(ctx, client, checkoutOptions, {
-							user: null,
+							user:
+								billing.referenceType === "user" ? checkoutUser(billing.user, billing.user) : null,
 							consumerId,
 							items,
-							effective: ctx.body,
+							effective,
 							referenceType,
 						});
 						return ctx.json({ url, id, redirect: false });

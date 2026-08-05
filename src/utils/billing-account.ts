@@ -165,16 +165,45 @@ async function assertConsumerUnclaimed(
 	if (orgOwner && orgOwner.id !== organizationId) throw claimConflictError();
 }
 
+/**
+ * Claims the consumer for the organization with a compare-and-set: the write
+ * only lands while the row has no consumer yet. When a concurrent request wins
+ * the claim, the winner's consumer id is returned so both requests bill the
+ * same consumer.
+ */
 async function persistOrganizationConsumerId(
 	ctx: GenericEndpointContext,
 	organizationId: string,
 	consumerId: string,
-): Promise<void> {
+): Promise<string> {
 	await assertConsumerUnclaimed(ctx, consumerId, organizationId);
-	await getBillingAdapter(ctx).update({
+	const adapter = getBillingAdapter(ctx);
+	const claimed = await adapter.update({
 		model: ORGANIZATION_MODEL,
 		update: { streampayConsumerId: consumerId },
-		where: [{ field: "id", value: organizationId }],
+		where: [
+			{ field: "id", value: organizationId },
+			{ field: "streampayConsumerId", value: null },
+		],
+	});
+	if (claimed) return consumerId;
+
+	const current = asBillingOrganization(
+		await adapter.findOne<unknown>({
+			model: ORGANIZATION_MODEL,
+			where: [{ field: "id", value: organizationId }],
+		}),
+	);
+	if (typeof current?.streampayConsumerId === "string") {
+		if (current.streampayConsumerId !== consumerId) {
+			getLogger(ctx).warn(
+				`organization=${organizationId} was claimed concurrently; using stored consumer=${current.streampayConsumerId}`,
+			);
+		}
+		return current.streampayConsumerId;
+	}
+	throw new APIError("INTERNAL_SERVER_ERROR", {
+		message: "StreamPay consumer linking failed. Please try again.",
 	});
 }
 
@@ -190,8 +219,8 @@ async function ensureConsumerForOrganization(
 	const externalId = organizationExternalId(organization.id);
 	const recovered = await findConsumerByExternalId(options.client, { externalId });
 	if (recovered) {
-		await persistOrganizationConsumerId(ctx, organization.id, recovered);
-		return { consumerId: recovered, created: false };
+		const consumerId = await persistOrganizationConsumerId(ctx, organization.id, recovered);
+		return { consumerId, created: false };
 	}
 
 	const payload = await buildOrganizationConsumerPayload(ctx, options, organization);
@@ -202,16 +231,16 @@ async function ensureConsumerForOrganization(
 				message: "StreamPay consumer was created but did not return an id.",
 			});
 		}
-		await persistOrganizationConsumerId(ctx, organization.id, consumer.id);
-		return { consumerId: consumer.id, created: true };
+		const consumerId = await persistOrganizationConsumerId(ctx, organization.id, consumer.id);
+		return { consumerId, created: consumerId === consumer.id };
 	} catch (err: unknown) {
 		if (err instanceof APIError) throw err;
 
 		if (readEnvelope(readSdkErrorFields(err).body)?.code === "DUPLICATE_CONSUMER") {
 			const raced = await findConsumerByExternalId(options.client, { externalId });
 			if (raced) {
-				await persistOrganizationConsumerId(ctx, organization.id, raced);
-				return { consumerId: raced, created: false };
+				const consumerId = await persistOrganizationConsumerId(ctx, organization.id, raced);
+				return { consumerId, created: false };
 			}
 		}
 		if (isMissingContactRejection(err, payload)) {

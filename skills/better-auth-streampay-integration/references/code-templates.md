@@ -167,19 +167,23 @@ await auth.api.upgradeSubscriptionForReference({
   body: { plan: "team", referenceId: orgId, referenceType: "organization", seats: 10 },
 });
 
-// One-time payment link billed to a user or organization:
+// One-time payment link billed to a user or organization.
+// The link allows one payment by default; pass maxNumberOfPayments for more.
 await auth.api.checkoutForReference({
   body: { slug: "consulting-hour", referenceId: orgId, referenceType: "organization" },
 });
 ```
 
-Organization billing needs this option on `streampay()`:
+Organization billing needs the Better Auth `organization()` plugin plus this option on
+`streampay()`:
 
 ```ts
 streampay({
   client: streamPayClient,
   organization: {
     enabled: true,
+    // Only when the organization plugin uses a custom table name:
+    modelName: "orgs",
     // Only when the StreamPay account requires contact fields on consumers:
     getBillingDetails: async ({ organization }) => ({
       phone_number: await billingPhoneFor(organization.id),
@@ -188,6 +192,9 @@ streampay({
   use: [/* ... */],
 });
 ```
+
+Startup fails with a clear error when the organization plugin is missing or its table name
+does not match — the error message says what to set.
 
 Run the database step again after enabling it: the option adds
 `organization.streampayConsumerId`.
