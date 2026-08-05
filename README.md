@@ -29,7 +29,7 @@ pnpm add better-auth-streampay @streamsdk/typescript
 
 Required versions:
 
-- `better-auth ^1.6.23`
+- `better-auth ^1.6.17`
 - `@streamsdk/typescript ^1.1.3`
 - `zod ^3.24.0 || ^4.0.0`
 
@@ -475,8 +475,8 @@ organization: {
 `getBillingDetails` cannot override `name` or `external_id` — those stay plugin-owned. Since
 organizations have no built-in email, a billing email may be supplied here. Failure modes are
 typed: `SUBSCRIPTION_ORG_BILLING_NOT_ENABLED` when org billing is off, `ORG_NOT_FOUND` when the
-reference doesn't resolve, and `BILLING_CONTACT_REQUIRED` when StreamPay rejects a contact-less
-consumer.
+reference doesn't resolve, and `BILLING_CONTACT_REQUIRED` when StreamPay's validation names the
+missing `email` or `phone_number` field. Other provider validation errors pass through unchanged.
 
 Consumer ownership is global: a StreamPay consumer linked to an organization can never be
 claimed by a user, and the other way around — both directions end in

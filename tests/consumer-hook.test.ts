@@ -217,6 +217,58 @@ describe("consumer hooks", () => {
 				);
 			});
 
+			it("REFUSES to adopt an organization-owned consumer during signup, even with email claims", async () => {
+				const options = createEagerTestStreamPayOptions({
+					client: mockClient,
+					claimExistingConsumerBy: ["email"],
+				});
+				mockClient.createConsumer.mockRejectedValue(duplicateError);
+				mockClient.listConsumers.mockResolvedValue(
+					createMockConsumerList([
+						createMockConsumer({
+							id: "cons_org_owned",
+							email: "test@example.com",
+							external_id: "ref:organization:org-1",
+						}),
+					]),
+				);
+
+				const user = createMockUser();
+				const ctx = createMockContext({ user });
+
+				await expect(invokeHook(onBeforeUserCreate(options), user, ctx)).rejects.toBeInstanceOf(
+					MockAPIError,
+				);
+				expect(mockClient.updateConsumer).not.toHaveBeenCalled();
+			});
+
+			it("REFUSES a signup adoption when the recovered consumer is linked to a local organization", async () => {
+				const options = createEagerTestStreamPayOptions({
+					client: mockClient,
+					claimExistingConsumerBy: ["email"],
+				});
+				mockClient.createConsumer.mockRejectedValue(duplicateError);
+				mockClient.listConsumers.mockResolvedValue(
+					createMockConsumerList([
+						createMockConsumer({
+							id: "cons_stranded_org",
+							email: "test@example.com",
+							external_id: null,
+						}),
+					]),
+				);
+
+				const user = createMockUser();
+				const ctx = createMockContext({ user });
+				vi.mocked(ctx.context.adapter.findOne).mockImplementation(async (input) =>
+					(input as { model: string }).model === "organization" ? { id: "org-1" } : null,
+				);
+
+				await expect(invokeHook(onBeforeUserCreate(options), user, ctx)).rejects.toBeInstanceOf(
+					MockAPIError,
+				);
+			});
+
 			it('reclaims an already-linked SAME-EMAIL consumer when claimExistingConsumerBy is ["email"]', async () => {
 				const options = createEagerTestStreamPayOptions({
 					client: mockClient,

@@ -3,6 +3,8 @@ import type { User } from "better-auth";
 import { APIError } from "better-auth/api";
 import type { StreamPayOptions } from "../types";
 import {
+	assertConsumerUnclaimed,
+	type EnsureConsumerContext,
 	isDuplicateConsumerError,
 	isNotFoundError,
 	resolveDuplicateConsumer,
@@ -32,6 +34,42 @@ function hasInternalAdapter(ctx: StreamPayHookContext): ctx is StreamPayMutableH
 		typeof ctx.context.internalAdapter === "object" &&
 		"updateUser" in ctx.context.internalAdapter &&
 		typeof ctx.context.internalAdapter.updateUser === "function"
+	);
+}
+
+function hasAdapter(ctx: StreamPayHookContext): boolean {
+	return (
+		"adapter" in ctx.context &&
+		ctx.context.adapter !== null &&
+		typeof ctx.context.adapter === "object" &&
+		"findOne" in (ctx.context.adapter as object) &&
+		typeof (ctx.context.adapter as { findOne?: unknown }).findOne === "function"
+	);
+}
+
+/**
+ * Signup adoption of an existing consumer must pass the same ownership rules
+ * as lazy provisioning. Fails closed when the check cannot run.
+ */
+async function assertSignupConsumerUnclaimed(
+	options: StreamPayOptions,
+	ctx: StreamPayHookContext,
+	consumerId: string,
+	userId: string | undefined,
+): Promise<void> {
+	if (!hasAdapter(ctx)) {
+		getLogger(ctx).error(
+			`cannot verify ownership of consumer=${consumerId} during signup: adapter unavailable`,
+		);
+		throw new APIError("INTERNAL_SERVER_ERROR", {
+			message: "StreamPay consumer provisioning failed. Please try again.",
+		});
+	}
+	await assertConsumerUnclaimed(
+		options,
+		ctx as unknown as EnsureConsumerContext,
+		consumerId,
+		userId ?? "",
 	);
 }
 
@@ -75,6 +113,7 @@ export const onBeforeUserCreate =
 			if (isDuplicateConsumerError(err)) {
 				const reusedId = await resolveDuplicateConsumer(options, createPayload, context);
 				if (reusedId) {
+					await assertSignupConsumerUnclaimed(options, context, reusedId, user.id);
 					return { data: { streampayConsumerId: reusedId } };
 				}
 			}

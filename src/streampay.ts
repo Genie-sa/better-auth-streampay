@@ -16,20 +16,23 @@ function assertOrganizationBillingConfig(
 	if (!options.organization?.enabled) return;
 
 	const organizationPlugin = plugins?.find((plugin) => plugin.id === "organization");
-	if (!organizationPlugin && !options.organization.modelName) {
+	if (!organizationPlugin) {
 		throw new Error(
-			"streampay: `organization.enabled` needs the Better Auth organization plugin. " +
-				"Install it, or point `organization.modelName` at your own organization table.",
+			"streampay: `organization.enabled` requires the Better Auth organization plugin.",
 		);
 	}
 
-	const pluginModelName = organizationPlugin?.schema?.organization?.modelName;
-	const effectiveModelName = options.organization.modelName ?? "organization";
-	if (pluginModelName && pluginModelName !== effectiveModelName) {
+	const pluginModelName = organizationPlugin.schema?.organization?.modelName ?? "organization";
+	const configuredModelName = options.organization.modelName ?? "organization";
+	if (pluginModelName !== configuredModelName) {
 		throw new Error(
 			`streampay: the organization plugin stores organizations in "${pluginModelName}" ` +
-				`but StreamPay organization billing would use "${effectiveModelName}". ` +
-				`Set \`organization.modelName: "${pluginModelName}"\` on the streampay() options.`,
+				`but StreamPay organization billing is configured for "${configuredModelName}". ` +
+				`Set \`organization.modelName: "${pluginModelName}"\` on the streampay() options` +
+				(options.organization.modelName
+					? ""
+					: " (or remove the custom name from the organization plugin)") +
+				".",
 		);
 	}
 }

@@ -46,7 +46,7 @@ jobs:
         run: pnpm lint && pnpm typecheck && pnpm vitest run --exclude tests/live/**/*.test.ts --exclude tests/integration/**/*.test.ts && pnpm build && node -e 'import("./dist/index.js")' && node -e 'require("./dist/index.cjs")'
 
   minimum-peer-compatibility:
-    name: Better Auth 1.5 / Zod 3.24 compatibility
+    name: Better Auth 1.6.17 / Zod 3.24 compatibility
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -67,7 +67,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Install minimum supported peers
-        run: pnpm add --save-dev better-auth@1.6.23 zod@3.24.0 --lockfile=false
+        run: pnpm add --save-dev better-auth@1.6.17 zod@3.24.0 --lockfile=false
 
       - name: Verify compatibility
         run: pnpm typecheck && pnpm test && pnpm build

@@ -9,7 +9,7 @@ import type {
 } from "../types";
 import { findConsumerByExternalId } from "./consumer";
 import { type EnsureConsumerContext, ensureConsumerForUser } from "./ensure-consumer";
-import { readEnvelope, readSdkErrorFields } from "./error-envelope";
+import { readEnvelope, readSdkErrorFields, readValidationDetails } from "./error-envelope";
 import { formatStreamPayError } from "./format-error";
 import { getLogger } from "./logger";
 import { asSessionUser, type StreamPaySessionUser } from "./session";
@@ -135,11 +135,18 @@ async function buildOrganizationConsumerPayload(
 	};
 }
 
+/**
+ * True only when the provider's field-level validation details point at the
+ * missing contact fields themselves. Any other validation failure keeps its
+ * generic provider error — a 400/422 can be about name, IBAN, tax fields, or
+ * anything else.
+ */
 function isMissingContactRejection(err: unknown, payload: ConsumerCreate): boolean {
 	if (payload.email || payload.phone_number) return false;
-	const { status, body } = readSdkErrorFields(err);
-	if (readEnvelope(body)?.code === "INVALID_PARAMETERS") return true;
-	return status === 400 || status === 422;
+	const details = readValidationDetails(readSdkErrorFields(err).body);
+	return details.some((detail) =>
+		detail.loc.some((part) => part === "email" || part === "phone_number"),
+	);
 }
 
 function claimConflictError(): APIError {
@@ -207,9 +214,10 @@ async function persistOrganizationConsumerId(
 }
 
 /**
- * Removes a consumer this request created but never linked or billed — a
- * concurrent claim won, so the fresh consumer has no payment links or local
- * owner. Failure only leaves an unused consumer behind, so it is logged, not
+ * Removes a consumer this request created but never linked or billed. The
+ * ownership re-read runs immediately before the delete: if any user or
+ * organization linked the consumer in the meantime, the delete is skipped.
+ * Failure only leaves an unused consumer behind, so it is logged, not
  * surfaced.
  */
 async function deleteUnusedConsumerBestEffort(
@@ -219,6 +227,18 @@ async function deleteUnusedConsumerBestEffort(
 	organizationId: string,
 ): Promise<void> {
 	try {
+		const adapter = getBillingAdapter(ctx);
+		const where: Where[] = [{ field: "streampayConsumerId", value: consumerId }];
+		const userOwner = await adapter.findOne<unknown>({ model: USER_MODEL, where });
+		const organizationOwner = userOwner
+			? null
+			: await adapter.findOne<unknown>({ model: ORGANIZATION_MODEL, where });
+		if (userOwner || organizationOwner) {
+			getLogger(ctx).warn(
+				`skipping delete of consumer=${consumerId}: another account linked it concurrently`,
+			);
+			return;
+		}
 		await options.client.deleteConsumer(consumerId);
 	} catch (err) {
 		getLogger(ctx).error(
@@ -251,7 +271,13 @@ async function ensureConsumerForOrganization(
 				message: "StreamPay consumer was created but did not return an id.",
 			});
 		}
-		const consumerId = await persistOrganizationConsumerId(ctx, organization.id, consumer.id);
+		let consumerId: string;
+		try {
+			consumerId = await persistOrganizationConsumerId(ctx, organization.id, consumer.id);
+		} catch (persistError) {
+			await deleteUnusedConsumerBestEffort(ctx, options, consumer.id, organization.id);
+			throw persistError;
+		}
 		if (consumerId !== consumer.id) {
 			await deleteUnusedConsumerBestEffort(ctx, options, consumer.id, organization.id);
 		}

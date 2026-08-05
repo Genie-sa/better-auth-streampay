@@ -2546,6 +2546,65 @@ describe("subscriptions() endpoints", () => {
 			expect(mockClient.deleteConsumer).toHaveBeenCalledWith("cons_new");
 		});
 
+		it("never deletes a freshly created consumer that another account linked concurrently", async () => {
+			const plugin = buildSubsPlugin(
+				[PRO_PLAN],
+				mockClient,
+				{},
+				{ organization: { enabled: true } },
+			);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			mockClient.listConsumers.mockResolvedValue({ data: [], pagination: {} });
+
+			const adapter = createMockAdapter();
+			adapter.tables.organization = [{ id: "org-1", name: "Acme Inc" }];
+			mockClient.createConsumer.mockImplementation(async () => {
+				adapter.tables.user = [
+					{ id: "user-racer", email: "racer@example.com", streampayConsumerId: "cons_new" },
+				];
+				return { id: "cons_new" };
+			});
+
+			const { ctx } = serverCtx({
+				adapter,
+				body: { plan: "pro", referenceId: "org-1", referenceType: "organization" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({
+				errorCode: "STREAMPAY_CONSUMER_LINK_CONFLICT",
+			});
+			expect(mockClient.deleteConsumer).not.toHaveBeenCalled();
+			expect(adapter.tables.user?.[0]).toMatchObject({ streampayConsumerId: "cons_new" });
+		});
+
+		it("deletes the created consumer when organization persistence fails without a winner", async () => {
+			const plugin = buildSubsPlugin(
+				[PRO_PLAN],
+				mockClient,
+				{},
+				{ organization: { enabled: true } },
+			);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			mockClient.listConsumers.mockResolvedValue({ data: [], pagination: {} });
+
+			const adapter = createMockAdapter();
+			adapter.tables.organization = [{ id: "org-1", name: "Acme Inc" }];
+			mockClient.createConsumer.mockImplementation(async () => {
+				adapter.tables.organization = [];
+				return { id: "cons_new" };
+			});
+
+			const { ctx } = serverCtx({
+				adapter,
+				body: { plan: "pro", referenceId: "org-1", referenceType: "organization" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({ code: "INTERNAL_SERVER_ERROR" });
+			expect(mockClient.deleteConsumer).toHaveBeenCalledWith("cons_new");
+		});
+
 		it("still rejects a referenced user that does not exist", async () => {
 			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
 			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
@@ -2697,7 +2756,9 @@ describe("subscriptions() endpoints", () => {
 
 			mockClient.listConsumers.mockResolvedValue({ data: [], pagination: {} });
 			mockClient.createConsumer.mockRejectedValue(
-				mockApiError(422, { code: "INVALID_PARAMETERS", message: "email required" }),
+				mockApiError(422, {
+					detail: [{ loc: ["body", "email"], msg: "Field required", type: "missing" }],
+				}),
 			);
 
 			const adapter = createMockAdapter();
@@ -2710,6 +2771,38 @@ describe("subscriptions() endpoints", () => {
 
 			await expect(handler(ctx)).rejects.toMatchObject({
 				errorCode: "BILLING_CONTACT_REQUIRED",
+			});
+			expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
+		});
+
+		it("keeps a non-contact validation error generic instead of BILLING_CONTACT_REQUIRED", async () => {
+			const plugin = buildSubsPlugin(
+				[PRO_PLAN],
+				mockClient,
+				{},
+				{
+					organization: { enabled: true },
+				},
+			);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			mockClient.listConsumers.mockResolvedValue({ data: [], pagination: {} });
+			mockClient.createConsumer.mockRejectedValue(
+				mockApiError(422, {
+					detail: [{ loc: ["body", "vat_number"], msg: "Invalid VAT number", type: "value_error" }],
+				}),
+			);
+
+			const adapter = createMockAdapter();
+			adapter.tables.organization = [{ id: "org-1", name: "Acme Inc" }];
+
+			const { ctx } = serverCtx({
+				adapter,
+				body: { plan: "pro", referenceId: "org-1", referenceType: "organization" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({
+				code: "INTERNAL_SERVER_ERROR",
 			});
 			expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
 		});

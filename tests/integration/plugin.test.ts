@@ -222,5 +222,40 @@ describe("streampay plugin integration", () => {
 				})(),
 			).rejects.toThrow(/organization plugin/);
 		});
+
+		it("fails fast when only the billing options use a custom table name", async () => {
+			await expect(
+				(async () => {
+					const { auth } = await getTestInstance({
+						plugins: [
+							organization(),
+							streampay({
+								client: createMockStreamPayClient(),
+								organization: { enabled: true, modelName: "orgs" },
+								use: [],
+							}),
+						],
+					});
+					await auth.$context;
+				})(),
+			).rejects.toThrow(/stores organizations in "organization"/);
+		});
+
+		it("fails fast when a custom table name is configured without the organization plugin", async () => {
+			await expect(
+				(async () => {
+					const { auth } = await getTestInstance({
+						plugins: [
+							streampay({
+								client: createMockStreamPayClient(),
+								organization: { enabled: true, modelName: "orgs" },
+								use: [],
+							}),
+						],
+					});
+					await auth.$context;
+				})(),
+			).rejects.toThrow(/organization plugin/);
+		});
 	});
 });

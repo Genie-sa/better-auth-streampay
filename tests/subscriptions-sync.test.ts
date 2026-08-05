@@ -155,7 +155,7 @@ describe("syncWebhookPayload", () => {
 				amount: "99.00",
 				current_period_start: "2026-01-01T00:00:00Z",
 				current_period_end: "2026-02-01T00:00:00Z",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 				recurring_interval: "MONTH",
 				recurring_interval_count: 1,
 			});
@@ -373,7 +373,7 @@ describe("syncWebhookPayload", () => {
 					referenceId: "user-123",
 					plan: "pro",
 					status: "incomplete",
-					streampayConsumerId: "cons_1",
+					streampayConsumerId: "cons_mocked",
 					streampaySubscriptionId: null,
 				}),
 			});
@@ -385,7 +385,7 @@ describe("syncWebhookPayload", () => {
 				currency: "SAR",
 				current_period_start: "2026-01-01T00:00:00Z",
 				current_period_end: "2026-02-01T00:00:00Z",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 				recurring_interval: "MONTH",
 				recurring_interval_count: 1,
 			});
@@ -425,7 +425,7 @@ describe("syncWebhookPayload", () => {
 					referenceId: "user-123",
 					plan: "pro",
 					status: "incomplete",
-					streampayConsumerId: "cons_1",
+					streampayConsumerId: "cons_mocked",
 					streampaySubscriptionId: null,
 					streampayPaymentLinkId: "pl_exact",
 					createdAt: new Date("2026-01-01T00:00:00Z"),
@@ -438,7 +438,7 @@ describe("syncWebhookPayload", () => {
 					referenceId: "user-123",
 					plan: "pro",
 					status: "incomplete",
-					streampayConsumerId: "cons_1",
+					streampayConsumerId: "cons_mocked",
 					streampaySubscriptionId: null,
 					streampayPaymentLinkId: "pl_other",
 					createdAt: new Date("2026-01-02T00:00:00Z"),
@@ -447,7 +447,7 @@ describe("syncWebhookPayload", () => {
 			client.getSubscription.mockResolvedValue({
 				id: "sub_exact_checkout",
 				status: "ACTIVE",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 				latest_invoice: { payment_link_id: "pl_exact", currency: "SAR" },
 			});
 			const payload = createMockWebhookPayload({
@@ -478,7 +478,7 @@ describe("syncWebhookPayload", () => {
 				id: "sub_xyz",
 				status: "ACTIVE",
 				amount: "99.00",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 				recurring_interval: "MONTH",
 				recurring_interval_count: 1,
 				items: [{ product: { id: "prod_pro" } } as never],
@@ -511,7 +511,7 @@ describe("syncWebhookPayload", () => {
 			client.getSubscription.mockResolvedValue({
 				id: "sub_external_canceled",
 				status: "CANCELED",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 				items: [{ product_id: "prod_pro", quantity: 1 }],
 				latest_invoice: { payment_link_id: "pl_external", currency: "SAR" },
 			});
@@ -557,7 +557,7 @@ describe("syncWebhookPayload", () => {
 			client.getSubscription.mockResolvedValue({
 				id: "sub_custom_ref",
 				status: "ACTIVE",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 			});
 			const callback = vi.fn<NonNullable<SubscriptionCallbacks["onSubscriptionActivated"]>>();
 
@@ -590,7 +590,7 @@ describe("syncWebhookPayload", () => {
 			client.getSubscription.mockResolvedValue({
 				id: "sub_custom",
 				status: "ACTIVE",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 				items: [{ product_id: "prod_pro", quantity: 1 }],
 			});
 
@@ -689,6 +689,7 @@ describe("syncWebhookPayload", () => {
 					referenceType: "user",
 					plan: "pro",
 					status: "incomplete",
+					activeSlotKey: subscriptionSlotKey("user", "user-123", null),
 					streampayConsumerId: "cons_expected",
 					streampaySubscriptionId: null,
 				}),
@@ -700,28 +701,124 @@ describe("syncWebhookPayload", () => {
 				items: [{ product_id: "prod_pro", quantity: 1 }],
 			});
 
+			// The reserved row is skipped; rebuilding a replacement collides on the
+			// active slot, so the event errors instead of stealing the reservation.
+			await expect(
+				syncWebhookPayload(
+					ctx,
+					createMockWebhookPayload({
+						event_type: "SUBSCRIPTION_CREATED",
+						entity_id: "sub_other_payer",
+						data: {
+							metadata: {
+								[PLAN_NAME_METADATA_KEY]: "pro",
+								[REFERENCE_ID_METADATA_KEY]: "user-123",
+								[REFERENCE_TYPE_METADATA_KEY]: "user",
+							},
+						},
+					}),
+					client,
+					resolvedPlans(),
+					{},
+				),
+			).rejects.toThrow();
+
+			expect(ctx.adapter.tables.subscription).toHaveLength(1);
+			expect(
+				ctx.adapter.tables.subscription?.find((row) => row.id === "row_reserved"),
+			).toMatchObject({
+				streampaySubscriptionId: null,
+				streampayConsumerId: "cons_expected",
+				activeSlotKey: subscriptionSlotKey("user", "user-123", null),
+			});
+		});
+
+		it("dead-letters a known-subscription webhook whose provider consumer changed", async () => {
+			const ctx = createMockSyncContext();
+			await ctx.adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_linked",
+					referenceId: "user-123",
+					referenceType: "user",
+					plan: "pro",
+					status: "active",
+					streampayConsumerId: "cons_expected",
+					streampaySubscriptionId: "sub_known",
+				}),
+			});
+			client.getSubscription.mockResolvedValue({
+				id: "sub_known",
+				status: "ACTIVE",
+				organization_consumer_id: "cons_attacker",
+				items: [{ product_id: "prod_pro", quantity: 1 }],
+			});
+
+			await expect(
+				syncWebhookPayload(
+					ctx,
+					createMockWebhookPayload({
+						event_type: "SUBSCRIPTION_ACTIVATED",
+						entity_id: "sub_known",
+					}),
+					client,
+					resolvedPlans(),
+					{},
+				),
+			).rejects.toThrow(/different consumer/);
+
+			expect(ctx.adapter.tables.subscription?.find((row) => row.id === "row_linked")).toMatchObject(
+				{
+					streampayConsumerId: "cons_expected",
+					streampaySubscriptionId: "sub_known",
+				},
+			);
+			expect(ctx.adapter.tables.streampayWebhookEvent?.[0]).toMatchObject({
+				status: "dead_letter",
+			});
+		});
+
+		it("keeps the stored payer when the provider omits its consumer", async () => {
+			const ctx = createMockSyncContext();
+			await ctx.adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_kept",
+					referenceId: "user-123",
+					referenceType: "user",
+					plan: "pro",
+					status: "incomplete",
+					streampayConsumerId: "cons_expected",
+					streampaySubscriptionId: null,
+				}),
+			});
+			client.getSubscription.mockResolvedValue({
+				id: "sub_no_payer",
+				status: "ACTIVE",
+				items: [{ product_id: "prod_pro", quantity: 1 }],
+			});
+
 			await syncWebhookPayload(
 				ctx,
 				createMockWebhookPayload({
 					event_type: "SUBSCRIPTION_CREATED",
-					entity_id: "sub_other_payer",
+					entity_id: "sub_no_payer",
 					data: {
 						metadata: {
 							[PLAN_NAME_METADATA_KEY]: "pro",
 							[REFERENCE_ID_METADATA_KEY]: "user-123",
 							[REFERENCE_TYPE_METADATA_KEY]: "user",
+							[SUBSCRIPTION_ROW_ID_METADATA_KEY]: "row_kept",
 						},
 					},
 				}),
 				client,
 				resolvedPlans(),
 				{},
-			).catch(() => undefined);
+			);
 
-			expect(
-				ctx.adapter.tables.subscription?.find((row) => row.id === "row_reserved"),
-			).toMatchObject({
-				streampaySubscriptionId: null,
+			expect(ctx.adapter.tables.subscription?.find((row) => row.id === "row_kept")).toMatchObject({
+				streampaySubscriptionId: "sub_no_payer",
 				streampayConsumerId: "cons_expected",
 			});
 		});
@@ -731,7 +828,7 @@ describe("syncWebhookPayload", () => {
 			client.getSubscription.mockResolvedValue({
 				id: "sub_rebuilt",
 				status: "ACTIVE",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 				items: [{ product_id: "prod_pro", quantity: 1 }],
 				latest_invoice: { payment_link_id: "pl_rebuilt", currency: "SAR" },
 			});
@@ -770,7 +867,7 @@ describe("syncWebhookPayload", () => {
 				id: "sub_mystery",
 				status: "ACTIVE",
 				amount: "99.00",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 			});
 
 			const payload = createMockWebhookPayload({
@@ -831,7 +928,7 @@ describe("syncWebhookPayload", () => {
 				id: "sub_e",
 				status,
 				amount: "99.00",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 			};
 			if (status === "FROZEN") {
 				subResponse.latest_freeze = {
@@ -864,7 +961,7 @@ describe("syncWebhookPayload", () => {
 			client.getSubscription.mockResolvedValue({
 				id: "sub_terminal",
 				status: "CANCELED",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 			});
 
 			await syncWebhookPayload(
@@ -902,7 +999,7 @@ describe("syncWebhookPayload", () => {
 				id: "sub_restored",
 				status: "ACTIVE",
 				updated_at: "2026-02-01T00:00:00.000Z",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 				cancel_at_period_end: false,
 			});
 			const callback = vi.fn<NonNullable<SubscriptionCallbacks["onSubscriptionCanceled"]>>();
@@ -945,7 +1042,7 @@ describe("syncWebhookPayload", () => {
 			client.getSubscription.mockResolvedValue({
 				id: "sub_cancel_scheduled",
 				status: "ACTIVE",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 				cancel_at_period_end: true,
 				current_period_end: "2026-03-01T00:00:00.000Z",
 			});
@@ -986,7 +1083,7 @@ describe("syncWebhookPayload", () => {
 			client.getSubscription.mockResolvedValue({
 				id: "sub_cancel_restored",
 				status: "ACTIVE",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 				cancel_at_period_end: false,
 				updated_at: "2026-03-01T00:00:00.000Z",
 			});
@@ -1025,7 +1122,7 @@ describe("syncWebhookPayload", () => {
 			client.getSubscription.mockResolvedValue({
 				id: "sub_inactivated",
 				status: "INACTIVE",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 			});
 
 			await syncWebhookPayload(
@@ -1059,7 +1156,7 @@ describe("syncWebhookPayload", () => {
 			client.getSubscription.mockResolvedValue({
 				id: "sub_legacy",
 				status: "ACTIVE",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 			});
 
 			await syncWebhookPayload(
@@ -1095,7 +1192,7 @@ describe("syncWebhookPayload", () => {
 				id: "sub_f",
 				status: "ACTIVE",
 				amount: "99.00",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 			});
 
 			const fn = vi.fn();
@@ -1128,7 +1225,7 @@ describe("syncWebhookPayload", () => {
 				id: "sub_paid_later",
 				status: "ACTIVE",
 				updated_at: "2026-02-01T00:00:00.000Z",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 			});
 			const callback = vi.fn<NonNullable<SubscriptionCallbacks["onSubscriptionPaymentFailed"]>>();
 
@@ -1165,7 +1262,7 @@ describe("syncWebhookPayload", () => {
 			client.getSubscription.mockResolvedValue({
 				id: "sub_health",
 				status: "ACTIVE",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 				items: [{ product_id: "prod_pro", quantity: 1 }],
 			});
 
@@ -1226,7 +1323,7 @@ describe("syncWebhookPayload", () => {
 				currency: "KWD",
 				amount: "10.123",
 				original_amount: "12.500",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 			});
 
 			await syncWebhookPayload(
@@ -1260,7 +1357,7 @@ describe("syncWebhookPayload", () => {
 				id: "sub_trial",
 				status: "TRIALING",
 				trial_end: "2026-06-01T00:00:00Z",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 			});
 
 			await syncWebhookPayload(
@@ -1293,7 +1390,7 @@ describe("syncWebhookPayload", () => {
 			client.getSubscription.mockResolvedValue({
 				id: "sub_change",
 				status: "ACTIVE",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 				items: [{ product_id: "prod_pro", quantity: 1 }],
 				pending_change: {
 					id: "pending_1",
@@ -1336,7 +1433,7 @@ describe("syncWebhookPayload", () => {
 			client.getSubscription.mockResolvedValue({
 				id: "sub_seat_change",
 				status: "ACTIVE",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 				items: [{ product_id: "prod_pro", quantity: 3 }],
 				pending_change: {
 					id: "pending_seats",
@@ -1380,7 +1477,7 @@ describe("syncWebhookPayload", () => {
 			client.getSubscription.mockResolvedValue({
 				id: "sub_changed",
 				status: "ACTIVE",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 				items: [{ product_id: "prod_pro_plus", quantity: 1 }],
 			});
 			const callback = vi.fn();
@@ -1420,7 +1517,7 @@ describe("syncWebhookPayload", () => {
 			client.getSubscription.mockResolvedValue({
 				id: "sub_seats_applied",
 				status: "ACTIVE",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 				items: [{ product_id: "prod_pro", quantity: 9 }],
 			});
 
@@ -1476,7 +1573,7 @@ describe("syncWebhookPayload", () => {
 			client.getSubscription.mockResolvedValue({
 				id: "sub_exact_callback",
 				status,
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 			});
 			const fn = vi.fn();
 			const callbacks: SubscriptionCallbacks = {};
@@ -1508,7 +1605,7 @@ describe("syncWebhookPayload", () => {
 			client.getSubscription.mockResolvedValue({
 				id: "sub_change",
 				status: "ACTIVE",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 				items: [{ product_id: "prod_pro", quantity: 1 }],
 			});
 			const callback = vi.fn();
@@ -1559,7 +1656,7 @@ describe("syncWebhookPayload", () => {
 				current_period_start: "2026-02-01T00:00:00Z",
 				current_period_end: "2026-03-01T00:00:00Z",
 				current_cycle_number: 2,
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 			});
 
 			const fn = vi.fn();
@@ -1601,7 +1698,7 @@ describe("syncWebhookPayload", () => {
 				updated_at: "2026-03-01T00:00:00.000Z",
 				current_period_end: "2026-04-01T00:00:00.000Z",
 				current_cycle_number: 3,
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 			});
 			const callback = vi.fn<NonNullable<SubscriptionCallbacks["onSubscriptionRenewed"]>>();
 
@@ -1667,7 +1764,7 @@ describe("syncWebhookPayload", () => {
 				status: "ACTIVE",
 				current_period_end: "2026-03-01T00:00:00Z",
 				current_cycle_number: 1,
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 			});
 			const callback = vi.fn();
 
@@ -1708,7 +1805,7 @@ describe("syncWebhookPayload", () => {
 				status: "ACTIVE",
 				current_period_end: "2026-03-01T00:00:00Z",
 				current_cycle_number: 2,
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 			});
 			const callback = vi
 				.fn()
@@ -1770,7 +1867,7 @@ describe("syncWebhookPayload", () => {
 				id: "sub_u",
 				status: "ACTIVE",
 				amount: "99.00",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 			});
 
 			const fn = vi.fn().mockRejectedValue(new Error("userland boom"));
@@ -1809,7 +1906,7 @@ describe("syncWebhookPayload", () => {
 			client.getSubscription.mockResolvedValue({
 				id: "sub_log_only",
 				status: "ACTIVE",
-				organization_consumer_id: "cons_1",
+				organization_consumer_id: "cons_mocked",
 			});
 			const callback = vi.fn().mockRejectedValue(new Error("log-only boom"));
 

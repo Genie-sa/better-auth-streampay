@@ -477,6 +477,18 @@ async function reconcileFromStreamPay(
 	}
 
 	const existing = await findSubscriptionByStreampayId(ctx, streampaySubscriptionId);
+	if (
+		existing?.streampayConsumerId &&
+		stream.organization_consumer_id &&
+		existing.streampayConsumerId !== stream.organization_consumer_id
+	) {
+		logger(ctx).warn(
+			`webhook ${payload.event_type}: provider consumer does not match the stored payer for sub=${streampaySubscriptionId}; refusing to reconcile.`,
+		);
+		throw new SubscriptionCorrelationError(
+			`Webhook ${payload.event_type} reported a different consumer than the stored payer for sub=${streampaySubscriptionId}.`,
+		);
+	}
 	let projected: Partial<Subscription> = {
 		...projectSubscriptionFields(stream),
 		...projectPlanFields(stream, plans),
@@ -651,6 +663,7 @@ async function reconcileFromStreamPay(
 		data: {
 			cancelScheduledAt: null,
 			canceledAt: null,
+			streampayConsumerId: stream.organization_consumer_id ?? null,
 			...projected,
 			referenceId,
 			referenceType,

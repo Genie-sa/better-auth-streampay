@@ -42,7 +42,7 @@ Find:
 
 Check the installed versions. The plugin needs:
 
-- `better-auth ^1.6.23`
+- `better-auth ^1.6.17`
 - `@streamsdk/typescript ^1.1.3`
 - `zod ^3.24.0 || ^4.0.0`
 

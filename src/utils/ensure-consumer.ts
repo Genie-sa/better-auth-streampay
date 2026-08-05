@@ -40,6 +40,8 @@ export interface EnsureConsumerContext extends StreamPayLoggerContext {
 	};
 }
 
+export const ORGANIZATION_EXTERNAL_ID_PREFIX = "ref:organization:";
+
 export function canClaimBy(
 	mode: ClaimExistingConsumerBy | undefined,
 	identifier: ClaimExistingConsumerIdentifier,
@@ -71,6 +73,15 @@ export async function resolveDuplicateConsumer(
 	if (!existing?.id) return null;
 
 	if (existing.external_id) {
+		if (existing.external_id.startsWith(ORGANIZATION_EXTERNAL_ID_PREFIX)) {
+			getLogger(context).error(
+				`duplicate: consumer ${existing.id} belongs to an organization (${existing.external_id}) and cannot be claimed by a user`,
+			);
+			throw new APIError("CONFLICT", {
+				code: "STREAMPAY_CONSUMER_LINK_CONFLICT",
+				message: "This StreamPay consumer is already linked to another account.",
+			});
+		}
 		if (createPayload.external_id && existing.external_id === createPayload.external_id) {
 			return existing.id;
 		}
@@ -211,7 +222,7 @@ function consumerClaimConflict(): APIError {
 	});
 }
 
-async function assertConsumerUnclaimed(
+export async function assertConsumerUnclaimed(
 	options: StreamPayOptions,
 	ctx: EnsureConsumerContext,
 	consumerId: string,
@@ -229,7 +240,22 @@ async function assertConsumerUnclaimed(
 	if (options.organization?.enabled) {
 		const organizationOwner = await findConsumerOwner(ctx, consumerId, "organization");
 		if (organizationOwner) throw consumerClaimConflict();
+		return;
 	}
+
+	// Org billing may have been enabled in the past: an organization that still
+	// owns this consumer must stay protected. When the organization model does
+	// not exist at all, the lookup fails and the consumer is simply unowned.
+	let organizationOwner: unknown = null;
+	try {
+		organizationOwner = await ctx.context.adapter.findOne({
+			model: "organization",
+			where: [{ field: "streampayConsumerId", value: consumerId }],
+		});
+	} catch {
+		organizationOwner = null;
+	}
+	if (organizationOwner) throw consumerClaimConflict();
 }
 
 async function persistConsumerId(

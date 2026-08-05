@@ -131,7 +131,9 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 			);
 			const options = createTestStreamPayOptions({ client: mockClient });
 			const ctx = createMockContext();
-			vi.mocked(ctx.context.adapter.findOne).mockResolvedValue({ id: "user-1" });
+			vi.mocked(ctx.context.adapter.findOne).mockImplementation(async (input) =>
+				(input as { model: string }).model === "user" ? { id: "user-1" } : null,
+			);
 
 			await expect(
 				ensureConsumerForUser(options, ctx, { id: "user-1", email: "a@b.com" }),
