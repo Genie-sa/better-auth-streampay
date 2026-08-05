@@ -9,6 +9,19 @@ import type { StreamPayPluginRegistry } from "./plugins/subscriptions";
 import type { StreamPayEndpoints, StreamPayOptions } from "./types";
 import { version as PACKAGE_VERSION } from "./version";
 
+const organizationBillingSchema = {
+	organization: {
+		fields: {
+			streampayConsumerId: {
+				type: "string",
+				required: false,
+				input: false,
+				unique: true,
+			},
+		},
+	},
+} as const;
+
 export const streampay = <O extends StreamPayOptions>(options: O) => {
 	const registry: StreamPayPluginRegistry = {};
 	const endpoints = {} as StreamPayEndpoints;
@@ -37,6 +50,7 @@ export const streampay = <O extends StreamPayOptions>(options: O) => {
 					},
 				},
 			},
+			...(options.organization?.enabled ? organizationBillingSchema : {}),
 			...extraSchema,
 		},
 		init() {

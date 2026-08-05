@@ -29,7 +29,7 @@ pnpm add better-auth-streampay @streamsdk/typescript
 
 Required versions:
 
-- `better-auth ^1.5.0`
+- `better-auth ^1.6.23`
 - `@streamsdk/typescript ^1.1.3`
 - `zod ^3.24.0 || ^4.0.0`
 
@@ -421,36 +421,84 @@ Without this callback, cross-account actions return `FORBIDDEN`.
 
 ### Who gets billed
 
-By default, checkout bills the acting user's StreamPay consumer whatever the reference points
-at. Set `billingIdentity: "reference"` to bill the user named by `referenceId` instead:
+The rule has no configuration: **HTTP endpoints bill the session user; server-only endpoints
+bill the reference.**
+
+Session-driven checkouts (`upgradeSubscription`, `checkout`) always charge the acting user's
+StreamPay consumer, whatever the reference points at. To bill someone else — a user or an
+organization — your server code calls the server-only endpoints below; your own authorization
+(admin role, webhook signature, cron trust) is the gate.
+
+### Billing organizations
+
+Organization references become billable when you enable org billing on the StreamPay options:
 
 ```ts
-subscriptions({
-  plans,
-  authorizeReference,
-  billingIdentity: "reference",
+streampay({
+  client,
+  organization: { enabled: true },
+  use: [subscriptions({ plans, authorizeReference })],
 });
 ```
 
+This contributes a `streampayConsumerId` column to the `organization` model (run
+`npx @better-auth/cli generate` after enabling). A server-initiated org checkout then bills the
+organization's own consumer — provisioned on first checkout with the org's name and no
+invented contact details, and reused for every renewal after that, no matter who started the
+checkout.
+
+StreamPay consumers created this way carry `external_id: "ref:organization:<orgId>"`. If your
+provider account requires contact details on consumers, supply them server-side:
+
 ```ts
-await auth.api.upgradeSubscription({
+organization: {
+  enabled: true,
+  getBillingDetails: async ({ organization }) => ({
+    phone_number: await billingPhoneFor(organization.id),
+  }),
+},
+```
+
+`getBillingDetails` cannot override `name`, `email`, or `external_id` — those stay
+plugin-owned. Failure modes are typed: `SUBSCRIPTION_ORG_BILLING_NOT_ENABLED` when org billing
+is off, `ORG_NOT_FOUND` when the reference doesn't resolve, and `BILLING_CONTACT_REQUIRED`
+when StreamPay rejects a contact-less consumer.
+
+### Server-initiated upgrades
+
+`upgradeSubscriptionForReference` is registered on `auth.api` with no HTTP route — it can only
+be called from your own server code (cron jobs, admin tools, webhook handlers), never from a
+client. It skips session and `authorizeReference` checks — the calling code is the gate — but
+keeps every validation and billability check (the referenced user must exist and not be
+anonymous), and always bills the reference itself:
+
+```ts
+const { url } = await auth.api.upgradeSubscriptionForReference({
   body: { plan: "pro", referenceId: targetUserId },
-  headers,
+});
+await sendCheckoutEmail(targetUserId, url);
+```
+
+`referenceType` defaults to `"user"`; pass `"organization"` to start an org checkout the same
+way. The returned `url` is a StreamPay payment link — deliver it to whoever completes payment.
+
+### Server-initiated payment links
+
+`checkoutForReference` is the one-time-payment counterpart: server code creates a payment link
+billed to any user or organization. Same contract — no HTTP route, no session, the caller is
+the gate:
+
+```ts
+const { url } = await auth.api.checkoutForReference({
+  body: { slug: "consulting-hour", referenceId: targetUserId },
 });
 ```
 
-That bills `targetUserId`'s consumer, provisioning one if they have none. `authorizeReference`
-is still the only gate — the consumer is derived from the reference it already approved, never
-from the request body.
-
-Under `"reference"`, `referenceType` defaults to `"user"` rather than `"custom"`, so ownership
-and billing land on the same identity and the subscription appears in the target user's own
-reads with no query params.
-
-Only `"user"` references have a billing identity. Under `"reference"`, upgrading with a
-`referenceType` of `"organization"` or `"custom"` returns `SUBSCRIPTION_REFERENCE_NOT_BILLABLE`,
-since those have no StreamPay consumer to charge. Both types still work for reads and for
-managing existing subscriptions.
+It accepts the same product/pricing fields as `checkout` (minus `redirect`), requires
+`referenceId`, and defaults `referenceType` to `"user"`. The link's `custom_metadata` carries
+the validated `referenceId` and `referenceType`, so webhook handlers can attribute the payment.
+`resolveCheckout` and `authenticatedUsersOnly` do not apply — the trusted caller supplies all
+fields directly.
 
 ## Admin
 

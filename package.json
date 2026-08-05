@@ -79,7 +79,7 @@
   },
   "peerDependencies": {
     "@streamsdk/typescript": "^1.1.3",
-    "better-auth": "^1.5.0",
+    "better-auth": "^1.6.23",
     "zod": "^3.24.0 || ^4.0.0"
   },
   "devDependencies": {

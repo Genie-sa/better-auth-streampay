@@ -55,7 +55,7 @@ async function resolveLiveSubscription(
 	accessStatuses: readonly Subscription["status"][],
 ): Promise<Subscription | null> {
 	const user = requireUser(ctx);
-	const reference = resolveReference(user, query, subsOptions.billingIdentity);
+	const reference = resolveReference(user, query);
 	await authorizeReference(
 		ctx,
 		user,
@@ -90,7 +90,7 @@ export function buildSubscriptionReadEndpoints(
 			},
 			async (ctx) => {
 				const user = requireUser(ctx);
-				const reference = resolveReference(user, ctx.query, subsOptions.billingIdentity);
+				const reference = resolveReference(user, ctx.query);
 				await authorizeReference(
 					ctx,
 					user,

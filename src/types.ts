@@ -31,7 +31,7 @@ import type {
 	SubscriptionUpdate,
 	UpdatePaymentLinkStatusDto,
 } from "@streamsdk/typescript";
-import type { UnionToIntersection, User } from "better-auth";
+import type { GenericEndpointContext, UnionToIntersection, User } from "better-auth";
 import type { admin } from "./plugins/admin";
 import type { checkout } from "./plugins/checkout";
 import type { portal } from "./plugins/portal";
@@ -169,6 +169,24 @@ export type ConsumerCreateOverrides = Partial<
 export type ClaimExistingConsumerIdentifier = "email" | "phone";
 export type ClaimExistingConsumerBy = readonly ClaimExistingConsumerIdentifier[];
 
+/** Raw organization row as stored by the Better Auth organization plugin. */
+export interface BillingOrganization {
+	id: string;
+	name: string;
+	streampayConsumerId?: string | null;
+	[field: string]: unknown;
+}
+
+export interface OrganizationBillingOptions {
+	enabled: boolean;
+
+	/** Contact and tax fields for org consumers; core identity fields are plugin-owned. */
+	getBillingDetails?: (
+		data: { organization: BillingOrganization },
+		ctx: GenericEndpointContext,
+	) => Promise<ConsumerCreateOverrides> | ConsumerCreateOverrides;
+}
+
 export interface StreamPayOptions {
 	client: StreamPayClient;
 
@@ -180,6 +198,9 @@ export interface StreamPayOptions {
 		data: { user: Partial<User> },
 		request?: Request,
 	) => Promise<ConsumerCreateOverrides> | ConsumerCreateOverrides;
+
+	/** Enables billing organization references to the org's own StreamPay consumer. */
+	organization?: OrganizationBillingOptions;
 
 	use: StreamPayPlugins;
 }
