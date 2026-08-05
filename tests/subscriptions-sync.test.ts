@@ -373,6 +373,7 @@ describe("syncWebhookPayload", () => {
 					referenceId: "user-123",
 					plan: "pro",
 					status: "incomplete",
+					streampayConsumerId: "cons_1",
 					streampaySubscriptionId: null,
 				}),
 			});
@@ -424,6 +425,7 @@ describe("syncWebhookPayload", () => {
 					referenceId: "user-123",
 					plan: "pro",
 					status: "incomplete",
+					streampayConsumerId: "cons_1",
 					streampaySubscriptionId: null,
 					streampayPaymentLinkId: "pl_exact",
 					createdAt: new Date("2026-01-01T00:00:00Z"),
@@ -436,6 +438,7 @@ describe("syncWebhookPayload", () => {
 					referenceId: "user-123",
 					plan: "pro",
 					status: "incomplete",
+					streampayConsumerId: "cons_1",
 					streampaySubscriptionId: null,
 					streampayPaymentLinkId: "pl_other",
 					createdAt: new Date("2026-01-02T00:00:00Z"),
@@ -620,6 +623,106 @@ describe("syncWebhookPayload", () => {
 			expect(ctx.logs.warn.some((message) => message.includes("ignored unsafe"))).toBe(true);
 			expect(ctx.adapter.tables.streampayWebhookEvent?.[0]).toMatchObject({
 				status: "dead_letter",
+			});
+		});
+
+		it("dead-letters a protected row correlation when the provider consumer does not match", async () => {
+			const ctx = createMockSyncContext();
+			await ctx.adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_victim",
+					referenceId: "user-123",
+					referenceType: "user",
+					plan: "pro",
+					status: "incomplete",
+					streampayConsumerId: "cons_expected",
+					streampaySubscriptionId: null,
+				}),
+			});
+			client.getSubscription.mockResolvedValue({
+				id: "sub_attacker",
+				status: "ACTIVE",
+				organization_consumer_id: "cons_attacker",
+				items: [{ product_id: "prod_pro", quantity: 1 }],
+			});
+
+			await expect(
+				syncWebhookPayload(
+					ctx,
+					createMockWebhookPayload({
+						event_type: "SUBSCRIPTION_CREATED",
+						entity_id: "sub_attacker",
+						data: {
+							metadata: {
+								[PLAN_NAME_METADATA_KEY]: "pro",
+								[REFERENCE_ID_METADATA_KEY]: "user-123",
+								[REFERENCE_TYPE_METADATA_KEY]: "user",
+								[SUBSCRIPTION_ROW_ID_METADATA_KEY]: "row_victim",
+							},
+						},
+					}),
+					client,
+					resolvedPlans(),
+					{},
+				),
+			).rejects.toThrow(/protected subscription correlation/);
+
+			expect(ctx.adapter.tables.subscription?.find((row) => row.id === "row_victim")).toMatchObject(
+				{
+					streampaySubscriptionId: null,
+					streampayConsumerId: "cons_expected",
+				},
+			);
+			expect(ctx.adapter.tables.streampayWebhookEvent?.[0]).toMatchObject({
+				status: "dead_letter",
+			});
+		});
+
+		it("never adopts an incomplete row billed to a different consumer in fallback matching", async () => {
+			const ctx = createMockSyncContext();
+			await ctx.adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_reserved",
+					referenceId: "user-123",
+					referenceType: "user",
+					plan: "pro",
+					status: "incomplete",
+					streampayConsumerId: "cons_expected",
+					streampaySubscriptionId: null,
+				}),
+			});
+			client.getSubscription.mockResolvedValue({
+				id: "sub_other_payer",
+				status: "ACTIVE",
+				organization_consumer_id: "cons_attacker",
+				items: [{ product_id: "prod_pro", quantity: 1 }],
+			});
+
+			await syncWebhookPayload(
+				ctx,
+				createMockWebhookPayload({
+					event_type: "SUBSCRIPTION_CREATED",
+					entity_id: "sub_other_payer",
+					data: {
+						metadata: {
+							[PLAN_NAME_METADATA_KEY]: "pro",
+							[REFERENCE_ID_METADATA_KEY]: "user-123",
+							[REFERENCE_TYPE_METADATA_KEY]: "user",
+						},
+					},
+				}),
+				client,
+				resolvedPlans(),
+				{},
+			).catch(() => undefined);
+
+			expect(
+				ctx.adapter.tables.subscription?.find((row) => row.id === "row_reserved"),
+			).toMatchObject({
+				streampaySubscriptionId: null,
+				streampayConsumerId: "cons_expected",
 			});
 		});
 

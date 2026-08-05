@@ -2543,6 +2543,7 @@ describe("subscriptions() endpoints", () => {
 			expect(getSubscriptionRows(adapter)[0]).toMatchObject({
 				streampayConsumerId: "cons_winner",
 			});
+			expect(mockClient.deleteConsumer).toHaveBeenCalledWith("cons_new");
 		});
 
 		it("still rejects a referenced user that does not exist", async () => {
@@ -2716,6 +2717,7 @@ describe("subscriptions() endpoints", () => {
 		it("applies getBillingDetails overrides but keeps identity fields plugin-owned", async () => {
 			const getBillingDetails = vi.fn().mockResolvedValue({
 				phone_number: "+966500000000",
+				email: "billing@acme.example",
 				name: "clobbered",
 				external_id: "clobbered",
 			});
@@ -2746,6 +2748,7 @@ describe("subscriptions() endpoints", () => {
 			expect(mockClient.createConsumer).toHaveBeenCalledWith({
 				consumer_type: "INDIVIDUAL",
 				phone_number: "+966500000000",
+				email: "billing@acme.example",
 				name: "Acme Inc",
 				external_id: "ref:organization:org-1",
 			});

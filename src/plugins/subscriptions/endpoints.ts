@@ -491,7 +491,7 @@ export function buildSubscriptionEndpoints(
 						seats: ctx.body.seats,
 						successUrl: ctx.body.successUrl,
 						failureUrl: ctx.body.failureUrl,
-						billing: { referenceType: "user", referenceId: user.id, user },
+						billing: { referenceType: "user", user },
 					}),
 				);
 			},

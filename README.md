@@ -466,15 +466,26 @@ provider account requires contact details on consumers, supply them server-side:
 organization: {
   enabled: true,
   getBillingDetails: async ({ organization }) => ({
+    email: await billingEmailFor(organization.id),
     phone_number: await billingPhoneFor(organization.id),
   }),
 },
 ```
 
-`getBillingDetails` cannot override `name`, `email`, or `external_id` — those stay
-plugin-owned. Failure modes are typed: `SUBSCRIPTION_ORG_BILLING_NOT_ENABLED` when org billing
-is off, `ORG_NOT_FOUND` when the reference doesn't resolve, and `BILLING_CONTACT_REQUIRED`
-when StreamPay rejects a contact-less consumer.
+`getBillingDetails` cannot override `name` or `external_id` — those stay plugin-owned. Since
+organizations have no built-in email, a billing email may be supplied here. Failure modes are
+typed: `SUBSCRIPTION_ORG_BILLING_NOT_ENABLED` when org billing is off, `ORG_NOT_FOUND` when the
+reference doesn't resolve, and `BILLING_CONTACT_REQUIRED` when StreamPay rejects a contact-less
+consumer.
+
+Consumer ownership is global: a StreamPay consumer linked to an organization can never be
+claimed by a user, and the other way around — both directions end in
+`STREAMPAY_CONSUMER_LINK_CONFLICT`.
+
+**Scope:** organization billing covers creating checkouts and renewal billing. Organization
+renames are not synced to StreamPay, deleting an organization does not cancel its
+subscriptions, and the billing portal stays scoped to the signed-in user. Handle those in app
+code for now.
 
 ### Server-initiated upgrades
 

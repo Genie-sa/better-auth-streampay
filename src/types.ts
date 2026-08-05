@@ -166,6 +166,13 @@ export type ConsumerCreateOverrides = Partial<
 	Omit<ConsumerCreate, "name" | "email" | "external_id">
 >;
 
+/**
+ * Overrides for organization consumers. Unlike user consumers, organizations
+ * have no plugin-owned email, so a billing email may be supplied here; `name`
+ * and `external_id` stay plugin-owned.
+ */
+export type OrganizationConsumerOverrides = Partial<Omit<ConsumerCreate, "name" | "external_id">>;
+
 export type ClaimExistingConsumerIdentifier = "email" | "phone";
 export type ClaimExistingConsumerBy = readonly ClaimExistingConsumerIdentifier[];
 
@@ -189,11 +196,11 @@ export interface OrganizationBillingOptions {
 	 */
 	modelName?: string;
 
-	/** Contact and tax fields for org consumers; core identity fields are plugin-owned. */
+	/** Contact and tax fields for org consumers; `name` and `external_id` are plugin-owned. */
 	getBillingDetails?: (
 		data: { organization: BillingOrganization },
 		ctx: GenericEndpointContext,
-	) => Promise<ConsumerCreateOverrides> | ConsumerCreateOverrides;
+	) => Promise<OrganizationConsumerOverrides> | OrganizationConsumerOverrides;
 }
 
 export interface StreamPayOptions {

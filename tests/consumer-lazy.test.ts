@@ -214,6 +214,63 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
 		});
 
+		it("rejects a recovered consumer owned by an organization", async () => {
+			mockClient.listConsumers.mockResolvedValue(
+				createMockConsumerList([
+					createMockConsumer({ id: "cons_org_owned", external_id: "user-1" }),
+				]),
+			);
+			const options = createTestStreamPayOptions({
+				client: mockClient,
+				organization: { enabled: true },
+			});
+			const ctx = createMockContext();
+			vi.mocked(ctx.context.adapter.findOne).mockImplementation(async (input) =>
+				(input as { model: string }).model === "organization" ? { id: "org-1" } : null,
+			);
+
+			await expect(
+				ensureConsumerForUser(options, ctx, { id: "user-1", email: "a@b.com" }),
+			).rejects.toMatchObject({
+				code: "CONFLICT",
+				errorCode: "STREAMPAY_CONSUMER_LINK_CONFLICT",
+			});
+			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
+		});
+
+		it("refuses to claim an organization-owned consumer by contact match", async () => {
+			mockClient.createConsumer.mockRejectedValue(
+				mockApiError(409, { error: { code: "DUPLICATE_CONSUMER" } }),
+			);
+			mockClient.listConsumers.mockResolvedValue(
+				createMockConsumerList([
+					createMockConsumer({
+						id: "cons_org_owned",
+						email: "a@b.com",
+						external_id: "ref:organization:org-1",
+					}),
+				]),
+			);
+			const options = createTestStreamPayOptions({
+				client: mockClient,
+				organization: { enabled: true },
+				claimExistingConsumerBy: ["email"],
+			});
+			const ctx = createMockContext();
+			vi.mocked(ctx.context.adapter.findOne).mockImplementation(async (input) =>
+				(input as { model: string }).model === "organization" ? { id: "org-1" } : null,
+			);
+
+			await expect(
+				ensureConsumerForUser(options, ctx, { id: "user-1", email: "a@b.com" }),
+			).rejects.toMatchObject({
+				code: "CONFLICT",
+				errorCode: "STREAMPAY_CONSUMER_LINK_CONFLICT",
+			});
+			expect(mockClient.updateConsumer).not.toHaveBeenCalled();
+			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
+		});
+
 		it("fails closed when duplicate-consumer external_id backfill fails", async () => {
 			mockClient.createConsumer.mockRejectedValue(
 				mockApiError(409, { error: { code: "DUPLICATE_CONSUMER" } }),

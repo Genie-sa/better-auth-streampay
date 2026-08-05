@@ -362,6 +362,7 @@ async function findIncompleteRow(
 	referenceType: SubscriptionReferenceType | null,
 	plan: string,
 	paymentLinkId: string | null,
+	providerConsumerId: string | null,
 ): Promise<Subscription | null> {
 	const candidates = await ctx.context.adapter.findMany<Subscription>({
 		model: SUBSCRIPTION_MODEL,
@@ -371,9 +372,15 @@ async function findIncompleteRow(
 			{ field: "status", value: "incomplete" },
 		],
 	});
-	const scopedCandidates = referenceType
-		? candidates.filter((candidate) => (candidate.referenceType ?? "user") === referenceType)
+	const consumerScoped = providerConsumerId
+		? candidates.filter(
+				(candidate) =>
+					!candidate.streampayConsumerId || candidate.streampayConsumerId === providerConsumerId,
+			)
 		: candidates;
+	const scopedCandidates = referenceType
+		? consumerScoped.filter((candidate) => (candidate.referenceType ?? "user") === referenceType)
+		: consumerScoped;
 	if (scopedCandidates.length === 0) return null;
 	if (paymentLinkId) {
 		const exact = scopedCandidates.find(
@@ -566,7 +573,10 @@ async function reconcileFromStreamPay(
 				metadataRow.streampaySubscriptionId === streampaySubscriptionId) &&
 			(!metadataRow.streampayPaymentLinkId ||
 				!paymentLinkId ||
-				metadataRow.streampayPaymentLinkId === paymentLinkId)
+				metadataRow.streampayPaymentLinkId === paymentLinkId) &&
+			(!metadataRow.streampayConsumerId ||
+				!stream.organization_consumer_id ||
+				metadataRow.streampayConsumerId === stream.organization_consumer_id)
 		) {
 			const projectedWithSlot = {
 				...projected,
@@ -605,6 +615,7 @@ async function reconcileFromStreamPay(
 		metadataReferenceType,
 		planName,
 		paymentLinkId,
+		stream.organization_consumer_id ?? null,
 	);
 	if (incomplete) {
 		const projectedWithSlot = {

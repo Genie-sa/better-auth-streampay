@@ -2,7 +2,11 @@ import type { ConsumerCreate } from "@streamsdk/typescript";
 import type { GenericEndpointContext, Where } from "better-auth";
 import { APIError } from "better-auth/api";
 import { $ERROR_CODES } from "../error-codes";
-import type { BillingOrganization, ConsumerCreateOverrides, StreamPayOptions } from "../types";
+import type {
+	BillingOrganization,
+	OrganizationConsumerOverrides,
+	StreamPayOptions,
+} from "../types";
 import { findConsumerByExternalId } from "./consumer";
 import { type EnsureConsumerContext, ensureConsumerForUser } from "./ensure-consumer";
 import { readEnvelope, readSdkErrorFields } from "./error-envelope";
@@ -23,10 +27,10 @@ interface BillingAdapter {
 }
 
 export type BillingAccountResolution =
-	| { referenceType: "user"; referenceId: string; user: StreamPaySessionUser }
-	| { referenceType: "organization"; referenceId: string; organization: BillingOrganization };
+	| { referenceType: "user"; user: StreamPaySessionUser }
+	| { referenceType: "organization"; organization: BillingOrganization };
 
-export function organizationExternalId(organizationId: string): string {
+function organizationExternalId(organizationId: string): string {
 	return `ref:organization:${organizationId}`;
 }
 
@@ -40,7 +44,7 @@ function getBillingAdapter(ctx: GenericEndpointContext): BillingAdapter {
 	return adapter as unknown as BillingAdapter;
 }
 
-export async function loadReferenceUser(
+async function loadReferenceUser(
 	ctx: GenericEndpointContext,
 	referenceId: string,
 ): Promise<StreamPaySessionUser> {
@@ -71,7 +75,7 @@ function asBillingOrganization(row: unknown): BillingOrganization | null {
 	return row as BillingOrganization;
 }
 
-export async function resolveOrganizationBillingAccount(
+async function resolveOrganizationBillingAccount(
 	ctx: GenericEndpointContext,
 	options: StreamPayOptions,
 	referenceId: string,
@@ -104,20 +108,15 @@ export async function resolveOrganizationBillingAccount(
 			message: $ERROR_CODES.ORG_NOT_FOUND.message,
 		});
 	}
-	return { referenceType: "organization", referenceId, organization };
+	return { referenceType: "organization", organization };
 }
 
 function sanitizeOverrides(
-	overrides: ConsumerCreateOverrides | undefined,
-): ConsumerCreateOverrides {
+	overrides: OrganizationConsumerOverrides | undefined,
+): OrganizationConsumerOverrides {
 	if (!overrides) return {};
-	const {
-		name: _name,
-		email: _email,
-		external_id: _externalId,
-		...rest
-	} = overrides as Record<string, unknown>;
-	return rest as ConsumerCreateOverrides;
+	const { name: _name, external_id: _externalId, ...rest } = overrides as Record<string, unknown>;
+	return rest as OrganizationConsumerOverrides;
 }
 
 async function buildOrganizationConsumerPayload(
@@ -207,6 +206,27 @@ async function persistOrganizationConsumerId(
 	});
 }
 
+/**
+ * Removes a consumer this request created but never linked or billed — a
+ * concurrent claim won, so the fresh consumer has no payment links or local
+ * owner. Failure only leaves an unused consumer behind, so it is logged, not
+ * surfaced.
+ */
+async function deleteUnusedConsumerBestEffort(
+	ctx: GenericEndpointContext,
+	options: StreamPayOptions,
+	consumerId: string,
+	organizationId: string,
+): Promise<void> {
+	try {
+		await options.client.deleteConsumer(consumerId);
+	} catch (err) {
+		getLogger(ctx).error(
+			`failed to delete unused consumer=${consumerId} after losing the claim for organization=${organizationId}: ${formatStreamPayError(err)}`,
+		);
+	}
+}
+
 async function ensureConsumerForOrganization(
 	options: StreamPayOptions,
 	ctx: GenericEndpointContext,
@@ -232,6 +252,9 @@ async function ensureConsumerForOrganization(
 			});
 		}
 		const consumerId = await persistOrganizationConsumerId(ctx, organization.id, consumer.id);
+		if (consumerId !== consumer.id) {
+			await deleteUnusedConsumerBestEffort(ctx, options, consumer.id, organization.id);
+		}
 		return { consumerId, created: consumerId === consumer.id };
 	} catch (err: unknown) {
 		if (err instanceof APIError) throw err;
@@ -268,7 +291,7 @@ export async function resolveReferenceBillingAccount(
 	if (referenceType === "organization") {
 		return resolveOrganizationBillingAccount(ctx, options, referenceId);
 	}
-	return { referenceType: "user", referenceId, user: await loadReferenceUser(ctx, referenceId) };
+	return { referenceType: "user", user: await loadReferenceUser(ctx, referenceId) };
 }
 
 export async function ensureConsumerForBillingAccount(

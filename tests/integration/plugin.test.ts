@@ -6,8 +6,10 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import { streampayClient } from "../../src/client";
 import { $ERROR_CODES } from "../../src/error-codes";
 import { admin as streampayAdmin } from "../../src/plugins/admin";
+import { checkout } from "../../src/plugins/checkout";
+import { subscriptions } from "../../src/plugins/subscriptions";
 import { streampay } from "../../src/streampay";
-import { createStreamPayTestInstance } from "../utils/auth-instance";
+import { callAuthEndpoint, createStreamPayTestInstance } from "../utils/auth-instance";
 import { createMockConsumer, createMockStreamPayClient } from "../utils/mocks";
 
 describe("streampay plugin integration", () => {
@@ -109,6 +111,43 @@ describe("streampay plugin integration", () => {
 		expect(clientPlugin).toBeDefined();
 		expect($ERROR_CODES.CONSUMER_DUPLICATE.code).toBe("CONSUMER_DUPLICATE");
 		expect(clientPlugin.$ERROR_CODES.CONSUMER_DUPLICATE.code).toBe("CONSUMER_DUPLICATE");
+	});
+
+	describe("server-only billing endpoints", () => {
+		it("exposes both methods on auth.api while the real router serves no route for them", async () => {
+			const { auth } = await createStreamPayTestInstance({
+				use: [
+					subscriptions({
+						plans: [
+							{
+								name: "pro",
+								productId: "prod_pro",
+								priceInSmallestUnit: 9900,
+								billingInterval: "MONTH",
+							},
+						],
+					}),
+					checkout(),
+				],
+			});
+
+			expect(typeof auth.api.upgradeSubscriptionForReference).toBe("function");
+			expect(typeof auth.api.checkoutForReference).toBe("function");
+
+			for (const path of [
+				"/subscription/upgrade-for-reference",
+				"/subscription/upgradeSubscriptionForReference",
+				"/upgrade-subscription-for-reference",
+				"/checkout-for-reference",
+				"/checkoutForReference",
+			]) {
+				const response = await callAuthEndpoint(auth, path, {
+					method: "POST",
+					body: { plan: "pro", referenceId: "user-1" },
+				});
+				expect(response.status).toBe(404);
+			}
+		});
 	});
 
 	describe("organization billing configuration", () => {

@@ -117,7 +117,8 @@ For server-only billing (billing another user or an organization):
   server code only, after the app's own permission check
 - never expose these calls through an unauthenticated route
 - for organizations, add `organization.getBillingDetails` when the StreamPay account requires
-  contact fields on consumers; the plugin owns `name`, `email`, and `external_id`
+  contact fields on consumers; the plugin owns `name` and `external_id`, and a billing email
+  may be supplied because organizations have none of their own
 - deliver the returned payment link to whoever completes payment
 
 Load the **Bill another user or organization** section of
