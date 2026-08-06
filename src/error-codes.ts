@@ -65,6 +65,13 @@ export const $ERROR_CODES = defineErrorCodes({
 	SUBSCRIPTION_FREEZE_NOT_ACTIVE: "No active freeze period was found for this subscription.",
 	SUBSCRIPTION_REFERENCE_NOT_AUTHORIZED:
 		"You are not authorized to act on this subscription reference.",
+	SUBSCRIPTION_REFERENCE_USER_NOT_FOUND: "The referenced user does not exist.",
+	SUBSCRIPTION_REFERENCE_USER_NOT_BILLABLE: "The referenced user cannot be billed.",
+	SUBSCRIPTION_ORG_BILLING_NOT_ENABLED:
+		"Organization billing is not enabled. Set `organization.enabled` in the StreamPay options.",
+	ORG_NOT_FOUND: "The referenced organization does not exist.",
+	BILLING_CONTACT_REQUIRED:
+		"StreamPay rejected a consumer without contact information. Provide contact fields via the billing details callback.",
 	WEBHOOK_REPLAY_IN_PROGRESS: "This webhook event is already being replayed.",
 	UNKNOWN: "An unexpected error occurred.",
 });

@@ -29,7 +29,7 @@ pnpm add better-auth-streampay @streamsdk/typescript
 
 Required versions:
 
-- `better-auth ^1.5.0`
+- `better-auth ^1.6.17`
 - `@streamsdk/typescript ^1.1.3`
 - `zod ^3.24.0 || ^4.0.0`
 
@@ -418,6 +418,125 @@ subscriptions({
 ```
 
 Without this callback, cross-account actions return `FORBIDDEN`.
+
+### Who gets billed
+
+The rule has no configuration: **HTTP endpoints bill the session user; server-only endpoints
+bill the reference.**
+
+Session-driven checkouts (`upgradeSubscription`, `checkout`) always charge the acting user's
+StreamPay consumer, whatever the reference points at. To bill someone else — a user or an
+organization — your server code calls the server-only endpoints below; your own authorization
+(admin role, webhook signature, cron trust) is the gate.
+
+### Billing organizations
+
+Organization references become billable when you enable org billing on the StreamPay options:
+
+```ts
+streampay({
+  client,
+  organization: { enabled: true },
+  use: [subscriptions({ plans, authorizeReference })],
+});
+```
+
+Org billing needs the Better Auth `organization()` plugin — the plugin refuses to start
+without it. It contributes a `streampayConsumerId` column to the `organization` model (run
+`npx @better-auth/cli generate` after enabling). A server-initiated org checkout then bills the
+organization's own consumer — provisioned on first checkout with the org's name and no
+invented contact details, and reused for every renewal after that, no matter who started the
+checkout. Two concurrent first checkouts settle on one consumer: the first claim wins and the
+other request reuses it.
+
+If your organization plugin uses a custom table name, pass the same name here:
+
+```ts
+organization({ schema: { organization: { modelName: "orgs" } } }),
+streampay({ client, organization: { enabled: true, modelName: "orgs" }, use: [/* ... */] }),
+```
+
+Plugin schema contributions each restate the table name, so leaving `modelName` off would reset
+a custom name — the plugin detects that mismatch at startup and tells you exactly what to set.
+
+StreamPay consumers created this way carry `external_id: "ref:organization:<orgId>"`. If your
+provider account requires contact details on consumers, supply them server-side:
+
+```ts
+organization: {
+  enabled: true,
+  getBillingDetails: async ({ organization }) => ({
+    email: await billingEmailFor(organization.id),
+    phone_number: await billingPhoneFor(organization.id),
+  }),
+},
+```
+
+`getBillingDetails` cannot override `name` or `external_id` — those stay plugin-owned. Since
+organizations have no built-in email, a billing email may be supplied here. Failure modes are
+typed: `SUBSCRIPTION_ORG_BILLING_NOT_ENABLED` when org billing is off, `ORG_NOT_FOUND` when the
+reference doesn't resolve, and `BILLING_CONTACT_REQUIRED` when StreamPay's validation names the
+missing `email` or `phone_number` field. Other provider validation errors pass through unchanged.
+
+Consumer ownership is checked across both models: a StreamPay consumer linked to an
+organization is rejected when a user tries to claim it, and the other way around — both
+directions end in `STREAMPAY_CONSUMER_LINK_CONFLICT`, and consumers carrying a
+`ref:organization:` external id are refused on the user path even before any local lookup.
+These checks are reads before writes, not one transaction: a same-instant claim of one
+consumer from both models at once is not globally atomic.
+
+**Rolling back org billing:** set `organization.enabled: false` instead of removing the
+option. That blocks new organization billing while keeping the ownership field registered, so
+organizations that still own consumers stay protected from user claims. Only remove the
+`organization` option entirely after clearing every `organization.streampayConsumerId` link.
+
+**Scope:** organization billing covers creating checkouts and renewal billing. Organization
+renames are not synced to StreamPay, deleting an organization does not cancel its
+subscriptions, and the billing portal stays scoped to the signed-in user. Handle those in app
+code for now.
+
+### Server-initiated upgrades
+
+`upgradeSubscriptionForReference` is registered on `auth.api` with no HTTP route — it can only
+be called from your own server code (cron jobs, admin tools, webhook handlers), never from a
+client. It skips session and `authorizeReference` checks — the calling code is the gate — but
+keeps every validation and billability check (the referenced user must exist and not be
+anonymous), and always bills the reference itself:
+
+```ts
+const { url } = await auth.api.upgradeSubscriptionForReference({
+  body: { plan: "pro", referenceId: targetUserId },
+});
+await sendCheckoutEmail(targetUserId, url);
+```
+
+`referenceType` defaults to `"user"`; pass `"organization"` to start an org checkout the same
+way. The returned `url` is a StreamPay payment link — deliver it to whoever completes payment.
+
+A pending checkout is only resumed when it bills the same consumer — a link created for one
+payer is never handed to another. Organization upgrades grant no trial when `isTrialEligible`
+is configured, because that policy is asked about users; without the callback, the default
+first-subscription trial still applies.
+
+### Server-initiated payment links
+
+`checkoutForReference` is the one-time-payment counterpart: server code creates a payment link
+billed to any user or organization. Same contract — no HTTP route, no session, the caller is
+the gate:
+
+```ts
+const { url } = await auth.api.checkoutForReference({
+  body: { slug: "consulting-hour", referenceId: targetUserId },
+});
+```
+
+It accepts the same product/pricing fields as `checkout` (minus `redirect`), requires
+`referenceId`, and defaults `referenceType` to `"user"`. Because the link is locked to one
+consumer, it allows **one payment by default** — pass `maxNumberOfPayments` to allow more. The
+link's `custom_metadata` carries the validated `referenceId` and `referenceType`, and
+`onCheckoutCreated` receives both (plus the resolved user for user targets), so handlers can
+attribute the payment. `resolveCheckout` and `authenticatedUsersOnly` do not apply — the
+trusted caller supplies all fields directly.
 
 ## Admin
 

@@ -1,12 +1,15 @@
 import type { CouponCreate, ProductCreate, SubscriptionCancel } from "@streamsdk/typescript";
 import type { User } from "better-auth";
+import { organization } from "better-auth/plugins";
 import { getTestInstance } from "better-auth/test";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { streampayClient } from "../../src/client";
 import { $ERROR_CODES } from "../../src/error-codes";
 import { admin as streampayAdmin } from "../../src/plugins/admin";
+import { checkout } from "../../src/plugins/checkout";
+import { subscriptions } from "../../src/plugins/subscriptions";
 import { streampay } from "../../src/streampay";
-import { createStreamPayTestInstance } from "../utils/auth-instance";
+import { callAuthEndpoint, createStreamPayTestInstance } from "../utils/auth-instance";
 import { createMockConsumer, createMockStreamPayClient } from "../utils/mocks";
 
 describe("streampay plugin integration", () => {
@@ -26,6 +29,23 @@ describe("streampay plugin integration", () => {
 		expectTypeOf<ProductBody>().toEqualTypeOf<ProductCreate>();
 		expectTypeOf<CouponBody>().toEqualTypeOf<CouponCreate>();
 		expectTypeOf<CancelBody>().toEqualTypeOf<SubscriptionCancel>();
+	});
+
+	it("does not advertise endpoints for unconfigured sub-plugins", async () => {
+		const { auth } = await getTestInstance({
+			plugins: [
+				streampay({
+					client: createMockStreamPayClient(),
+					use: [],
+				}),
+			],
+		});
+
+		expectTypeOf<(typeof auth)["api"]>().not.toHaveProperty("checkoutForReference");
+		expectTypeOf<(typeof auth)["api"]>().not.toHaveProperty("upgradeSubscriptionForReference");
+		expectTypeOf<(typeof auth)["api"]>().not.toHaveProperty("adminCreateProduct");
+		expect((auth.api as Record<string, unknown>).checkoutForReference).toBeUndefined();
+		expect((auth.api as Record<string, unknown>).upgradeSubscriptionForReference).toBeUndefined();
 	});
 
 	it("infers the user schema field added by the plugin", async () => {
@@ -108,5 +128,185 @@ describe("streampay plugin integration", () => {
 		expect(clientPlugin).toBeDefined();
 		expect($ERROR_CODES.CONSUMER_DUPLICATE.code).toBe("CONSUMER_DUPLICATE");
 		expect(clientPlugin.$ERROR_CODES.CONSUMER_DUPLICATE.code).toBe("CONSUMER_DUPLICATE");
+	});
+
+	describe("server-only billing endpoints", () => {
+		it("exposes both methods on auth.api while the real router serves no route for them", async () => {
+			const { auth } = await createStreamPayTestInstance({
+				use: [
+					subscriptions({
+						plans: [
+							{
+								name: "pro",
+								productId: "prod_pro",
+								priceInSmallestUnit: 9900,
+								billingInterval: "MONTH",
+							},
+						],
+					}),
+					checkout(),
+				],
+			});
+
+			expect(typeof auth.api.upgradeSubscriptionForReference).toBe("function");
+			expect(typeof auth.api.checkoutForReference).toBe("function");
+
+			for (const path of [
+				"/subscription/upgrade-for-reference",
+				"/subscription/upgradeSubscriptionForReference",
+				"/upgrade-subscription-for-reference",
+				"/checkout-for-reference",
+				"/checkoutForReference",
+			]) {
+				const response = await callAuthEndpoint(auth, path, {
+					method: "POST",
+					body: { plan: "pro", referenceId: "user-1" },
+				});
+				expect(response.status).toBe(404);
+			}
+		});
+	});
+
+	describe("organization billing configuration", () => {
+		it("keeps the schema working with the organization plugin's default table name", async () => {
+			const { auth } = await getTestInstance({
+				plugins: [
+					organization(),
+					streampay({
+						client: createMockStreamPayClient(),
+						organization: { enabled: true },
+						use: [],
+					}),
+				],
+			});
+			const ctx = await auth.$context;
+			expect(ctx.tables.organization?.modelName).toBe("organization");
+			expect(ctx.tables.organization?.fields.streampayConsumerId).toMatchObject({
+				unique: true,
+			});
+			expect(ctx.tables.organization?.fields.name).toBeDefined();
+		});
+
+		it("keeps a custom organization table name when modelName is configured", async () => {
+			const { auth } = await getTestInstance({
+				plugins: [
+					organization({ schema: { organization: { modelName: "orgs" } } }),
+					streampay({
+						client: createMockStreamPayClient(),
+						organization: { enabled: true, modelName: "orgs" },
+						use: [],
+					}),
+				],
+			});
+			const ctx = await auth.$context;
+			expect(ctx.tables.organization?.modelName).toBe("orgs");
+			expect(ctx.tables.organization?.fields.streampayConsumerId).toMatchObject({
+				unique: true,
+			});
+		});
+
+		it("keeps the ownership field registered while org billing is disabled (protect-only)", async () => {
+			const { auth } = await getTestInstance({
+				plugins: [
+					organization(),
+					streampay({
+						client: createMockStreamPayClient(),
+						organization: { enabled: false },
+						use: [],
+					}),
+				],
+			});
+			const ctx = await auth.$context;
+			expect(ctx.tables.organization?.fields.streampayConsumerId).toMatchObject({
+				unique: true,
+			});
+		});
+
+		it("fails fast when organization is configured (even disabled) without the organization plugin", async () => {
+			await expect(
+				(async () => {
+					const { auth } = await getTestInstance({
+						plugins: [
+							streampay({
+								client: createMockStreamPayClient(),
+								organization: { enabled: false },
+								use: [],
+							}),
+						],
+					});
+					await auth.$context;
+				})(),
+			).rejects.toThrow(/organization plugin/);
+		});
+
+		it("fails fast when the organization plugin uses a custom table name the billing options do not", async () => {
+			await expect(
+				(async () => {
+					const { auth } = await getTestInstance({
+						plugins: [
+							organization({ schema: { organization: { modelName: "orgs" } } }),
+							streampay({
+								client: createMockStreamPayClient(),
+								organization: { enabled: true },
+								use: [],
+							}),
+						],
+					});
+					await auth.$context;
+				})(),
+			).rejects.toThrow(/organization\.modelName/);
+		});
+
+		it("fails fast when organization billing is enabled without the organization plugin", async () => {
+			await expect(
+				(async () => {
+					const { auth } = await getTestInstance({
+						plugins: [
+							streampay({
+								client: createMockStreamPayClient(),
+								organization: { enabled: true },
+								use: [],
+							}),
+						],
+					});
+					await auth.$context;
+				})(),
+			).rejects.toThrow(/organization plugin/);
+		});
+
+		it("fails fast when only the billing options use a custom table name", async () => {
+			await expect(
+				(async () => {
+					const { auth } = await getTestInstance({
+						plugins: [
+							organization(),
+							streampay({
+								client: createMockStreamPayClient(),
+								organization: { enabled: true, modelName: "orgs" },
+								use: [],
+							}),
+						],
+					});
+					await auth.$context;
+				})(),
+			).rejects.toThrow(/stores organizations in "organization"/);
+		});
+
+		it("fails fast when a custom table name is configured without the organization plugin", async () => {
+			await expect(
+				(async () => {
+					const { auth } = await getTestInstance({
+						plugins: [
+							streampay({
+								client: createMockStreamPayClient(),
+								organization: { enabled: true, modelName: "orgs" },
+								use: [],
+							}),
+						],
+					});
+					await auth.$context;
+				})(),
+			).rejects.toThrow(/organization plugin/);
+		});
 	});
 });

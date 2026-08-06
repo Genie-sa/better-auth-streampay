@@ -3,6 +3,10 @@ import type { GenericEndpointContext, User } from "better-auth";
 import { APIError, createAuthEndpoint, getSessionFromCtx } from "better-auth/api";
 import { z } from "zod";
 import type { StreamPayOptions, StreamPayProduct } from "../types";
+import {
+	ensureConsumerForBillingAccount,
+	resolveReferenceBillingAccount,
+} from "../utils/billing-account";
 import { type EnsureConsumerContext, ensureConsumerForUser } from "../utils/ensure-consumer";
 import { toAPIError } from "../utils/errors";
 import { formatStreamPayError } from "../utils/format-error";
@@ -46,6 +50,11 @@ export interface CheckoutOverrides {
 export interface CheckoutCreatedContext {
 	user: CheckoutUser | null;
 	referenceId?: string;
+	/**
+	 * Present only for `checkoutForReference` calls, where `referenceId` is the
+	 * billed user or organization id rather than an app-owned order reference.
+	 */
+	referenceType?: "user" | "organization";
 	paymentLinkId: string;
 	url: string;
 	/** The exact payload sent to StreamPay. */
@@ -118,6 +127,19 @@ export const CheckoutBody = CheckoutRequestBody.refine(
 		path: ["products"],
 	},
 );
+
+const CheckoutForReferenceBody = CheckoutRequestBody.omit({
+	redirect: true,
+	referenceId: true,
+})
+	.extend({
+		referenceId: z.string().min(1),
+		referenceType: z.enum(["user", "organization"]).default("user"),
+	})
+	.refine((data) => data.slug !== undefined || data.products !== undefined, {
+		message: "Either `slug` or `products` is required.",
+		path: ["products"],
+	});
 
 export type CheckoutParams = z.infer<typeof CheckoutBody>;
 
@@ -268,6 +290,133 @@ async function resolveConsumerId(
 	return consumerId;
 }
 
+interface CheckoutLinkArgs {
+	user: CheckoutUser | null;
+	consumerId: string | null;
+	items: PaymentLinkItem[];
+	effective: CheckoutParams;
+	referenceType?: "user" | "organization" | undefined;
+}
+
+async function createCheckoutPaymentLink(
+	ctx: GenericEndpointContext,
+	client: StreamPayOptions["client"],
+	checkoutOptions: CheckoutOptions,
+	args: CheckoutLinkArgs,
+): Promise<{ url: string; id: string | null }> {
+	const { user, consumerId, items, effective } = args;
+
+	const successUrl = resolveRedirectUrl(
+		effective.successUrl ?? checkoutOptions.successUrl,
+		ctx.request,
+		ctx.context.baseURL,
+	);
+	const failureUrl = resolveRedirectUrl(
+		effective.failureUrl ?? checkoutOptions.failureUrl,
+		ctx.request,
+		ctx.context.baseURL,
+	);
+
+	const customMetadata: CreatePaymentLinkDto["custom_metadata"] = (() => {
+		const merged = { ...(effective.metadata ?? {}) };
+		if (effective.referenceId !== undefined) {
+			merged.referenceId = effective.referenceId;
+			if (args.referenceType !== undefined) {
+				merged.referenceType = args.referenceType;
+			}
+		}
+		return Object.keys(merged).length > 0 ? merged : null;
+	})();
+
+	const payload: CreatePaymentLinkDto = {
+		name: effective.name ?? `Checkout ${new Date().toISOString()}`,
+		description: effective.description ?? null,
+		currency: checkoutOptions.currency ?? "SAR",
+		items,
+	};
+	if (consumerId !== null) payload.organization_consumer_id = consumerId;
+	if (successUrl) payload.success_redirect_url = successUrl;
+	if (failureUrl) payload.failure_redirect_url = failureUrl;
+	if (effective.maxNumberOfPayments !== undefined) {
+		payload.max_number_of_payments = effective.maxNumberOfPayments;
+	}
+	if (effective.validUntil !== undefined) {
+		payload.valid_until = effective.validUntil;
+	}
+	if (effective.couponIds && effective.couponIds.length > 0) {
+		payload.coupons = effective.couponIds;
+	}
+	if (customMetadata !== null) payload.custom_metadata = customMetadata;
+	if (checkoutOptions.customFields) {
+		// SDK 1.1.3 generates this JSON Schema field as Record<string, never>.
+		payload.custom_fields = checkoutOptions.customFields as unknown as NonNullable<
+			CreatePaymentLinkDto["custom_fields"]
+		>;
+	}
+	if (checkoutOptions.contactInformationType) {
+		payload.contact_information_type = checkoutOptions.contactInformationType;
+	}
+
+	try {
+		const link = await client.createPaymentLink(payload);
+		const paymentLinkId = typeof link.id === "string" && link.id.length > 0 ? link.id : null;
+		let url: string;
+		try {
+			const resolvedUrl = client.getPaymentUrl(link);
+			if (!resolvedUrl) {
+				throw new APIError("INTERNAL_SERVER_ERROR", {
+					message: "StreamPay payment link created but no URL was returned.",
+				});
+			}
+			url = resolvedUrl;
+
+			if (checkoutOptions.onCheckoutCreated) {
+				if (!paymentLinkId) {
+					throw new APIError("INTERNAL_SERVER_ERROR", {
+						message: "StreamPay payment link created but no id was returned.",
+					});
+				}
+				try {
+					const callbackData: CheckoutCreatedContext = {
+						user,
+						paymentLinkId,
+						url,
+						payload,
+					};
+					if (effective.referenceId !== undefined) {
+						callbackData.referenceId = effective.referenceId;
+					}
+					if (args.referenceType !== undefined) {
+						callbackData.referenceType = args.referenceType;
+					}
+					await checkoutOptions.onCheckoutCreated(callbackData, ctx);
+				} catch (err: unknown) {
+					if (err instanceof APIError) throw err;
+					getLogger(ctx).error(`onCheckoutCreated failed: ${formatStreamPayError(err)}`);
+					throw new APIError("INTERNAL_SERVER_ERROR", {
+						message: "Checkout persistence failed.",
+					});
+				}
+			}
+		} catch (err: unknown) {
+			if (paymentLinkId) {
+				await deactivatePaymentLinkBestEffort(client, paymentLinkId, getLogger(ctx));
+			}
+			throw err;
+		}
+		return { url, id: paymentLinkId };
+	} catch (err) {
+		toAPIError(
+			{
+				logPrefix: "checkout creation failed:",
+				userMessage: "StreamPay checkout creation failed.",
+			},
+			err,
+			getLogger(ctx),
+		);
+	}
+}
+
 export const checkout = (checkoutOptions: CheckoutOptions = {}) => {
 	return (options: StreamPayOptions) => {
 		const client = options.client;
@@ -320,114 +469,56 @@ export const checkout = (checkoutOptions: CheckoutOptions = {}) => {
 						const items = await resolveProducts(effective, checkoutOptions);
 						const consumerId = await resolveConsumerId(options, ctx, sessionUser);
 
-						const successUrl = resolveRedirectUrl(
-							effective.successUrl ?? checkoutOptions.successUrl,
-							ctx.request,
-							ctx.context.baseURL,
-						);
-						const failureUrl = resolveRedirectUrl(
-							effective.failureUrl ?? checkoutOptions.failureUrl,
-							ctx.request,
-							ctx.context.baseURL,
-						);
-
-						const customMetadata: CreatePaymentLinkDto["custom_metadata"] = (() => {
-							const merged = { ...(effective.metadata ?? {}) };
-							if (effective.referenceId !== undefined) {
-								merged.referenceId = effective.referenceId;
-							}
-							return Object.keys(merged).length > 0 ? merged : null;
-						})();
-
-						const payload: CreatePaymentLinkDto = {
-							name: effective.name ?? `Checkout ${new Date().toISOString()}`,
-							description: effective.description ?? null,
-							currency: checkoutOptions.currency ?? "SAR",
+						const { url, id } = await createCheckoutPaymentLink(ctx, client, checkoutOptions, {
+							user,
+							consumerId,
 							items,
+							effective,
+						});
+						return ctx.json({
+							url,
+							id,
+							redirect: ctx.body.redirect ?? true,
+						});
+					},
+				),
+
+				/**
+				 * Server-only: registered on `auth.api` with no HTTP route. Runs no
+				 * session check — the calling server code is the gate — and bills the
+				 * referenced user or organization. `resolveCheckout` and
+				 * `authenticatedUsersOnly` do not apply; the trusted caller supplies
+				 * all fields directly.
+				 */
+				checkoutForReference: createAuthEndpoint.serverOnly(
+					{
+						method: "POST",
+						body: CheckoutForReferenceBody,
+					},
+					async (ctx) => {
+						const { referenceId, referenceType } = ctx.body;
+						const billing = await resolveReferenceBillingAccount(
+							ctx,
+							options,
+							referenceId,
+							referenceType,
+						);
+						const { consumerId } = await ensureConsumerForBillingAccount(options, ctx, billing);
+
+						const effective: CheckoutParams = {
+							...ctx.body,
+							maxNumberOfPayments: ctx.body.maxNumberOfPayments ?? 1,
 						};
-						if (consumerId !== null) payload.organization_consumer_id = consumerId;
-						if (successUrl) payload.success_redirect_url = successUrl;
-						if (failureUrl) payload.failure_redirect_url = failureUrl;
-						if (effective.maxNumberOfPayments !== undefined) {
-							payload.max_number_of_payments = effective.maxNumberOfPayments;
-						}
-						if (effective.validUntil !== undefined) {
-							payload.valid_until = effective.validUntil;
-						}
-						if (effective.couponIds && effective.couponIds.length > 0) {
-							payload.coupons = effective.couponIds;
-						}
-						if (customMetadata !== null) payload.custom_metadata = customMetadata;
-						if (checkoutOptions.customFields) {
-							// SDK 1.1.3 generates this JSON Schema field as Record<string, never>.
-							payload.custom_fields = checkoutOptions.customFields as unknown as NonNullable<
-								CreatePaymentLinkDto["custom_fields"]
-							>;
-						}
-						if (checkoutOptions.contactInformationType) {
-							payload.contact_information_type = checkoutOptions.contactInformationType;
-						}
-
-						try {
-							const link = await client.createPaymentLink(payload);
-							const paymentLinkId =
-								typeof link.id === "string" && link.id.length > 0 ? link.id : null;
-							let url: string;
-							try {
-								const resolvedUrl = client.getPaymentUrl(link);
-								if (!resolvedUrl) {
-									throw new APIError("INTERNAL_SERVER_ERROR", {
-										message: "StreamPay payment link created but no URL was returned.",
-									});
-								}
-								url = resolvedUrl;
-
-								if (checkoutOptions.onCheckoutCreated) {
-									if (!paymentLinkId) {
-										throw new APIError("INTERNAL_SERVER_ERROR", {
-											message: "StreamPay payment link created but no id was returned.",
-										});
-									}
-									try {
-										const callbackData: CheckoutCreatedContext = {
-											user,
-											paymentLinkId,
-											url,
-											payload,
-										};
-										if (effective.referenceId !== undefined) {
-											callbackData.referenceId = effective.referenceId;
-										}
-										await checkoutOptions.onCheckoutCreated(callbackData, ctx);
-									} catch (err: unknown) {
-										if (err instanceof APIError) throw err;
-										getLogger(ctx).error(`onCheckoutCreated failed: ${formatStreamPayError(err)}`);
-										throw new APIError("INTERNAL_SERVER_ERROR", {
-											message: "Checkout persistence failed.",
-										});
-									}
-								}
-							} catch (err: unknown) {
-								if (paymentLinkId) {
-									await deactivatePaymentLinkBestEffort(client, paymentLinkId, getLogger(ctx));
-								}
-								throw err;
-							}
-							return ctx.json({
-								url,
-								id: paymentLinkId,
-								redirect: ctx.body.redirect ?? true,
-							});
-						} catch (err) {
-							toAPIError(
-								{
-									logPrefix: "checkout creation failed:",
-									userMessage: "StreamPay checkout creation failed.",
-								},
-								err,
-								getLogger(ctx),
-							);
-						}
+						const items = await resolveProducts(effective, checkoutOptions);
+						const { url, id } = await createCheckoutPaymentLink(ctx, client, checkoutOptions, {
+							user:
+								billing.referenceType === "user" ? checkoutUser(billing.user, billing.user) : null,
+							consumerId,
+							items,
+							effective,
+							referenceType,
+						});
+						return ctx.json({ url, id, redirect: false });
 					},
 				),
 			},

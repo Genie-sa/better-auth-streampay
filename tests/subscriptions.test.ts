@@ -19,11 +19,19 @@ const { MockAPIError } = vi.hoisted(() => {
 vi.mock("better-auth/api", () => ({
 	APIError: MockAPIError,
 	sessionMiddleware: vi.fn(),
-	createAuthEndpoint: vi.fn((path: string, config: unknown, handler: unknown) => ({
-		path,
-		config,
-		handler,
-	})),
+	createAuthEndpoint: Object.assign(
+		vi.fn((path: string, config: unknown, handler: unknown) => ({
+			path,
+			config,
+			handler,
+		})),
+		{
+			serverOnly: vi.fn((config: unknown, handler: unknown) => ({
+				config,
+				handler,
+			})),
+		},
+	),
 }));
 
 import {
@@ -97,12 +105,13 @@ function buildSubsPlugin(
 	plans: readonly StreamPayPlan[],
 	mockClient: MockedStreamPayClient,
 	opts: Partial<Parameters<typeof subscriptions>[0]> = {},
+	streamPayOverrides: Partial<Parameters<typeof createTestStreamPayOptions>[0]> = {},
 ): {
 	endpoints: Record<string, { path: string; config: unknown; handler: unknown }>;
 	schema?: unknown;
 } {
 	return subscriptions({ plans, ...opts })(
-		createTestStreamPayOptions({ client: mockClient }),
+		createTestStreamPayOptions({ client: mockClient, ...streamPayOverrides }),
 	) as unknown as {
 		endpoints: Record<string, { path: string; config: unknown; handler: unknown }>;
 		schema?: unknown;
@@ -390,6 +399,7 @@ describe("subscriptions() endpoints", () => {
 					referenceId: "user-123",
 					plan: "pro",
 					status: "incomplete",
+					streampayConsumerId: "cons_linked",
 					streampayPaymentLinkId: "pl_existing",
 					createdAt: new Date(Date.now() - 60 * 1000),
 				}),
@@ -436,6 +446,36 @@ describe("subscriptions() endpoints", () => {
 				adapter,
 				user: { streampayConsumerId: "cons_linked" },
 				body: { plan: "pro", seats: 3 },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({
+				code: "CONFLICT",
+				errorCode: "SUBSCRIPTION_CHECKOUT_IN_PROGRESS",
+			});
+			expect(mockClient.getPaymentLink).not.toHaveBeenCalled();
+			expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
+		});
+
+		it("does not resume an in-progress checkout billed to a different consumer", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscription);
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_other_payer",
+					activeSlotKey: subscriptionSlotKey("user", "user-123", null),
+					plan: "pro",
+					status: "incomplete",
+					streampayConsumerId: "cons_other_payer",
+					streampayPaymentLinkId: "pl_other_payer",
+					createdAt: new Date(),
+				}),
+			});
+			const { ctx } = setupCtx({
+				adapter,
+				user: { streampayConsumerId: "cons_linked" },
+				body: { plan: "pro" },
 			});
 
 			await expect(handler(ctx)).rejects.toMatchObject({
@@ -741,7 +781,7 @@ describe("subscriptions() endpoints", () => {
 			});
 		});
 
-		it("honors authorizeReference returning true", async () => {
+		it("honors authorizeReference returning true and bills the acting user by default", async () => {
 			const authorizeReference = vi.fn().mockResolvedValue(true);
 			const plugin = buildSubsPlugin([PRO_PLAN], mockClient, { authorizeReference });
 			const handler = unwrapHandler(plugin.endpoints.upgradeSubscription);
@@ -762,6 +802,9 @@ describe("subscriptions() endpoints", () => {
 					action: "upgrade",
 				}),
 				expect.anything(),
+			);
+			expect(mockClient.createPaymentLink).toHaveBeenCalledWith(
+				expect.objectContaining({ organization_consumer_id: "cons_me" }),
 			);
 		});
 
@@ -2278,7 +2321,599 @@ describe("subscriptions() endpoints", () => {
 		});
 	});
 
+	describe("upgradeSubscriptionForReference (server-only)", () => {
+		function serverCtx(overrides: Parameters<typeof setupCtx>[0]) {
+			const { ctx, adapter } = setupCtx(overrides);
+			(ctx.context as { session?: unknown }).session = undefined;
+			return { ctx, adapter };
+		}
+
+		it("has no HTTP route", () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const endpoint = plugin.endpoints.upgradeSubscriptionForReference as {
+				path?: string;
+			};
+			expect(endpoint.path).toBeUndefined();
+		});
+
+		it("bills the referenced user's consumer without a session", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			mockClient.createPaymentLink.mockResolvedValue({ id: "pl_srv", url: "https://x" });
+			mockClient.getPaymentUrl.mockReturnValue("https://x");
+
+			const adapter = createMockAdapter();
+			adapter.tables.user = [
+				{ id: "user-other", email: "other@example.com", streampayConsumerId: "cons_other" },
+			];
+
+			const { ctx } = serverCtx({
+				adapter,
+				body: { plan: "pro", referenceId: "user-other", referenceType: "user" },
+			});
+
+			await expect(handler(ctx)).resolves.toBeDefined();
+			expect(mockClient.createPaymentLink).toHaveBeenCalledWith(
+				expect.objectContaining({ organization_consumer_id: "cons_other" }),
+			);
+			expect(getSubscriptionRows(adapter)[0]).toMatchObject({
+				referenceId: "user-other",
+				referenceType: "user",
+				streampayConsumerId: "cons_other",
+			});
+		});
+
+		it("does not consult authorizeReference", async () => {
+			const authorizeReference = vi.fn().mockResolvedValue(false);
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient, { authorizeReference });
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			mockClient.createPaymentLink.mockResolvedValue({ id: "pl_srv2", url: "https://x" });
+			mockClient.getPaymentUrl.mockReturnValue("https://x");
+
+			const adapter = createMockAdapter();
+			adapter.tables.user = [
+				{ id: "user-other", email: "other@example.com", streampayConsumerId: "cons_other" },
+			];
+
+			const { ctx } = serverCtx({
+				adapter,
+				body: { plan: "pro", referenceId: "user-other", referenceType: "user" },
+			});
+
+			await expect(handler(ctx)).resolves.toBeDefined();
+			expect(authorizeReference).not.toHaveBeenCalled();
+		});
+
+		it("bills an organization reference", async () => {
+			const plugin = buildSubsPlugin(
+				[PRO_PLAN],
+				mockClient,
+				{},
+				{ organization: { enabled: true } },
+			);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			mockClient.createPaymentLink.mockResolvedValue({ id: "pl_srv3", url: "https://x" });
+			mockClient.getPaymentUrl.mockReturnValue("https://x");
+
+			const adapter = createMockAdapter();
+			adapter.tables.organization = [
+				{ id: "org-1", name: "Acme Inc", streampayConsumerId: "cons_org" },
+			];
+
+			const { ctx } = serverCtx({
+				adapter,
+				body: { plan: "pro", referenceId: "org-1", referenceType: "organization" },
+			});
+
+			await expect(handler(ctx)).resolves.toBeDefined();
+			expect(mockClient.createPaymentLink).toHaveBeenCalledWith(
+				expect.objectContaining({ organization_consumer_id: "cons_org" }),
+			);
+		});
+
+		it("does not resume a pending checkout that bills someone else's consumer", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			const adapter = createMockAdapter();
+			adapter.tables.user = [
+				{ id: "user-other", email: "other@example.com", streampayConsumerId: "cons_other" },
+			];
+			await adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_actor_billed",
+					referenceId: "user-other",
+					referenceType: "user",
+					activeSlotKey: subscriptionSlotKey("user", "user-other", null),
+					plan: "pro",
+					status: "incomplete",
+					streampayConsumerId: "cons_actor",
+					streampayPaymentLinkId: "pl_actor_billed",
+					createdAt: new Date(),
+				}),
+			});
+
+			const { ctx } = serverCtx({
+				adapter,
+				body: { plan: "pro", referenceId: "user-other", referenceType: "user" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({
+				code: "CONFLICT",
+				errorCode: "SUBSCRIPTION_CHECKOUT_IN_PROGRESS",
+			});
+			expect(mockClient.getPaymentLink).not.toHaveBeenCalled();
+			expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
+		});
+
+		it("grants no organization trial when a trial policy is configured", async () => {
+			const isTrialEligible = vi.fn().mockResolvedValue(true);
+			const plugin = buildSubsPlugin(
+				[{ ...PRO_PLAN, trialPeriodDays: 14 }],
+				mockClient,
+				{ isTrialEligible },
+				{ organization: { enabled: true } },
+			);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			mockClient.createPaymentLink.mockResolvedValue({ id: "pl_org_trial", url: "https://x" });
+			mockClient.getPaymentUrl.mockReturnValue("https://x");
+
+			const adapter = createMockAdapter();
+			adapter.tables.organization = [
+				{ id: "org-1", name: "Acme Inc", streampayConsumerId: "cons_org" },
+			];
+
+			const { ctx } = serverCtx({
+				adapter,
+				body: { plan: "pro", referenceId: "org-1", referenceType: "organization" },
+			});
+
+			await expect(handler(ctx)).resolves.toBeDefined();
+			expect(isTrialEligible).not.toHaveBeenCalled();
+			const payload = mockClient.createPaymentLink.mock.calls[0]?.[0] as Record<string, unknown>;
+			expect(payload.trial_period_days).toBeUndefined();
+		});
+
+		it("keeps the default first trial for organizations when no trial policy is configured", async () => {
+			const plugin = buildSubsPlugin(
+				[{ ...PRO_PLAN, trialPeriodDays: 14 }],
+				mockClient,
+				{},
+				{ organization: { enabled: true } },
+			);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			mockClient.createPaymentLink.mockResolvedValue({ id: "pl_org_trial2", url: "https://x" });
+			mockClient.getPaymentUrl.mockReturnValue("https://x");
+
+			const adapter = createMockAdapter();
+			adapter.tables.organization = [
+				{ id: "org-1", name: "Acme Inc", streampayConsumerId: "cons_org" },
+			];
+
+			const { ctx } = serverCtx({
+				adapter,
+				body: { plan: "pro", referenceId: "org-1", referenceType: "organization" },
+			});
+
+			await expect(handler(ctx)).resolves.toBeDefined();
+			expect(mockClient.createPaymentLink).toHaveBeenCalledWith(
+				expect.objectContaining({ trial_period_days: 14 }),
+			);
+		});
+
+		it("uses the concurrent winner's consumer when the organization is claimed mid-provisioning", async () => {
+			const plugin = buildSubsPlugin(
+				[PRO_PLAN],
+				mockClient,
+				{},
+				{ organization: { enabled: true } },
+			);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			mockClient.createPaymentLink.mockResolvedValue({ id: "pl_org_race", url: "https://x" });
+			mockClient.getPaymentUrl.mockReturnValue("https://x");
+			mockClient.listConsumers.mockResolvedValue({ data: [], pagination: {} });
+
+			const adapter = createMockAdapter();
+			const orgRow: Record<string, unknown> = { id: "org-1", name: "Acme Inc" };
+			adapter.tables.organization = [orgRow];
+			mockClient.createConsumer.mockImplementation(async () => {
+				orgRow.streampayConsumerId = "cons_winner";
+				return { id: "cons_new" };
+			});
+
+			const { ctx } = serverCtx({
+				adapter,
+				body: { plan: "pro", referenceId: "org-1", referenceType: "organization" },
+			});
+
+			await expect(handler(ctx)).resolves.toBeDefined();
+			expect(adapter.tables.organization[0]).toMatchObject({
+				streampayConsumerId: "cons_winner",
+			});
+			expect(mockClient.createPaymentLink).toHaveBeenCalledWith(
+				expect.objectContaining({ organization_consumer_id: "cons_winner" }),
+			);
+			expect(getSubscriptionRows(adapter)[0]).toMatchObject({
+				streampayConsumerId: "cons_winner",
+			});
+			expect(mockClient.deleteConsumer).not.toHaveBeenCalled();
+		});
+
+		it("never deletes a freshly created consumer that another account linked concurrently", async () => {
+			const plugin = buildSubsPlugin(
+				[PRO_PLAN],
+				mockClient,
+				{},
+				{ organization: { enabled: true } },
+			);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			mockClient.listConsumers.mockResolvedValue({ data: [], pagination: {} });
+
+			const adapter = createMockAdapter();
+			adapter.tables.organization = [{ id: "org-1", name: "Acme Inc" }];
+			mockClient.createConsumer.mockImplementation(async () => {
+				adapter.tables.user = [
+					{ id: "user-racer", email: "racer@example.com", streampayConsumerId: "cons_new" },
+				];
+				return { id: "cons_new" };
+			});
+
+			const { ctx } = serverCtx({
+				adapter,
+				body: { plan: "pro", referenceId: "org-1", referenceType: "organization" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({
+				errorCode: "STREAMPAY_CONSUMER_LINK_CONFLICT",
+			});
+			expect(mockClient.deleteConsumer).not.toHaveBeenCalled();
+			expect(adapter.tables.user?.[0]).toMatchObject({ streampayConsumerId: "cons_new" });
+		});
+
+		it("leaves the created consumer for external-id recovery when persistence fails", async () => {
+			const plugin = buildSubsPlugin(
+				[PRO_PLAN],
+				mockClient,
+				{},
+				{ organization: { enabled: true } },
+			);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			mockClient.listConsumers.mockResolvedValue({ data: [], pagination: {} });
+
+			const adapter = createMockAdapter();
+			adapter.tables.organization = [{ id: "org-1", name: "Acme Inc" }];
+			mockClient.createConsumer.mockImplementation(async () => {
+				adapter.tables.organization = [];
+				return { id: "cons_new" };
+			});
+
+			const { ctx } = serverCtx({
+				adapter,
+				body: { plan: "pro", referenceId: "org-1", referenceType: "organization" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({ code: "INTERNAL_SERVER_ERROR" });
+			expect(mockClient.deleteConsumer).not.toHaveBeenCalled();
+		});
+
+		it("still rejects a referenced user that does not exist", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			const { ctx } = serverCtx({
+				body: { plan: "pro", referenceId: "user-ghost", referenceType: "user" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({
+				errorCode: "SUBSCRIPTION_REFERENCE_USER_NOT_FOUND",
+			});
+			expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
+		});
+
+		it("rejects an anonymous referenced user", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			const adapter = createMockAdapter();
+			adapter.tables.user = [{ id: "user-anon", email: "anon@example.com", isAnonymous: true }];
+
+			const { ctx } = serverCtx({
+				adapter,
+				body: { plan: "pro", referenceId: "user-anon", referenceType: "user" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({
+				errorCode: "SUBSCRIPTION_REFERENCE_USER_NOT_BILLABLE",
+			});
+		});
+
+		it("provisions a consumer for the referenced user when they have none", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			mockClient.createPaymentLink.mockResolvedValue({ id: "pl_prov", url: "https://x" });
+			mockClient.getPaymentUrl.mockReturnValue("https://x");
+			mockClient.listConsumers.mockResolvedValue({ data: [], pagination: {} });
+			mockClient.createConsumer.mockResolvedValue({ id: "cons_new" });
+
+			const adapter = createMockAdapter();
+			adapter.tables.user = [
+				{ id: "user-other", email: "other@example.com", streampayConsumerId: null },
+			];
+
+			const { ctx } = serverCtx({
+				adapter,
+				body: { plan: "pro", referenceId: "user-other", referenceType: "user" },
+			});
+
+			await expect(handler(ctx)).resolves.toBeDefined();
+			expect(mockClient.createConsumer).toHaveBeenCalledWith(
+				expect.objectContaining({ external_id: "user-other", email: "other@example.com" }),
+			);
+			expect(ctx.context.internalAdapter.updateUser).toHaveBeenCalledWith("user-other", {
+				streampayConsumerId: "cons_new",
+			});
+			expect(mockClient.createPaymentLink).toHaveBeenCalledWith(
+				expect.objectContaining({ organization_consumer_id: "cons_new" }),
+			);
+		});
+
+		it("rejects organization references when org billing is not enabled", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			const { ctx } = serverCtx({
+				body: { plan: "pro", referenceId: "org-1", referenceType: "organization" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({
+				errorCode: "SUBSCRIPTION_ORG_BILLING_NOT_ENABLED",
+			});
+			expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
+		});
+
+		it("rejects an organization reference that does not exist", async () => {
+			const plugin = buildSubsPlugin(
+				[PRO_PLAN],
+				mockClient,
+				{},
+				{
+					organization: { enabled: true },
+				},
+			);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			const { ctx } = serverCtx({
+				body: { plan: "pro", referenceId: "org-ghost", referenceType: "organization" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({ errorCode: "ORG_NOT_FOUND" });
+			expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
+		});
+
+		it("provisions the organization's own consumer and stores it on the org row", async () => {
+			const plugin = buildSubsPlugin(
+				[PRO_PLAN],
+				mockClient,
+				{},
+				{
+					organization: { enabled: true },
+				},
+			);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			mockClient.createPaymentLink.mockResolvedValue({ id: "pl_org", url: "https://x" });
+			mockClient.getPaymentUrl.mockReturnValue("https://x");
+			mockClient.listConsumers.mockResolvedValue({ data: [], pagination: {} });
+			mockClient.createConsumer.mockResolvedValue({ id: "cons_org" });
+
+			const adapter = createMockAdapter();
+			adapter.tables.organization = [{ id: "org-1", name: "Acme Inc" }];
+
+			const { ctx } = serverCtx({
+				adapter,
+				body: { plan: "pro", referenceId: "org-1", referenceType: "organization" },
+			});
+
+			await expect(handler(ctx)).resolves.toBeDefined();
+			expect(mockClient.createConsumer).toHaveBeenCalledWith({
+				consumer_type: "INDIVIDUAL",
+				name: "Acme Inc",
+				external_id: "ref:organization:org-1",
+			});
+			expect(mockClient.createPaymentLink).toHaveBeenCalledWith(
+				expect.objectContaining({ organization_consumer_id: "cons_org" }),
+			);
+			expect(adapter.tables.organization[0]).toMatchObject({
+				streampayConsumerId: "cons_org",
+			});
+			expect(getSubscriptionRows(adapter)[0]).toMatchObject({
+				referenceId: "org-1",
+				referenceType: "organization",
+				streampayConsumerId: "cons_org",
+			});
+		});
+
+		it("maps a contact-less consumer rejection to BILLING_CONTACT_REQUIRED", async () => {
+			const plugin = buildSubsPlugin(
+				[PRO_PLAN],
+				mockClient,
+				{},
+				{
+					organization: { enabled: true },
+				},
+			);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			mockClient.listConsumers.mockResolvedValue({ data: [], pagination: {} });
+			mockClient.createConsumer.mockRejectedValue(
+				mockApiError(422, {
+					detail: [{ loc: ["body", "email"], msg: "Field required", type: "missing" }],
+				}),
+			);
+
+			const adapter = createMockAdapter();
+			adapter.tables.organization = [{ id: "org-1", name: "Acme Inc" }];
+
+			const { ctx } = serverCtx({
+				adapter,
+				body: { plan: "pro", referenceId: "org-1", referenceType: "organization" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({
+				errorCode: "BILLING_CONTACT_REQUIRED",
+			});
+			expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
+		});
+
+		it("keeps a non-contact validation error generic instead of BILLING_CONTACT_REQUIRED", async () => {
+			const plugin = buildSubsPlugin(
+				[PRO_PLAN],
+				mockClient,
+				{},
+				{
+					organization: { enabled: true },
+				},
+			);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			mockClient.listConsumers.mockResolvedValue({ data: [], pagination: {} });
+			mockClient.createConsumer.mockRejectedValue(
+				mockApiError(422, {
+					detail: [{ loc: ["body", "vat_number"], msg: "Invalid VAT number", type: "value_error" }],
+				}),
+			);
+
+			const adapter = createMockAdapter();
+			adapter.tables.organization = [{ id: "org-1", name: "Acme Inc" }];
+
+			const { ctx } = serverCtx({
+				adapter,
+				body: { plan: "pro", referenceId: "org-1", referenceType: "organization" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({
+				code: "INTERNAL_SERVER_ERROR",
+			});
+			expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
+		});
+
+		it("applies getBillingDetails overrides but keeps identity fields plugin-owned", async () => {
+			const getBillingDetails = vi.fn().mockResolvedValue({
+				phone_number: "+966500000000",
+				email: "billing@acme.example",
+				name: "clobbered",
+				external_id: "clobbered",
+			});
+			const plugin = buildSubsPlugin(
+				[PRO_PLAN],
+				mockClient,
+				{},
+				{
+					organization: { enabled: true, getBillingDetails },
+				},
+			);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			mockClient.createPaymentLink.mockResolvedValue({ id: "pl_org3", url: "https://x" });
+			mockClient.getPaymentUrl.mockReturnValue("https://x");
+			mockClient.listConsumers.mockResolvedValue({ data: [], pagination: {} });
+			mockClient.createConsumer.mockResolvedValue({ id: "cons_org" });
+
+			const adapter = createMockAdapter();
+			adapter.tables.organization = [{ id: "org-1", name: "Acme Inc" }];
+
+			const { ctx } = serverCtx({
+				adapter,
+				body: { plan: "pro", referenceId: "org-1", referenceType: "organization" },
+			});
+
+			await expect(handler(ctx)).resolves.toBeDefined();
+			expect(mockClient.createConsumer).toHaveBeenCalledWith({
+				consumer_type: "INDIVIDUAL",
+				phone_number: "+966500000000",
+				email: "billing@acme.example",
+				name: "Acme Inc",
+				external_id: "ref:organization:org-1",
+			});
+		});
+
+		it("refuses to link a recovered consumer already claimed by a user", async () => {
+			const plugin = buildSubsPlugin(
+				[PRO_PLAN],
+				mockClient,
+				{},
+				{
+					organization: { enabled: true },
+				},
+			);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+
+			mockClient.listConsumers.mockResolvedValue({
+				data: [{ id: "cons_shared", external_id: "ref:organization:org-1" }],
+				pagination: {},
+			});
+
+			const adapter = createMockAdapter();
+			adapter.tables.organization = [{ id: "org-1", name: "Acme Inc" }];
+			adapter.tables.user = [{ id: "user-x", streampayConsumerId: "cons_shared" }];
+
+			const { ctx } = serverCtx({
+				adapter,
+				body: { plan: "pro", referenceId: "org-1", referenceType: "organization" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({
+				errorCode: "STREAMPAY_CONSUMER_LINK_CONFLICT",
+			});
+			expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
+		});
+	});
+
 	describe("listSubscriptions / currentSubscription", () => {
+		it("a subscription bought via the server twin appears in the target user's own reads", async () => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+
+			mockClient.createPaymentLink.mockResolvedValue({ id: "pl_rt", url: "https://x" });
+			mockClient.getPaymentUrl.mockReturnValue("https://x");
+
+			const adapter = createMockAdapter();
+			adapter.tables.user = [
+				{ id: "user-other", email: "other@example.com", streampayConsumerId: "cons_other" },
+			];
+
+			const upgrade = unwrapHandler(plugin.endpoints.upgradeSubscriptionForReference);
+			const { ctx: buyerCtx } = setupCtx({
+				adapter,
+				body: { plan: "pro", referenceId: "user-other", referenceType: "user" },
+			});
+			(buyerCtx.context as { session?: unknown }).session = undefined;
+			await upgrade(buyerCtx);
+
+			// The target reads with no query params - the twin writes referenceType "user",
+			// so the subscription must show up in their own default reads.
+			const list = unwrapHandler<Array<Record<string, unknown>>>(
+				plugin.endpoints.listSubscriptions,
+			);
+			const { ctx: targetCtx } = setupCtx({
+				adapter,
+				user: { id: "user-other", streampayConsumerId: "cons_other" },
+			});
+
+			const result = await list(targetCtx);
+			expect(result).toHaveLength(1);
+			expect(result[0]).toMatchObject({ referenceId: "user-other", referenceType: "user" });
+		});
+
 		it("listSubscriptions returns rows scoped to user.id with plan info", async () => {
 			const plugin = buildSubsPlugin([PRO_PLAN, BASIC_PLAN], mockClient);
 			const handler = unwrapHandler<Array<Record<string, unknown>>>(

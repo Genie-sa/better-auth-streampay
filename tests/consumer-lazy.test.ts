@@ -20,11 +20,19 @@ vi.mock("better-auth/api", () => ({
 	APIError: MockAPIError,
 	sessionMiddleware: vi.fn(),
 	getSessionFromCtx: vi.fn(),
-	createAuthEndpoint: vi.fn((path: string, config: unknown, handler: unknown) => ({
-		path,
-		config,
-		handler,
-	})),
+	createAuthEndpoint: Object.assign(
+		vi.fn((path: string, config: unknown, handler: unknown) => ({
+			path,
+			config,
+			handler,
+		})),
+		{
+			serverOnly: vi.fn((config: unknown, handler: unknown) => ({
+				config,
+				handler,
+			})),
+		},
+	),
 }));
 
 import { onBeforeUserCreate } from "../src/hooks/consumer";
@@ -123,7 +131,9 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 			);
 			const options = createTestStreamPayOptions({ client: mockClient });
 			const ctx = createMockContext();
-			vi.mocked(ctx.context.adapter.findOne).mockResolvedValue({ id: "user-1" });
+			vi.mocked(ctx.context.adapter.findOne).mockImplementation(async (input) =>
+				(input as { model: string }).model === "user" ? { id: "user-1" } : null,
+			);
 
 			await expect(
 				ensureConsumerForUser(options, ctx, { id: "user-1", email: "a@b.com" }),
@@ -195,6 +205,113 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 			const options = createTestStreamPayOptions({ client: mockClient });
 			const ctx = createMockContext();
 			vi.mocked(ctx.context.adapter.findOne).mockResolvedValue({ id: "user-other" });
+
+			await expect(
+				ensureConsumerForUser(options, ctx, { id: "user-1", email: "a@b.com" }),
+			).rejects.toMatchObject({
+				code: "CONFLICT",
+				errorCode: "STREAMPAY_CONSUMER_LINK_CONFLICT",
+			});
+			expect(mockClient.updateConsumer).not.toHaveBeenCalled();
+			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
+		});
+
+		it("rejects a recovered consumer owned by an organization", async () => {
+			mockClient.listConsumers.mockResolvedValue(
+				createMockConsumerList([
+					createMockConsumer({ id: "cons_org_owned", external_id: "user-1" }),
+				]),
+			);
+			const options = createTestStreamPayOptions({
+				client: mockClient,
+				organization: { enabled: true },
+			});
+			const ctx = createMockContext();
+			vi.mocked(ctx.context.adapter.findOne).mockImplementation(async (input) =>
+				(input as { model: string }).model === "organization" ? { id: "org-1" } : null,
+			);
+
+			await expect(
+				ensureConsumerForUser(options, ctx, { id: "user-1", email: "a@b.com" }),
+			).rejects.toMatchObject({
+				code: "CONFLICT",
+				errorCode: "STREAMPAY_CONSUMER_LINK_CONFLICT",
+			});
+			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
+		});
+
+		it("still rejects an organization-owned consumer when org billing is disabled (protect-only)", async () => {
+			mockClient.listConsumers.mockResolvedValue(
+				createMockConsumerList([
+					createMockConsumer({ id: "cons_org_owned", external_id: "user-1" }),
+				]),
+			);
+			const options = createTestStreamPayOptions({
+				client: mockClient,
+				organization: { enabled: false },
+			});
+			const ctx = createMockContext();
+			vi.mocked(ctx.context.adapter.findOne).mockImplementation(async (input) =>
+				(input as { model: string }).model === "organization" ? { id: "org-1" } : null,
+			);
+
+			await expect(
+				ensureConsumerForUser(options, ctx, { id: "user-1", email: "a@b.com" }),
+			).rejects.toMatchObject({
+				code: "CONFLICT",
+				errorCode: "STREAMPAY_CONSUMER_LINK_CONFLICT",
+			});
+			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
+		});
+
+		it("fails closed when the organization ownership query errors", async () => {
+			mockClient.listConsumers.mockResolvedValue(
+				createMockConsumerList([
+					createMockConsumer({ id: "cons_org_owned", external_id: "user-1" }),
+				]),
+			);
+			const options = createTestStreamPayOptions({
+				client: mockClient,
+				organization: { enabled: false },
+			});
+			const ctx = createMockContext();
+			vi.mocked(ctx.context.adapter.findOne).mockImplementation(async (input) => {
+				if ((input as { model: string }).model === "organization") {
+					throw new Error("database unavailable");
+				}
+				return null;
+			});
+
+			await expect(
+				ensureConsumerForUser(options, ctx, { id: "user-1", email: "a@b.com" }),
+			).rejects.toMatchObject({
+				errorCode: "STREAMPAY_CONSUMER_LINK_WRITE_FAILED",
+			});
+			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
+		});
+
+		it("refuses to claim an organization-owned consumer by contact match", async () => {
+			mockClient.createConsumer.mockRejectedValue(
+				mockApiError(409, { error: { code: "DUPLICATE_CONSUMER" } }),
+			);
+			mockClient.listConsumers.mockResolvedValue(
+				createMockConsumerList([
+					createMockConsumer({
+						id: "cons_org_owned",
+						email: "a@b.com",
+						external_id: "ref:organization:org-1",
+					}),
+				]),
+			);
+			const options = createTestStreamPayOptions({
+				client: mockClient,
+				organization: { enabled: true },
+				claimExistingConsumerBy: ["email"],
+			});
+			const ctx = createMockContext();
+			vi.mocked(ctx.context.adapter.findOne).mockImplementation(async (input) =>
+				(input as { model: string }).model === "organization" ? { id: "org-1" } : null,
+			);
 
 			await expect(
 				ensureConsumerForUser(options, ctx, { id: "user-1", email: "a@b.com" }),

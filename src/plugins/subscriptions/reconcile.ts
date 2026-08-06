@@ -108,7 +108,8 @@ export function projectSubscriptionFields(sub: SubscriptionDetailed): Partial<Su
 	const periodEnd = parseDate(sub.current_period_end);
 	return {
 		streampaySubscriptionId: sub.id ?? null,
-		streampayConsumerId: sub.organization_consumer_id ?? null,
+		// A provider payload without a consumer must never clear the stored payer.
+		...(sub.organization_consumer_id ? { streampayConsumerId: sub.organization_consumer_id } : {}),
 		amountInSmallestUnit:
 			typeof sub.amount_in_smallest_unit === "number"
 				? sub.amount_in_smallest_unit
