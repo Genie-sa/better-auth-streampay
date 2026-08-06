@@ -372,15 +372,24 @@ async function findIncompleteRow(
 			{ field: "status", value: "incomplete" },
 		],
 	});
-	const consumerScoped = providerConsumerId
-		? candidates.filter(
+	const typeScoped = referenceType
+		? candidates.filter((candidate) => (candidate.referenceType ?? "user") === referenceType)
+		: candidates;
+	const scopedCandidates = providerConsumerId
+		? typeScoped.filter(
 				(candidate) =>
 					!candidate.streampayConsumerId || candidate.streampayConsumerId === providerConsumerId,
 			)
-		: candidates;
-	const scopedCandidates = referenceType
-		? consumerScoped.filter((candidate) => (candidate.referenceType ?? "user") === referenceType)
-		: consumerScoped;
+		: typeScoped;
+	// Correlation candidates for this reference/plan exist, but every one of
+	// them is already billed to a different consumer. Creating a fresh row here
+	// would silently attach the mismatched payer to the reference, so refuse —
+	// regardless of subscription status or active-slot uniqueness.
+	if (typeScoped.length > 0 && scopedCandidates.length === 0) {
+		throw new SubscriptionCorrelationError(
+			`Webhook correlation for reference=${referenceId} plan=${plan} only matched rows billed to a different consumer.`,
+		);
+	}
 	if (scopedCandidates.length === 0) return null;
 	if (paymentLinkId) {
 		const exact = scopedCandidates.find(
@@ -453,6 +462,27 @@ class SubscriptionCorrelationError extends Error {
 	}
 }
 
+function assertProviderPayerMatchesStored(
+	ctx: SyncContext,
+	eventType: string,
+	existing: Subscription | null,
+	stream: SubscriptionDetailed,
+	streampaySubscriptionId: string,
+): void {
+	if (
+		existing?.streampayConsumerId &&
+		stream.organization_consumer_id &&
+		existing.streampayConsumerId !== stream.organization_consumer_id
+	) {
+		logger(ctx).warn(
+			`webhook ${eventType}: provider consumer does not match the stored payer for sub=${streampaySubscriptionId}; refusing to reconcile.`,
+		);
+		throw new SubscriptionCorrelationError(
+			`Webhook ${eventType} reported a different consumer than the stored payer for sub=${streampaySubscriptionId}.`,
+		);
+	}
+}
+
 async function reconcileFromStreamPay(
 	ctx: SyncContext,
 	payload: StreamPayWebhookPayload,
@@ -477,18 +507,13 @@ async function reconcileFromStreamPay(
 	}
 
 	const existing = await findSubscriptionByStreampayId(ctx, streampaySubscriptionId);
-	if (
-		existing?.streampayConsumerId &&
-		stream.organization_consumer_id &&
-		existing.streampayConsumerId !== stream.organization_consumer_id
-	) {
-		logger(ctx).warn(
-			`webhook ${payload.event_type}: provider consumer does not match the stored payer for sub=${streampaySubscriptionId}; refusing to reconcile.`,
-		);
-		throw new SubscriptionCorrelationError(
-			`Webhook ${payload.event_type} reported a different consumer than the stored payer for sub=${streampaySubscriptionId}.`,
-		);
-	}
+	assertProviderPayerMatchesStored(
+		ctx,
+		payload.event_type,
+		existing,
+		stream,
+		streampaySubscriptionId,
+	);
 	let projected: Partial<Subscription> = {
 		...projectSubscriptionFields(stream),
 		...projectPlanFields(stream, plans),
@@ -806,6 +831,7 @@ async function handleInvoiceCompleted(
 
 	const existing = await findSubscriptionByStreampayId(ctx, subscriptionId);
 	if (!existing) return;
+	assertProviderPayerMatchesStored(ctx, payload.event_type, existing, stream, subscriptionId);
 
 	const eventAt = parseDate(payload.timestamp);
 	const eventIsStale = Boolean(

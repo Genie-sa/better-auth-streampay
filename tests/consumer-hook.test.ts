@@ -246,6 +246,7 @@ describe("consumer hooks", () => {
 				const options = createEagerTestStreamPayOptions({
 					client: mockClient,
 					claimExistingConsumerBy: ["email"],
+					organization: { enabled: false },
 				});
 				mockClient.createConsumer.mockRejectedValue(duplicateError);
 				mockClient.listConsumers.mockResolvedValue(

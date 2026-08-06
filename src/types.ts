@@ -160,7 +160,16 @@ export type StreamPayPlugin =
 
 export type StreamPayPlugins = readonly StreamPayPlugin[];
 
-export type StreamPayEndpoints = UnionToIntersection<ReturnType<StreamPayPlugin>["endpoints"]>;
+/**
+ * Endpoints contributed by the configured sub-plugins only. `auth.api` must
+ * not advertise methods that are `undefined` at runtime, so the surface is
+ * derived from the `use` tuple rather than from every possible sub-plugin.
+ */
+export type StreamPayEndpoints<U extends StreamPayPlugins = StreamPayPlugins> = [
+	U[number],
+] extends [never]
+	? Record<never, never>
+	: UnionToIntersection<ReturnType<U[number]>["endpoints"]>;
 
 export type ConsumerCreateOverrides = Partial<
 	Omit<ConsumerCreate, "name" | "email" | "external_id">
@@ -185,6 +194,13 @@ export interface BillingOrganization {
 }
 
 export interface OrganizationBillingOptions {
+	/**
+	 * Whether new organization billing (checkouts, consumer provisioning) is
+	 * allowed. Setting this to `false` keeps the organization consumer field
+	 * registered and existing organization-owned consumers protected from user
+	 * claims — the safe rollback mode. Only remove the whole `organization`
+	 * option after clearing every `organization.streampayConsumerId` link.
+	 */
 	enabled: boolean;
 
 	/**

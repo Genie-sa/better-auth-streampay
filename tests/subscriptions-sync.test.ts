@@ -701,8 +701,6 @@ describe("syncWebhookPayload", () => {
 				items: [{ product_id: "prod_pro", quantity: 1 }],
 			});
 
-			// The reserved row is skipped; rebuilding a replacement collides on the
-			// active slot, so the event errors instead of stealing the reservation.
 			await expect(
 				syncWebhookPayload(
 					ctx,
@@ -721,7 +719,7 @@ describe("syncWebhookPayload", () => {
 					resolvedPlans(),
 					{},
 				),
-			).rejects.toThrow();
+			).rejects.toThrow(/billed to a different consumer/);
 
 			expect(ctx.adapter.tables.subscription).toHaveLength(1);
 			expect(
@@ -730,6 +728,63 @@ describe("syncWebhookPayload", () => {
 				streampaySubscriptionId: null,
 				streampayConsumerId: "cons_expected",
 				activeSlotKey: subscriptionSlotKey("user", "user-123", null),
+			});
+		});
+
+		it("dead-letters a TERMINAL fallback correlation billed to a different consumer", async () => {
+			const ctx = createMockSyncContext();
+			await ctx.adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_reserved_terminal",
+					referenceId: "user-123",
+					referenceType: "user",
+					plan: "pro",
+					status: "incomplete",
+					activeSlotKey: subscriptionSlotKey("user", "user-123", null),
+					streampayConsumerId: "cons_expected",
+					streampaySubscriptionId: null,
+				}),
+			});
+			// A CANCELED projection carries activeSlotKey null, so the unique-slot
+			// collision that incidentally blocks the ACTIVE case cannot help here.
+			// The mismatch itself must refuse the event.
+			client.getSubscription.mockResolvedValue({
+				id: "sub_terminal_attacker",
+				status: "CANCELED",
+				organization_consumer_id: "cons_attacker",
+				items: [{ product_id: "prod_pro", quantity: 1 }],
+			});
+
+			await expect(
+				syncWebhookPayload(
+					ctx,
+					createMockWebhookPayload({
+						event_type: "SUBSCRIPTION_CANCELED",
+						entity_id: "sub_terminal_attacker",
+						data: {
+							metadata: {
+								[PLAN_NAME_METADATA_KEY]: "pro",
+								[REFERENCE_ID_METADATA_KEY]: "user-123",
+								[REFERENCE_TYPE_METADATA_KEY]: "user",
+							},
+						},
+					}),
+					client,
+					resolvedPlans(),
+					{},
+				),
+			).rejects.toThrow(/billed to a different consumer/);
+
+			expect(ctx.adapter.tables.subscription).toHaveLength(1);
+			expect(
+				ctx.adapter.tables.subscription?.find((row) => row.id === "row_reserved_terminal"),
+			).toMatchObject({
+				streampaySubscriptionId: null,
+				streampayConsumerId: "cons_expected",
+			});
+			expect(ctx.adapter.tables.streampayWebhookEvent?.[0]).toMatchObject({
+				status: "dead_letter",
 			});
 		});
 
@@ -1631,6 +1686,61 @@ describe("syncWebhookPayload", () => {
 	});
 
 	describe("INVOICE_COMPLETED renewal inference", () => {
+		it("dead-letters an invoice whose provider consumer differs from the stored payer", async () => {
+			const ctx = createMockSyncContext();
+			await ctx.adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					id: "row_invoice_victim",
+					streampaySubscriptionId: "sub_shared",
+					status: "active",
+					streampayConsumerId: "cons_expected",
+					periodEnd: new Date("2026-02-01T00:00:00Z"),
+					currentCycleNumber: 1,
+				}),
+			});
+			client.getInvoice.mockResolvedValue({
+				id: "inv_attacker",
+				subscription_id: "sub_shared",
+				currency: "SAR",
+			});
+			client.getSubscription.mockResolvedValue({
+				id: "sub_shared",
+				status: "ACTIVE",
+				current_period_end: "2026-03-01T00:00:00Z",
+				current_cycle_number: 2,
+				organization_consumer_id: "cons_attacker",
+			});
+			const callback = vi.fn<NonNullable<SubscriptionCallbacks["onSubscriptionRenewed"]>>();
+
+			await expect(
+				syncWebhookPayload(
+					ctx,
+					createMockWebhookPayload({
+						event_type: "INVOICE_COMPLETED",
+						entity_type: "INVOICE",
+						entity_id: "inv_attacker",
+						data: { invoice: { id: "inv_attacker", url: "x" } },
+					}),
+					client,
+					resolvedPlans(),
+					{ onSubscriptionRenewed: callback },
+				),
+			).rejects.toThrow(/different consumer/);
+
+			expect(callback).not.toHaveBeenCalled();
+			expect(
+				ctx.adapter.tables.subscription?.find((row) => row.id === "row_invoice_victim"),
+			).toMatchObject({
+				streampayConsumerId: "cons_expected",
+				status: "active",
+				currentCycleNumber: 1,
+			});
+			expect(ctx.adapter.tables.streampayWebhookEvent?.[0]).toMatchObject({
+				status: "dead_letter",
+			});
+		});
+
 		it("fires onSubscriptionRenewed when invoice has a subscription_id", async () => {
 			const ctx = createMockSyncContext();
 			await ctx.adapter.create({

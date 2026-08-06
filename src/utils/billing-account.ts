@@ -214,37 +214,20 @@ async function persistOrganizationConsumerId(
 }
 
 /**
- * Removes a consumer this request created but never linked or billed. The
- * ownership re-read runs immediately before the delete: if any user or
- * organization linked the consumer in the meantime, the delete is skipped.
- * Failure only leaves an unused consumer behind, so it is logged, not
- * surfaced.
+ * A consumer this request created but never linked is deliberately left in
+ * place: no ownership read can prove another request will not link it between
+ * that read and a provider delete. Its deterministic `ref:organization:` id
+ * makes it recoverable — the next provisioning attempt for the same
+ * organization adopts it instead of creating another one.
  */
-async function deleteUnusedConsumerBestEffort(
+function logUnlinkedConsumer(
 	ctx: GenericEndpointContext,
-	options: StreamPayOptions,
 	consumerId: string,
 	organizationId: string,
-): Promise<void> {
-	try {
-		const adapter = getBillingAdapter(ctx);
-		const where: Where[] = [{ field: "streampayConsumerId", value: consumerId }];
-		const userOwner = await adapter.findOne<unknown>({ model: USER_MODEL, where });
-		const organizationOwner = userOwner
-			? null
-			: await adapter.findOne<unknown>({ model: ORGANIZATION_MODEL, where });
-		if (userOwner || organizationOwner) {
-			getLogger(ctx).warn(
-				`skipping delete of consumer=${consumerId}: another account linked it concurrently`,
-			);
-			return;
-		}
-		await options.client.deleteConsumer(consumerId);
-	} catch (err) {
-		getLogger(ctx).error(
-			`failed to delete unused consumer=${consumerId} after losing the claim for organization=${organizationId}: ${formatStreamPayError(err)}`,
-		);
-	}
+): void {
+	getLogger(ctx).warn(
+		`consumer=${consumerId} for organization=${organizationId} was created but not linked; it will be adopted by external id on the next provisioning attempt.`,
+	);
 }
 
 async function ensureConsumerForOrganization(
@@ -275,11 +258,11 @@ async function ensureConsumerForOrganization(
 		try {
 			consumerId = await persistOrganizationConsumerId(ctx, organization.id, consumer.id);
 		} catch (persistError) {
-			await deleteUnusedConsumerBestEffort(ctx, options, consumer.id, organization.id);
+			logUnlinkedConsumer(ctx, consumer.id, organization.id);
 			throw persistError;
 		}
 		if (consumerId !== consumer.id) {
-			await deleteUnusedConsumerBestEffort(ctx, options, consumer.id, organization.id);
+			logUnlinkedConsumer(ctx, consumer.id, organization.id);
 		}
 		return { consumerId, created: consumerId === consumer.id };
 	} catch (err: unknown) {

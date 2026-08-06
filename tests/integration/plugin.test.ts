@@ -31,6 +31,23 @@ describe("streampay plugin integration", () => {
 		expectTypeOf<CancelBody>().toEqualTypeOf<SubscriptionCancel>();
 	});
 
+	it("does not advertise endpoints for unconfigured sub-plugins", async () => {
+		const { auth } = await getTestInstance({
+			plugins: [
+				streampay({
+					client: createMockStreamPayClient(),
+					use: [],
+				}),
+			],
+		});
+
+		expectTypeOf<(typeof auth)["api"]>().not.toHaveProperty("checkoutForReference");
+		expectTypeOf<(typeof auth)["api"]>().not.toHaveProperty("upgradeSubscriptionForReference");
+		expectTypeOf<(typeof auth)["api"]>().not.toHaveProperty("adminCreateProduct");
+		expect((auth.api as Record<string, unknown>).checkoutForReference).toBeUndefined();
+		expect((auth.api as Record<string, unknown>).upgradeSubscriptionForReference).toBeUndefined();
+	});
+
 	it("infers the user schema field added by the plugin", async () => {
 		const { auth } = await getTestInstance({
 			plugins: [
@@ -186,6 +203,40 @@ describe("streampay plugin integration", () => {
 			expect(ctx.tables.organization?.fields.streampayConsumerId).toMatchObject({
 				unique: true,
 			});
+		});
+
+		it("keeps the ownership field registered while org billing is disabled (protect-only)", async () => {
+			const { auth } = await getTestInstance({
+				plugins: [
+					organization(),
+					streampay({
+						client: createMockStreamPayClient(),
+						organization: { enabled: false },
+						use: [],
+					}),
+				],
+			});
+			const ctx = await auth.$context;
+			expect(ctx.tables.organization?.fields.streampayConsumerId).toMatchObject({
+				unique: true,
+			});
+		});
+
+		it("fails fast when organization is configured (even disabled) without the organization plugin", async () => {
+			await expect(
+				(async () => {
+					const { auth } = await getTestInstance({
+						plugins: [
+							streampay({
+								client: createMockStreamPayClient(),
+								organization: { enabled: false },
+								use: [],
+							}),
+						],
+					});
+					await auth.$context;
+				})(),
+			).rejects.toThrow(/organization plugin/);
 		});
 
 		it("fails fast when the organization plugin uses a custom table name the billing options do not", async () => {

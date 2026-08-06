@@ -237,25 +237,14 @@ export async function assertConsumerUnclaimed(
 		if (owner.id !== userId) throw consumerClaimConflict();
 	}
 
-	if (options.organization?.enabled) {
+	// The organization consumer field only exists in the runtime schema while
+	// the `organization` option is configured (any `enabled` value). Without it
+	// the query is guaranteed to fail, and this plugin never wrote such a link;
+	// rollback therefore means `enabled: false`, not deleting the option.
+	if (options.organization) {
 		const organizationOwner = await findConsumerOwner(ctx, consumerId, "organization");
 		if (organizationOwner) throw consumerClaimConflict();
-		return;
 	}
-
-	// Org billing may have been enabled in the past: an organization that still
-	// owns this consumer must stay protected. When the organization model does
-	// not exist at all, the lookup fails and the consumer is simply unowned.
-	let organizationOwner: unknown = null;
-	try {
-		organizationOwner = await ctx.context.adapter.findOne({
-			model: "organization",
-			where: [{ field: "streampayConsumerId", value: consumerId }],
-		});
-	} catch {
-		organizationOwner = null;
-	}
-	if (organizationOwner) throw consumerClaimConflict();
 }
 
 async function persistConsumerId(

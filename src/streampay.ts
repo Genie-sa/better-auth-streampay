@@ -13,12 +13,13 @@ function assertOrganizationBillingConfig(
 	options: StreamPayOptions,
 	plugins: readonly Pick<BetterAuthPlugin, "id" | "schema">[] | undefined,
 ): void {
-	if (!options.organization?.enabled) return;
+	if (!options.organization) return;
 
 	const organizationPlugin = plugins?.find((plugin) => plugin.id === "organization");
 	if (!organizationPlugin) {
 		throw new Error(
-			"streampay: `organization.enabled` requires the Better Auth organization plugin.",
+			"streampay: the `organization` option requires the Better Auth organization plugin. " +
+				"Remove the option entirely if organizations are never billed.",
 		);
 	}
 
@@ -52,9 +53,9 @@ const organizationBillingSchema = (modelName: string | undefined) =>
 		},
 	}) as const;
 
-export const streampay = <O extends StreamPayOptions>(options: O) => {
+export const streampay = <const O extends StreamPayOptions>(options: O) => {
 	const registry: StreamPayPluginRegistry = {};
-	const endpoints = {} as StreamPayEndpoints;
+	const endpoints: Record<string, unknown> = {};
 	let extraSchema: Record<string, unknown> = {};
 
 	for (const use of options.use) {
@@ -65,10 +66,9 @@ export const streampay = <O extends StreamPayOptions>(options: O) => {
 		}
 	}
 
-	return {
+	const plugin = {
 		id: "streampay",
 		version: PACKAGE_VERSION,
-		endpoints,
 		schema: {
 			user: {
 				fields: {
@@ -80,9 +80,7 @@ export const streampay = <O extends StreamPayOptions>(options: O) => {
 					},
 				},
 			},
-			...(options.organization?.enabled
-				? organizationBillingSchema(options.organization.modelName)
-				: {}),
+			...(options.organization ? organizationBillingSchema(options.organization.modelName) : {}),
 			...extraSchema,
 		},
 		init(ctx) {
@@ -107,4 +105,6 @@ export const streampay = <O extends StreamPayOptions>(options: O) => {
 			};
 		},
 	} satisfies BetterAuthPlugin & { version: string };
+
+	return { ...plugin, endpoints: endpoints as StreamPayEndpoints<O["use"]> };
 };

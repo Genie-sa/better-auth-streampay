@@ -478,9 +478,17 @@ typed: `SUBSCRIPTION_ORG_BILLING_NOT_ENABLED` when org billing is off, `ORG_NOT_
 reference doesn't resolve, and `BILLING_CONTACT_REQUIRED` when StreamPay's validation names the
 missing `email` or `phone_number` field. Other provider validation errors pass through unchanged.
 
-Consumer ownership is global: a StreamPay consumer linked to an organization can never be
-claimed by a user, and the other way around — both directions end in
-`STREAMPAY_CONSUMER_LINK_CONFLICT`.
+Consumer ownership is checked across both models: a StreamPay consumer linked to an
+organization is rejected when a user tries to claim it, and the other way around — both
+directions end in `STREAMPAY_CONSUMER_LINK_CONFLICT`, and consumers carrying a
+`ref:organization:` external id are refused on the user path even before any local lookup.
+These checks are reads before writes, not one transaction: a same-instant claim of one
+consumer from both models at once is not globally atomic.
+
+**Rolling back org billing:** set `organization.enabled: false` instead of removing the
+option. That blocks new organization billing while keeping the ownership field registered, so
+organizations that still own consumers stay protected from user claims. Only remove the
+`organization` option entirely after clearing every `organization.streampayConsumerId` link.
 
 **Scope:** organization billing covers creating checkouts and renewal billing. Organization
 renames are not synced to StreamPay, deleting an organization does not cancel its

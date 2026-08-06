@@ -2543,7 +2543,7 @@ describe("subscriptions() endpoints", () => {
 			expect(getSubscriptionRows(adapter)[0]).toMatchObject({
 				streampayConsumerId: "cons_winner",
 			});
-			expect(mockClient.deleteConsumer).toHaveBeenCalledWith("cons_new");
+			expect(mockClient.deleteConsumer).not.toHaveBeenCalled();
 		});
 
 		it("never deletes a freshly created consumer that another account linked concurrently", async () => {
@@ -2578,7 +2578,7 @@ describe("subscriptions() endpoints", () => {
 			expect(adapter.tables.user?.[0]).toMatchObject({ streampayConsumerId: "cons_new" });
 		});
 
-		it("deletes the created consumer when organization persistence fails without a winner", async () => {
+		it("leaves the created consumer for external-id recovery when persistence fails", async () => {
 			const plugin = buildSubsPlugin(
 				[PRO_PLAN],
 				mockClient,
@@ -2602,7 +2602,7 @@ describe("subscriptions() endpoints", () => {
 			});
 
 			await expect(handler(ctx)).rejects.toMatchObject({ code: "INTERNAL_SERVER_ERROR" });
-			expect(mockClient.deleteConsumer).toHaveBeenCalledWith("cons_new");
+			expect(mockClient.deleteConsumer).not.toHaveBeenCalled();
 		});
 
 		it("still rejects a referenced user that does not exist", async () => {
