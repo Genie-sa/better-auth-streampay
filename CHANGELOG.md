@@ -1,5 +1,11 @@
 # better-auth-streampay
 
+## 2.2.1
+
+### Patch Changes
+
+- 7f6e154: Resolve subscription plans directly on every lookup so function-backed catalogs stay current without restarting the process.
+
 ## 2.2.0
 
 ### Minor Changes
