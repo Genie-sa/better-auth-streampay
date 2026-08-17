@@ -1,5 +1,74 @@
 import { describe, expect, it } from "vitest";
-import { validatePlansShape } from "../src/plugins/subscriptions/plans";
+import { createPlanResolver, validatePlansShape } from "../src/plugins/subscriptions/plans";
+
+describe("createPlanResolver", () => {
+	it("resolves function-backed plans again after the previous resolution completes", async () => {
+		let planName = "starter";
+		const resolvePlans = createPlanResolver(async () => [
+			{
+				name: planName,
+				productId: `prod_${planName}`,
+				priceInSmallestUnit: 9900,
+				billingInterval: "MONTH",
+			},
+		]);
+
+		expect((await resolvePlans()).byName.has("starter")).toBe(true);
+		planName = "pro";
+		expect((await resolvePlans()).byName.has("pro")).toBe(true);
+	});
+
+	it("resolves concurrent function-backed plans independently", async () => {
+		let calls = 0;
+		const resolvePlans = createPlanResolver(async () => {
+			calls += 1;
+			return [
+				{
+					name: "pro",
+					productId: "prod_pro",
+					priceInSmallestUnit: 9900,
+					billingInterval: "MONTH",
+				},
+			];
+		});
+
+		await Promise.all([resolvePlans(), resolvePlans()]);
+		expect(calls).toBe(2);
+	});
+
+	it("retries function-backed plans after a failed resolution", async () => {
+		let calls = 0;
+		const resolvePlans = createPlanResolver(async () => {
+			calls += 1;
+			if (calls === 1) throw new Error("database unavailable");
+			return [
+				{
+					name: "pro",
+					productId: "prod_pro",
+					priceInSmallestUnit: 9900,
+					billingInterval: "MONTH",
+				},
+			];
+		});
+
+		await expect(resolvePlans()).rejects.toThrow("database unavailable");
+		expect((await resolvePlans()).byName.has("pro")).toBe(true);
+		expect(calls).toBe(2);
+	});
+
+	it("resolves array-backed plans without caching the index", async () => {
+		const resolvePlans = createPlanResolver([
+			{
+				name: "pro",
+				productId: "prod_pro",
+				priceInSmallestUnit: 9900,
+				billingInterval: "MONTH",
+			},
+		]);
+
+		expect(await resolvePlans()).not.toBe(await resolvePlans());
+	});
+});
 
 describe("validatePlansShape", () => {
 	const baseline = {
