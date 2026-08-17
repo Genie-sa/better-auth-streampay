@@ -1,5 +1,74 @@
 import { describe, expect, it } from "vitest";
-import { validatePlansShape } from "../src/plugins/subscriptions/plans";
+import { resolvePlans, validatePlansShape } from "../src/plugins/subscriptions/plans";
+
+describe("resolvePlans", () => {
+	it("resolves function-backed plans again after the previous resolution completes", async () => {
+		let planName = "starter";
+		const plans = async () => [
+			{
+				name: planName,
+				productId: `prod_${planName}`,
+				priceInSmallestUnit: 9900,
+				billingInterval: "MONTH" as const,
+			},
+		];
+
+		expect((await resolvePlans(plans)).byName.has("starter")).toBe(true);
+		planName = "pro";
+		expect((await resolvePlans(plans)).byName.has("pro")).toBe(true);
+	});
+
+	it("resolves concurrent function-backed plans independently", async () => {
+		let calls = 0;
+		const plans = async () => {
+			calls += 1;
+			return [
+				{
+					name: "pro",
+					productId: "prod_pro",
+					priceInSmallestUnit: 9900,
+					billingInterval: "MONTH" as const,
+				},
+			];
+		};
+
+		await Promise.all([resolvePlans(plans), resolvePlans(plans)]);
+		expect(calls).toBe(2);
+	});
+
+	it("retries function-backed plans after a failed resolution", async () => {
+		let calls = 0;
+		const plans = async () => {
+			calls += 1;
+			if (calls === 1) throw new Error("database unavailable");
+			return [
+				{
+					name: "pro",
+					productId: "prod_pro",
+					priceInSmallestUnit: 9900,
+					billingInterval: "MONTH" as const,
+				},
+			];
+		};
+
+		await expect(resolvePlans(plans)).rejects.toThrow("database unavailable");
+		expect((await resolvePlans(plans)).byName.has("pro")).toBe(true);
+		expect(calls).toBe(2);
+	});
+
+	it("resolves array-backed plans without caching the index", async () => {
+		const plans = [
+			{
+				name: "pro",
+				productId: "prod_pro",
+				priceInSmallestUnit: 9900,
+				billingInterval: "MONTH" as const,
+			},
+		];
+
+		expect(await resolvePlans(plans)).not.toBe(await resolvePlans(plans));
+	});
+});
 
 describe("validatePlansShape", () => {
 	const baseline = {
