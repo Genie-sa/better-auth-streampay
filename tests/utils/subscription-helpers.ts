@@ -24,7 +24,12 @@ export function createMockAdapter(): PluginAdapter & {
 		where: Array<{ field: string; value: unknown }>,
 	): boolean {
 		for (const clause of where) {
-			if (row[clause.field] !== clause.value) return false;
+			const actual = row[clause.field];
+			if (clause.value === null) {
+				if (actual !== null && actual !== undefined) return false;
+				continue;
+			}
+			if (actual !== clause.value) return false;
 		}
 		return true;
 	}

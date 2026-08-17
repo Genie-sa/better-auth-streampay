@@ -18,11 +18,19 @@ vi.mock("better-auth/api", () => ({
 	APIError: MockAPIError,
 	sessionMiddleware: vi.fn(),
 	getSessionFromCtx: mockedGetSessionFromCtx,
-	createAuthEndpoint: vi.fn((path: string, config: unknown, handler: unknown) => ({
-		path,
-		config,
-		handler,
-	})),
+	createAuthEndpoint: Object.assign(
+		vi.fn((path: string, config: unknown, handler: unknown) => ({
+			path,
+			config,
+			handler,
+		})),
+		{
+			serverOnly: vi.fn((config: unknown, handler: unknown) => ({
+				config,
+				handler,
+			})),
+		},
+	),
 }));
 
 import { checkout } from "../src/plugins/checkout";
@@ -35,6 +43,7 @@ import {
 	createMockUser,
 	type MockedStreamPayClient,
 } from "./utils/mocks";
+import { createMockAdapter } from "./utils/subscription-helpers";
 
 const PRODUCT_ID = "11111111-1111-4111-8111-111111111111";
 const SECOND_PRODUCT_ID = "22222222-2222-4222-8222-222222222222";
@@ -468,5 +477,199 @@ describe("checkout plugin", () => {
 			const ctx = createMockContext({ body: { products: PRODUCT_ID } });
 			await expect(handler(ctx)).rejects.toThrow(/Anonymous/);
 		});
+	});
+});
+
+describe("checkoutForReference (server-only)", () => {
+	let mockClient: MockedStreamPayClient;
+
+	function buildPlugin(streamPayOverrides: Record<string, unknown> = {}) {
+		return checkout({ products: [{ productId: PRODUCT_ID, slug: "pro" }] })(
+			createTestStreamPayOptions({ client: mockClient, ...streamPayOverrides }),
+		);
+	}
+
+	function serverCtx(body: Record<string, unknown>, adapter: ReturnType<typeof createMockAdapter>) {
+		const ctx = createMockContext({ body });
+		ctx.context.adapter = adapter as unknown as typeof ctx.context.adapter;
+		(ctx.context as { session?: unknown }).session = undefined;
+		return ctx;
+	}
+
+	beforeEach(() => {
+		mockClient = createMockStreamPayClient();
+		vi.clearAllMocks();
+		mockClient.getPaymentUrl.mockImplementation((link) => link.url ?? null);
+		mockClient.createPaymentLink.mockResolvedValue(createMockPaymentLink());
+	});
+
+	it("has no HTTP route", () => {
+		const endpoint = buildPlugin().endpoints.checkoutForReference as { path?: string };
+		expect(endpoint.path).toBeUndefined();
+	});
+
+	it("bills the referenced user's consumer without a session and tags attribution", async () => {
+		const handler = unwrapHandler<CheckoutResult>(buildPlugin().endpoints.checkoutForReference);
+		const adapter = createMockAdapter();
+		adapter.tables.user = [
+			{ id: "user-other", email: "other@example.com", streampayConsumerId: "cons_other" },
+		];
+
+		await handler(
+			serverCtx({ slug: "pro", referenceId: "user-other", referenceType: "user" }, adapter),
+		);
+
+		expect(mockClient.createPaymentLink).toHaveBeenCalledWith(
+			expect.objectContaining({
+				organization_consumer_id: "cons_other",
+				custom_metadata: expect.objectContaining({
+					referenceId: "user-other",
+					referenceType: "user",
+				}),
+			}),
+		);
+	});
+
+	it("bills an organization's consumer when org billing is enabled", async () => {
+		const handler = unwrapHandler<CheckoutResult>(
+			buildPlugin({ organization: { enabled: true } }).endpoints.checkoutForReference,
+		);
+		const adapter = createMockAdapter();
+		adapter.tables.organization = [
+			{ id: "org-1", name: "Acme Inc", streampayConsumerId: "cons_org" },
+		];
+
+		await handler(
+			serverCtx({ slug: "pro", referenceId: "org-1", referenceType: "organization" }, adapter),
+		);
+
+		expect(mockClient.createPaymentLink).toHaveBeenCalledWith(
+			expect.objectContaining({ organization_consumer_id: "cons_org" }),
+		);
+	});
+
+	it("rejects organization references when org billing is not enabled", async () => {
+		const handler = unwrapHandler<CheckoutResult>(buildPlugin().endpoints.checkoutForReference);
+
+		await expect(
+			handler(
+				serverCtx(
+					{ slug: "pro", referenceId: "org-1", referenceType: "organization" },
+					createMockAdapter(),
+				),
+			),
+		).rejects.toMatchObject({ data: { code: "SUBSCRIPTION_ORG_BILLING_NOT_ENABLED" } });
+		expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
+	});
+
+	it("rejects a referenced user that does not exist", async () => {
+		const handler = unwrapHandler<CheckoutResult>(buildPlugin().endpoints.checkoutForReference);
+
+		await expect(
+			handler(
+				serverCtx(
+					{ slug: "pro", referenceId: "user-ghost", referenceType: "user" },
+					createMockAdapter(),
+				),
+			),
+		).rejects.toMatchObject({ data: { code: "SUBSCRIPTION_REFERENCE_USER_NOT_FOUND" } });
+		expect(mockClient.createPaymentLink).not.toHaveBeenCalled();
+	});
+
+	it("creates a single-payment link by default", async () => {
+		const handler = unwrapHandler<CheckoutResult>(buildPlugin().endpoints.checkoutForReference);
+		const adapter = createMockAdapter();
+		adapter.tables.user = [
+			{ id: "user-other", email: "other@example.com", streampayConsumerId: "cons_other" },
+		];
+
+		await handler(
+			serverCtx({ slug: "pro", referenceId: "user-other", referenceType: "user" }, adapter),
+		);
+
+		expect(mockClient.createPaymentLink).toHaveBeenCalledWith(
+			expect.objectContaining({ max_number_of_payments: 1 }),
+		);
+	});
+
+	it("keeps an explicit max payments override", async () => {
+		const handler = unwrapHandler<CheckoutResult>(buildPlugin().endpoints.checkoutForReference);
+		const adapter = createMockAdapter();
+		adapter.tables.user = [
+			{ id: "user-other", email: "other@example.com", streampayConsumerId: "cons_other" },
+		];
+
+		await handler(
+			serverCtx(
+				{
+					slug: "pro",
+					referenceId: "user-other",
+					referenceType: "user",
+					maxNumberOfPayments: 5,
+				},
+				adapter,
+			),
+		);
+
+		expect(mockClient.createPaymentLink).toHaveBeenCalledWith(
+			expect.objectContaining({ max_number_of_payments: 5 }),
+		);
+	});
+
+	it("hands the resolved user and referenceType to onCheckoutCreated for user targets", async () => {
+		const onCheckoutCreated = vi.fn();
+		const plugin = checkout({
+			products: [{ productId: PRODUCT_ID, slug: "pro" }],
+			onCheckoutCreated,
+		})(createTestStreamPayOptions({ client: mockClient }));
+		const handler = unwrapHandler<CheckoutResult>(plugin.endpoints.checkoutForReference);
+		const adapter = createMockAdapter();
+		adapter.tables.user = [
+			{ id: "user-other", email: "other@example.com", streampayConsumerId: "cons_other" },
+		];
+
+		await handler(
+			serverCtx({ slug: "pro", referenceId: "user-other", referenceType: "user" }, adapter),
+		);
+
+		expect(onCheckoutCreated).toHaveBeenCalledWith(
+			expect.objectContaining({
+				user: expect.objectContaining({ id: "user-other" }),
+				referenceId: "user-other",
+				referenceType: "user",
+			}),
+			expect.anything(),
+		);
+	});
+
+	it("hands a null user and referenceType to onCheckoutCreated for organization targets", async () => {
+		const onCheckoutCreated = vi.fn();
+		const plugin = checkout({
+			products: [{ productId: PRODUCT_ID, slug: "pro" }],
+			onCheckoutCreated,
+		})(
+			createTestStreamPayOptions({
+				client: mockClient,
+				organization: { enabled: true },
+			}),
+		);
+		const handler = unwrapHandler<CheckoutResult>(plugin.endpoints.checkoutForReference);
+		const adapter = createMockAdapter();
+		adapter.tables.organization = [
+			{ id: "org-1", name: "Acme Inc", streampayConsumerId: "cons_org" },
+		];
+
+		await handler(
+			serverCtx({ slug: "pro", referenceId: "org-1", referenceType: "organization" }, adapter),
+		);
+
+		expect(onCheckoutCreated).toHaveBeenCalledWith(
+			expect.objectContaining({
+				user: null,
+				referenceId: "org-1",
+				referenceType: "organization",
+			}),
+			expect.anything(),
+		);
 	});
 });

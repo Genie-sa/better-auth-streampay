@@ -31,7 +31,7 @@ import type {
 	SubscriptionUpdate,
 	UpdatePaymentLinkStatusDto,
 } from "@streamsdk/typescript";
-import type { UnionToIntersection, User } from "better-auth";
+import type { GenericEndpointContext, UnionToIntersection, User } from "better-auth";
 import type { admin } from "./plugins/admin";
 import type { checkout } from "./plugins/checkout";
 import type { portal } from "./plugins/portal";
@@ -160,14 +160,64 @@ export type StreamPayPlugin =
 
 export type StreamPayPlugins = readonly StreamPayPlugin[];
 
-export type StreamPayEndpoints = UnionToIntersection<ReturnType<StreamPayPlugin>["endpoints"]>;
+/**
+ * Endpoints contributed by the configured sub-plugins only. `auth.api` must
+ * not advertise methods that are `undefined` at runtime, so the surface is
+ * derived from the `use` tuple rather than from every possible sub-plugin.
+ */
+export type StreamPayEndpoints<U extends StreamPayPlugins = StreamPayPlugins> = [
+	U[number],
+] extends [never]
+	? Record<never, never>
+	: UnionToIntersection<ReturnType<U[number]>["endpoints"]>;
 
 export type ConsumerCreateOverrides = Partial<
 	Omit<ConsumerCreate, "name" | "email" | "external_id">
 >;
 
+/**
+ * Overrides for organization consumers. Unlike user consumers, organizations
+ * have no plugin-owned email, so a billing email may be supplied here; `name`
+ * and `external_id` stay plugin-owned.
+ */
+export type OrganizationConsumerOverrides = Partial<Omit<ConsumerCreate, "name" | "external_id">>;
+
 export type ClaimExistingConsumerIdentifier = "email" | "phone";
 export type ClaimExistingConsumerBy = readonly ClaimExistingConsumerIdentifier[];
+
+/** Raw organization row as stored by the Better Auth organization plugin. */
+export interface BillingOrganization {
+	id: string;
+	name: string;
+	streampayConsumerId?: string | null;
+	[field: string]: unknown;
+}
+
+export interface OrganizationBillingOptions {
+	/**
+	 * Whether new organization billing (checkouts, consumer provisioning) is
+	 * allowed. Setting this to `false` keeps the organization consumer field
+	 * registered and existing organization-owned consumers protected from user
+	 * claims — the safe rollback mode. Only remove the whole `organization`
+	 * option after clearing every `organization.streampayConsumerId` link.
+	 */
+	enabled: boolean;
+
+	/**
+	 * Physical table name of the organization model. Set this to the same value
+	 * as the Better Auth organization plugin's `schema.organization.modelName`
+	 * when that plugin uses a custom table name — plugin schema contributions
+	 * each restate the model name, so omitting it here would reset a custom
+	 * name back to `organization`.
+	 */
+	modelName?: string;
+
+	/** Contact and tax fields for org consumers; `name` and `external_id` are plugin-owned. */
+	getBillingDetails?: (
+		data: { organization: BillingOrganization },
+		ctx: GenericEndpointContext,
+	) => Promise<OrganizationConsumerOverrides> | OrganizationConsumerOverrides;
+}
 
 export interface StreamPayOptions {
 	client: StreamPayClient;
@@ -180,6 +230,9 @@ export interface StreamPayOptions {
 		data: { user: Partial<User> },
 		request?: Request,
 	) => Promise<ConsumerCreateOverrides> | ConsumerCreateOverrides;
+
+	/** Enables billing organization references to the org's own StreamPay consumer. */
+	organization?: OrganizationBillingOptions;
 
 	use: StreamPayPlugins;
 }

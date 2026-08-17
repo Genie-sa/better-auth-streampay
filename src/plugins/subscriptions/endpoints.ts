@@ -5,15 +5,22 @@ import type {
 	SubscriptionDetailed,
 	SubscriptionUpdate,
 } from "@streamsdk/typescript";
+import type { GenericEndpointContext } from "better-auth";
 import { APIError, createAuthEndpoint, sessionMiddleware } from "better-auth/api";
 import { z } from "zod";
 import { $ERROR_CODES } from "../../error-codes";
 import type { StreamPayOptions } from "../../types";
-import { ensureConsumerForUser } from "../../utils/ensure-consumer";
+import {
+	type BillingAccountResolution,
+	ensureConsumerForBillingAccount,
+	resolveReferenceBillingAccount,
+} from "../../utils/billing-account";
 import { toAPIError } from "../../utils/errors";
 import { getLogger } from "../../utils/logger";
+import type { StreamPaySessionUser } from "../../utils/session";
 import {
 	authorizeReference,
+	defaultReferenceType,
 	getAdapter,
 	requireConfirmedOwnedSubscription,
 	requireUser,
@@ -60,6 +67,11 @@ const UpgradeBody = z
 		failureUrl: z.string().url().optional(),
 	})
 	.strict();
+
+const UpgradeReferenceBody = UpgradeBody.extend({
+	referenceId: z.string().min(1),
+	referenceType: z.enum(["user", "organization"]).default("user"),
+});
 
 const SuccessQuery = z.object({
 	subscriptionId: z.string().min(1),
@@ -205,6 +217,255 @@ export function buildSubscriptionEndpoints(
 			},
 		);
 
+	interface UpgradeParams {
+		actor: StreamPaySessionUser | null;
+		referenceId: string;
+		referenceType: SubscriptionReferenceType;
+		planName: string;
+		seats?: number | undefined;
+		successUrl?: string | undefined;
+		failureUrl?: string | undefined;
+		/** Whose StreamPay consumer the checkout is billed to. */
+		billing: BillingAccountResolution;
+	}
+
+	const performUpgrade = async (ctx: GenericEndpointContext, params: UpgradeParams) => {
+		const { referenceId, referenceType, billing } = params;
+		const plans = await plansRef();
+		const plan = plans.byName.get(params.planName);
+		if (!plan) {
+			throw new APIError("NOT_FOUND", {
+				code: $ERROR_CODES.SUBSCRIPTION_PLAN_NOT_FOUND.code,
+				message: `Plan "${params.planName}" is not configured.`,
+			});
+		}
+		const seats = resolveSeatCount(plan, params.seats);
+		const quotedTotal = quotedSeatTotal(plan, seats);
+
+		const adapter = getAdapter(ctx);
+		const existingActive = await adapter.findMany<Subscription>({
+			model: SUBSCRIPTION_MODEL,
+			where: [
+				{ field: "referenceId", value: referenceId },
+				{ field: "referenceType", value: referenceType },
+				{ field: "group", value: plan.group ?? null },
+			],
+		});
+		const defaultTrialEligible = !existingActive.some(
+			(row) =>
+				row.trialStart instanceof Date ||
+				row.trialEnd instanceof Date ||
+				row.status === "trial_pending" ||
+				row.status === "trialing",
+		);
+		const trialUser = params.actor ?? (billing.referenceType === "user" ? billing.user : null);
+		const trialEligible =
+			plan.trialPeriodDays === undefined
+				? false
+				: subsOptions.isTrialEligible
+					? trialUser
+						? await subsOptions.isTrialEligible(
+								{
+									user: trialUser,
+									referenceId,
+									referenceType,
+									plan,
+									previousSubscriptions: existingActive,
+									defaultEligible: defaultTrialEligible,
+								},
+								ctx,
+							)
+						: // The app has a trial policy but there is no user to ask it about
+							// (server-initiated organization billing): grant no trial.
+							false
+					: defaultTrialEligible;
+		const liveActive = existingActive.find((row) => isManageableSubscriptionStatus(row.status));
+		if (liveActive) {
+			throw new APIError("CONFLICT", {
+				code: $ERROR_CODES.SUBSCRIPTION_ALREADY_ACTIVE.code,
+				message: plan.group
+					? `An active subscription already exists in plan group "${plan.group}". Use the change-plan endpoint to move it.`
+					: "An active subscription already exists. Use the change-plan endpoint to move it.",
+			});
+		}
+
+		const activeSlotKey = subscriptionSlotKey(referenceType, referenceId, plan.group);
+		const { consumerId } = await ensureConsumerForBillingAccount(options, ctx, billing);
+		const reservation = await resumeOrReserveCheckoutSlot({
+			client,
+			adapter,
+			candidates: existingActive,
+			activeSlotKey,
+			planName: plan.name,
+			seats,
+			consumerId,
+			now: Date.now(),
+			log: getLogger(ctx),
+			createReservation: async () => {
+				return {
+					referenceId,
+					referenceType,
+					activeSlotKey,
+					streampaySubscriptionId: null,
+					plan: plan.name,
+					planVersion: plan.version ?? null,
+					productId: plan.productId,
+					group: plan.group ?? null,
+					seats,
+					streampayConsumerId: consumerId,
+					streampayPaymentLinkId: null,
+					status: "incomplete",
+					providerStatus: null,
+					billingStatus: "current",
+					amountInSmallestUnit: quotedTotal,
+					originalAmountInSmallestUnit: quotedTotal,
+					currency: plan.currency ?? "SAR",
+					billingInterval: plan.billingInterval,
+					billingIntervalCount: plan.billingIntervalCount ?? 1,
+					periodStart: null,
+					periodEnd: null,
+					currentCycleNumber: null,
+					trialStart: null,
+					trialEnd: null,
+					cancelAtPeriodEnd: false,
+					cancelAt: null,
+					cancelScheduledAt: null,
+					canceledAt: null,
+					pendingPlan: null,
+					pendingProductId: null,
+					pendingPlanEffectiveAt: null,
+					pendingSeats: null,
+					pendingSeatsEffectiveAt: null,
+					endedAt: null,
+					frozenAt: null,
+					freezeEndAt: null,
+					providerUpdatedAt: null,
+					syncedAt: null,
+					createdAt: new Date(),
+					updatedAt: new Date(),
+				} satisfies Omit<Subscription, "id">;
+			},
+		});
+		if (reservation.kind === "recovered") {
+			return {
+				subscriptionId: reservation.row.id,
+				url: reservation.url,
+				redirect: true,
+				reused: true,
+				status: reservation.row.status,
+				plan: reservation.row.plan,
+				seats: reservation.row.seats ?? 1,
+			};
+		}
+		const { row } = reservation;
+
+		const linkInput: CreatePaymentLinkDto = {
+			name: `Subscription — ${plan.name}`,
+			currency: plan.currency ?? "SAR",
+			items: [buildSeatCheckoutItem(plan, seats)],
+			max_number_of_payments: 1,
+			organization_consumer_id: consumerId,
+			custom_metadata: {
+				[PLAN_NAME_METADATA_KEY]: plan.name,
+				[REFERENCE_ID_METADATA_KEY]: referenceId,
+				[REFERENCE_TYPE_METADATA_KEY]: referenceType,
+				[SUBSCRIPTION_ROW_ID_METADATA_KEY]: row.id,
+			},
+		};
+		if (params.successUrl) linkInput.success_redirect_url = params.successUrl;
+		if (params.failureUrl) linkInput.failure_redirect_url = params.failureUrl;
+		if (plan.trialPeriodDays !== undefined && trialEligible) {
+			linkInput.trial_period_days = plan.trialPeriodDays;
+		}
+
+		let url: string | null;
+		let paymentLinkId: string;
+		try {
+			const link = await client.createPaymentLink(linkInput);
+			if (!link?.id) {
+				throw new APIError("INTERNAL_SERVER_ERROR", {
+					message: "StreamPay returned a payment link without an id.",
+				});
+			}
+			paymentLinkId = link.id;
+			url = client.getPaymentUrl(link);
+		} catch (err) {
+			await deleteReservedSubscription(
+				adapter,
+				row.id,
+				getLogger(ctx),
+				"createPaymentLink cleanup",
+			);
+			toAPIError(
+				{
+					logPrefix: `upgradeSubscription failed for plan=${plan.name} ref=${referenceId}:`,
+					userMessage: "Failed to start subscription checkout.",
+				},
+				err,
+				getLogger(ctx),
+			);
+		}
+
+		if (!url) {
+			getLogger(ctx).error(`createPaymentLink returned link=${paymentLinkId} with no url.`);
+			try {
+				await adapter.update({
+					model: SUBSCRIPTION_MODEL,
+					update: {
+						streampayPaymentLinkId: paymentLinkId,
+						status: "incomplete_expired",
+						activeSlotKey: null,
+						updatedAt: new Date(),
+					},
+					where: [{ field: "id", value: row.id }],
+				});
+			} catch (persistenceError) {
+				const message =
+					persistenceError instanceof Error ? persistenceError.message : String(persistenceError);
+				getLogger(ctx).error(
+					`failed to mark unusable payment link=${paymentLinkId} expired for row=${row.id}: ${message}`,
+				);
+				await deleteReservedSubscription(
+					adapter,
+					row.id,
+					getLogger(ctx),
+					"unusable payment link cleanup",
+				);
+			}
+			throw new APIError("INTERNAL_SERVER_ERROR", {
+				message: "Payment link was created but no URL was returned.",
+			});
+		}
+
+		let updatedRow: Subscription | null = null;
+		try {
+			updatedRow = await adapter.update<Subscription>({
+				model: SUBSCRIPTION_MODEL,
+				update: {
+					streampayPaymentLinkId: paymentLinkId,
+					updatedAt: new Date(),
+				},
+				where: [{ field: "id", value: row.id }],
+			});
+		} catch (persistenceError) {
+			const message =
+				persistenceError instanceof Error ? persistenceError.message : String(persistenceError);
+			getLogger(ctx).error(
+				`failed to persist payment link=${paymentLinkId} for row=${row.id}: ${message}. Protected checkout metadata will reconcile the row from the webhook.`,
+			);
+		}
+
+		return {
+			subscriptionId: updatedRow?.id ?? row.id,
+			url,
+			redirect: true,
+			reused: false,
+			status: "incomplete" as const,
+			plan: plan.name,
+			seats,
+		};
+	};
+
 	return {
 		...buildSubscriptionReadEndpoints(subsOptions, plansRef),
 		upgradeSubscription: createAuthEndpoint(
@@ -218,245 +479,54 @@ export function buildSubscriptionEndpoints(
 				const user = requireUser(ctx);
 				const referenceId = ctx.body.referenceId ?? user.id;
 				const referenceType: SubscriptionReferenceType =
-					ctx.body.referenceType ?? (referenceId === user.id ? "user" : "custom");
+					ctx.body.referenceType ?? defaultReferenceType(user, referenceId);
 				await authorizeReference(ctx, user, referenceId, referenceType, "upgrade", subsOptions);
 
-				const plans = await plansRef();
-				const plan = plans.byName.get(ctx.body.plan);
-				if (!plan) {
-					throw new APIError("NOT_FOUND", {
-						code: $ERROR_CODES.SUBSCRIPTION_PLAN_NOT_FOUND.code,
-						message: `Plan "${ctx.body.plan}" is not configured.`,
-					});
-				}
-				const seats = resolveSeatCount(plan, ctx.body.seats);
-				const quotedTotal = quotedSeatTotal(plan, seats);
-
-				const adapter = getAdapter(ctx);
-				const existingActive = await adapter.findMany<Subscription>({
-					model: SUBSCRIPTION_MODEL,
-					where: [
-						{ field: "referenceId", value: referenceId },
-						{ field: "referenceType", value: referenceType },
-						{ field: "group", value: plan.group ?? null },
-					],
-				});
-				const defaultTrialEligible = !existingActive.some(
-					(row) =>
-						row.trialStart instanceof Date ||
-						row.trialEnd instanceof Date ||
-						row.status === "trial_pending" ||
-						row.status === "trialing",
+				return ctx.json(
+					await performUpgrade(ctx, {
+						actor: user,
+						referenceId,
+						referenceType,
+						planName: ctx.body.plan,
+						seats: ctx.body.seats,
+						successUrl: ctx.body.successUrl,
+						failureUrl: ctx.body.failureUrl,
+						billing: { referenceType: "user", user },
+					}),
 				);
-				const trialEligible =
-					plan.trialPeriodDays === undefined
-						? false
-						: subsOptions.isTrialEligible
-							? await subsOptions.isTrialEligible(
-									{
-										user,
-										referenceId,
-										referenceType,
-										plan,
-										previousSubscriptions: existingActive,
-										defaultEligible: defaultTrialEligible,
-									},
-									ctx,
-								)
-							: defaultTrialEligible;
-				const liveActive = existingActive.find((row) => isManageableSubscriptionStatus(row.status));
-				if (liveActive) {
-					throw new APIError("CONFLICT", {
-						code: $ERROR_CODES.SUBSCRIPTION_ALREADY_ACTIVE.code,
-						message: plan.group
-							? `An active subscription already exists in plan group "${plan.group}". Use the change-plan endpoint to move it.`
-							: "An active subscription already exists. Use the change-plan endpoint to move it.",
-					});
-				}
+			},
+		),
 
-				const activeSlotKey = subscriptionSlotKey(referenceType, referenceId, plan.group);
-				const reservation = await resumeOrReserveCheckoutSlot({
-					client,
-					adapter,
-					candidates: existingActive,
-					activeSlotKey,
-					planName: plan.name,
-					seats,
-					now: Date.now(),
-					log: getLogger(ctx),
-					createReservation: async () => {
-						const { consumerId } = await ensureConsumerForUser(
-							options,
-							{ context: ctx.context },
-							user,
-						);
-						return {
-							consumerId,
-							data: {
-								referenceId,
-								referenceType,
-								activeSlotKey,
-								streampaySubscriptionId: null,
-								plan: plan.name,
-								planVersion: plan.version ?? null,
-								productId: plan.productId,
-								group: plan.group ?? null,
-								seats,
-								streampayConsumerId: consumerId,
-								streampayPaymentLinkId: null,
-								status: "incomplete",
-								providerStatus: null,
-								billingStatus: "current",
-								amountInSmallestUnit: quotedTotal,
-								originalAmountInSmallestUnit: quotedTotal,
-								currency: plan.currency ?? "SAR",
-								billingInterval: plan.billingInterval,
-								billingIntervalCount: plan.billingIntervalCount ?? 1,
-								periodStart: null,
-								periodEnd: null,
-								currentCycleNumber: null,
-								trialStart: null,
-								trialEnd: null,
-								cancelAtPeriodEnd: false,
-								cancelAt: null,
-								cancelScheduledAt: null,
-								canceledAt: null,
-								pendingPlan: null,
-								pendingProductId: null,
-								pendingPlanEffectiveAt: null,
-								pendingSeats: null,
-								pendingSeatsEffectiveAt: null,
-								endedAt: null,
-								frozenAt: null,
-								freezeEndAt: null,
-								providerUpdatedAt: null,
-								syncedAt: null,
-								createdAt: new Date(),
-								updatedAt: new Date(),
-							} satisfies Omit<Subscription, "id">,
-						};
-					},
-				});
-				if (reservation.kind === "recovered") {
-					return ctx.json({
-						subscriptionId: reservation.row.id,
-						url: reservation.url,
-						redirect: true,
-						reused: true,
-						status: reservation.row.status,
-						plan: reservation.row.plan,
-						seats: reservation.row.seats ?? 1,
-					});
-				}
-				const { row, consumerId } = reservation;
-
-				const linkInput: CreatePaymentLinkDto = {
-					name: `Subscription — ${plan.name}`,
-					currency: plan.currency ?? "SAR",
-					items: [buildSeatCheckoutItem(plan, seats)],
-					max_number_of_payments: 1,
-					organization_consumer_id: consumerId,
-					custom_metadata: {
-						[PLAN_NAME_METADATA_KEY]: plan.name,
-						[REFERENCE_ID_METADATA_KEY]: referenceId,
-						[REFERENCE_TYPE_METADATA_KEY]: referenceType,
-						[SUBSCRIPTION_ROW_ID_METADATA_KEY]: row.id,
-					},
-				};
-				if (ctx.body.successUrl) linkInput.success_redirect_url = ctx.body.successUrl;
-				if (ctx.body.failureUrl) linkInput.failure_redirect_url = ctx.body.failureUrl;
-				if (plan.trialPeriodDays !== undefined && trialEligible) {
-					linkInput.trial_period_days = plan.trialPeriodDays;
-				}
-
-				let url: string | null;
-				let paymentLinkId: string;
-				try {
-					const link = await client.createPaymentLink(linkInput);
-					if (!link?.id) {
-						throw new APIError("INTERNAL_SERVER_ERROR", {
-							message: "StreamPay returned a payment link without an id.",
-						});
-					}
-					paymentLinkId = link.id;
-					url = client.getPaymentUrl(link);
-				} catch (err) {
-					await deleteReservedSubscription(
-						adapter,
-						row.id,
-						getLogger(ctx),
-						"createPaymentLink cleanup",
-					);
-					toAPIError(
-						{
-							logPrefix: `upgradeSubscription failed for plan=${plan.name} ref=${referenceId}:`,
-							userMessage: "Failed to start subscription checkout.",
-						},
-						err,
-						getLogger(ctx),
-					);
-				}
-
-				if (!url) {
-					getLogger(ctx).error(`createPaymentLink returned link=${paymentLinkId} with no url.`);
-					try {
-						await adapter.update({
-							model: SUBSCRIPTION_MODEL,
-							update: {
-								streampayPaymentLinkId: paymentLinkId,
-								status: "incomplete_expired",
-								activeSlotKey: null,
-								updatedAt: new Date(),
-							},
-							where: [{ field: "id", value: row.id }],
-						});
-					} catch (persistenceError) {
-						const message =
-							persistenceError instanceof Error
-								? persistenceError.message
-								: String(persistenceError);
-						getLogger(ctx).error(
-							`failed to mark unusable payment link=${paymentLinkId} expired for row=${row.id}: ${message}`,
-						);
-						await deleteReservedSubscription(
-							adapter,
-							row.id,
-							getLogger(ctx),
-							"unusable payment link cleanup",
-						);
-					}
-					throw new APIError("INTERNAL_SERVER_ERROR", {
-						message: "Payment link was created but no URL was returned.",
-					});
-				}
-
-				let updatedRow: Subscription | null = null;
-				try {
-					updatedRow = await adapter.update<Subscription>({
-						model: SUBSCRIPTION_MODEL,
-						update: {
-							streampayPaymentLinkId: paymentLinkId,
-							updatedAt: new Date(),
-						},
-						where: [{ field: "id", value: row.id }],
-					});
-				} catch (persistenceError) {
-					const message =
-						persistenceError instanceof Error ? persistenceError.message : String(persistenceError);
-					getLogger(ctx).error(
-						`failed to persist payment link=${paymentLinkId} for row=${row.id}: ${message}. Protected checkout metadata will reconcile the row from the webhook.`,
-					);
-				}
-
-				return ctx.json({
-					subscriptionId: updatedRow?.id ?? row.id,
-					url,
-					redirect: true,
-					reused: false,
-					status: "incomplete",
-					plan: plan.name,
-					seats,
-				});
+		/**
+		 * Server-only: registered on `auth.api` with no HTTP route. Runs no session
+		 * or reference authorization — the calling server code is the gate — and
+		 * bills the referenced user or organization itself.
+		 */
+		upgradeSubscriptionForReference: createAuthEndpoint.serverOnly(
+			{
+				method: "POST",
+				body: UpgradeReferenceBody,
+			},
+			async (ctx) => {
+				const { referenceId, referenceType } = ctx.body;
+				const billing = await resolveReferenceBillingAccount(
+					ctx,
+					options,
+					referenceId,
+					referenceType,
+				);
+				return ctx.json(
+					await performUpgrade(ctx, {
+						actor: null,
+						referenceId,
+						referenceType,
+						planName: ctx.body.plan,
+						seats: ctx.body.seats,
+						successUrl: ctx.body.successUrl,
+						failureUrl: ctx.body.failureUrl,
+						billing,
+					}),
+				);
 			},
 		),
 

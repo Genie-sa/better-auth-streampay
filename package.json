@@ -5,6 +5,7 @@
   "license": "MIT",
   "type": "module",
   "sideEffects": false,
+  "packageManager": "pnpm@10.13.1",
   "engines": {
     "node": ">=20.19.0"
   },
@@ -79,7 +80,7 @@
   },
   "peerDependencies": {
     "@streamsdk/typescript": "^1.1.3",
-    "better-auth": "^1.5.0",
+    "better-auth": "^1.6.17",
     "zod": "^3.24.0 || ^4.0.0"
   },
   "devDependencies": {
@@ -87,7 +88,7 @@
     "@changesets/cli": "^2.31.0",
     "@streamsdk/typescript": "^1.1.3",
     "@types/node": "^25.6.0",
-    "better-auth": "^1.6.23",
+    "better-auth": "^1.6.17",
     "lefthook": "^2.1.6",
     "msw": "^2.13.3",
     "pkg-pr-new": "^0.0.66",

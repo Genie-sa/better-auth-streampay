@@ -40,6 +40,8 @@ export interface EnsureConsumerContext extends StreamPayLoggerContext {
 	};
 }
 
+export const ORGANIZATION_EXTERNAL_ID_PREFIX = "ref:organization:";
+
 export function canClaimBy(
 	mode: ClaimExistingConsumerBy | undefined,
 	identifier: ClaimExistingConsumerIdentifier,
@@ -71,6 +73,15 @@ export async function resolveDuplicateConsumer(
 	if (!existing?.id) return null;
 
 	if (existing.external_id) {
+		if (existing.external_id.startsWith(ORGANIZATION_EXTERNAL_ID_PREFIX)) {
+			getLogger(context).error(
+				`duplicate: consumer ${existing.id} belongs to an organization (${existing.external_id}) and cannot be claimed by a user`,
+			);
+			throw new APIError("CONFLICT", {
+				code: "STREAMPAY_CONSUMER_LINK_CONFLICT",
+				message: "This StreamPay consumer is already linked to another account.",
+			});
+		}
 		if (createPayload.external_id && existing.external_id === createPayload.external_id) {
 			return existing.id;
 		}
@@ -113,7 +124,7 @@ export async function ensureConsumerForUser(
 		externalId: user.id,
 	});
 	if (recovered) {
-		await persistConsumerId(ctx, user.id, recovered);
+		await persistConsumerId(options, ctx, user.id, recovered);
 		return { consumerId: recovered, created: false };
 	}
 
@@ -145,7 +156,7 @@ export async function ensureConsumerForUser(
 				message: "StreamPay consumer was created but did not return an id.",
 			});
 		}
-		await persistConsumerId(ctx, user.id, consumer.id);
+		await persistConsumerId(options, ctx, user.id, consumer.id);
 		return { consumerId: consumer.id, created: true };
 	} catch (err: unknown) {
 		if (err instanceof APIError) throw err;
@@ -153,7 +164,7 @@ export async function ensureConsumerForUser(
 		if (isDuplicateConsumerError(err)) {
 			const reusedId = await resolveDuplicateConsumer(options, payload, ctx);
 			if (reusedId) {
-				await assertConsumerUnclaimed(ctx, reusedId, user.id);
+				await assertConsumerUnclaimed(options, ctx, reusedId, user.id);
 				try {
 					await options.client.updateConsumer(reusedId, { external_id: user.id });
 				} catch (backfillErr: unknown) {
@@ -165,7 +176,7 @@ export async function ensureConsumerForUser(
 						message: "StreamPay consumer linking failed. Please try again.",
 					});
 				}
-				await persistConsumerId(ctx, user.id, reusedId);
+				await persistConsumerId(options, ctx, user.id, reusedId);
 				return { consumerId: reusedId, created: false };
 			}
 		}
@@ -189,46 +200,60 @@ function consumerLinkUnavailable(): APIError {
 async function findConsumerOwner(
 	ctx: EnsureConsumerContext,
 	consumerId: string,
+	model: "user" | "organization",
 ): Promise<Record<string, unknown> | null> {
 	try {
 		return await ctx.context.adapter.findOne<Record<string, unknown>>({
-			model: "user",
+			model,
 			where: [{ field: "streampayConsumerId", value: consumerId }],
 		});
 	} catch (err: unknown) {
 		getLogger(ctx).error(
-			`consumer ownership check failed for consumer=${consumerId}: ${formatStreamPayError(err)}`,
+			`consumer ownership check failed for consumer=${consumerId} model=${model}: ${formatStreamPayError(err)}`,
 		);
 		throw consumerLinkUnavailable();
 	}
 }
 
-async function assertConsumerUnclaimed(
-	ctx: EnsureConsumerContext,
-	consumerId: string,
-	userId: string,
-): Promise<void> {
-	const owner = await findConsumerOwner(ctx, consumerId);
-	if (!owner) return;
-
-	if (typeof owner.id !== "string") {
-		getLogger(ctx).error(`consumer ownership check returned a user without an id: ${consumerId}`);
-		throw consumerLinkUnavailable();
-	}
-	if (owner.id === userId) return;
-
-	throw new APIError("CONFLICT", {
+function consumerClaimConflict(): APIError {
+	return new APIError("CONFLICT", {
 		code: "STREAMPAY_CONSUMER_LINK_CONFLICT",
 		message: "This StreamPay consumer is already linked to another account.",
 	});
 }
 
+export async function assertConsumerUnclaimed(
+	options: StreamPayOptions,
+	ctx: EnsureConsumerContext,
+	consumerId: string,
+	userId: string,
+): Promise<void> {
+	const owner = await findConsumerOwner(ctx, consumerId, "user");
+	if (owner) {
+		if (typeof owner.id !== "string") {
+			getLogger(ctx).error(`consumer ownership check returned a user without an id: ${consumerId}`);
+			throw consumerLinkUnavailable();
+		}
+		if (owner.id !== userId) throw consumerClaimConflict();
+	}
+
+	// The organization consumer field only exists in the runtime schema while
+	// the `organization` option is configured (any `enabled` value). Without it
+	// the query is guaranteed to fail, and this plugin never wrote such a link;
+	// rollback therefore means `enabled: false`, not deleting the option.
+	if (options.organization) {
+		const organizationOwner = await findConsumerOwner(ctx, consumerId, "organization");
+		if (organizationOwner) throw consumerClaimConflict();
+	}
+}
+
 async function persistConsumerId(
+	options: StreamPayOptions,
 	ctx: EnsureConsumerContext,
 	userId: string,
 	consumerId: string,
 ): Promise<void> {
-	await assertConsumerUnclaimed(ctx, consumerId, userId);
+	await assertConsumerUnclaimed(options, ctx, consumerId, userId);
 	try {
 		await ctx.context.internalAdapter.updateUser(userId, {
 			streampayConsumerId: consumerId,
@@ -237,7 +262,7 @@ async function persistConsumerId(
 		getLogger(ctx).error(
 			`consumer link write failed for user=${userId}: ${formatStreamPayError(err)}`,
 		);
-		await assertConsumerUnclaimed(ctx, consumerId, userId);
+		await assertConsumerUnclaimed(options, ctx, consumerId, userId);
 		throw consumerLinkUnavailable();
 	}
 }

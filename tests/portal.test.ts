@@ -17,11 +17,19 @@ const { MockAPIError } = vi.hoisted(() => {
 vi.mock("better-auth/api", () => ({
 	APIError: MockAPIError,
 	sessionMiddleware: vi.fn(),
-	createAuthEndpoint: vi.fn((path: string, config: unknown, handler: unknown) => ({
-		path,
-		config,
-		handler,
-	})),
+	createAuthEndpoint: Object.assign(
+		vi.fn((path: string, config: unknown, handler: unknown) => ({
+			path,
+			config,
+			handler,
+		})),
+		{
+			serverOnly: vi.fn((config: unknown, handler: unknown) => ({
+				config,
+				handler,
+			})),
+		},
+	),
 }));
 
 import { portal } from "../src/plugins/portal";

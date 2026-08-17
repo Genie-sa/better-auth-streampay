@@ -27,6 +27,13 @@ export function requireUser(ctx: GenericEndpointContext): StreamPaySessionUser {
 	return user;
 }
 
+export function defaultReferenceType(
+	user: StreamPaySessionUser,
+	referenceId: string,
+): SubscriptionReferenceType {
+	return referenceId === user.id ? "user" : "custom";
+}
+
 export function resolveReference(
 	user: StreamPaySessionUser,
 	query:
@@ -40,7 +47,7 @@ export function resolveReference(
 	const referenceId = query?.referenceId ?? user.id;
 	return {
 		referenceId,
-		referenceType: query?.referenceType ?? (referenceId === user.id ? "user" : "custom"),
+		referenceType: query?.referenceType ?? defaultReferenceType(user, referenceId),
 	};
 }
 

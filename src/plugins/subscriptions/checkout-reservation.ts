@@ -52,22 +52,22 @@ export async function resumeOrReserveCheckoutSlot(args: {
 	client: StreamPayOptions["client"];
 	adapter: PluginAdapter;
 	candidates: readonly Subscription[];
-	createReservation: () => Promise<{
-		data: Omit<Subscription, "id">;
-		consumerId: string;
-	}>;
+	createReservation: () => Promise<Omit<Subscription, "id">>;
 	activeSlotKey: string;
 	planName: string;
 	seats: number;
+	/** A pending checkout is only resumable when it bills this same consumer. */
+	consumerId: string;
 	now: number;
 	log: { error: (message: string) => void; warn: (message: string) => void };
 }): Promise<
 	| { kind: "recovered"; row: Subscription; url: string }
 	| { kind: "reserved"; row: Subscription; consumerId: string }
 > {
-	const { client, adapter, candidates, activeSlotKey, planName, seats, now, log } = args;
+	const { client, adapter, candidates, activeSlotKey, planName, seats, consumerId, now, log } =
+		args;
 	const matchesCheckout = (row: Subscription) =>
-		row.plan === planName && (row.seats ?? 1) === seats;
+		row.plan === planName && (row.seats ?? 1) === seats && row.streampayConsumerId === consumerId;
 	const reuseCandidate = candidates.find(
 		(row) =>
 			matchesCheckout(row) &&
@@ -100,7 +100,7 @@ export async function resumeOrReserveCheckoutSlot(args: {
 		});
 	}
 
-	const { data: reservationData, consumerId } = await args.createReservation();
+	const reservationData = await args.createReservation();
 	let row: Subscription;
 	try {
 		row = await adapter.create<Subscription>({

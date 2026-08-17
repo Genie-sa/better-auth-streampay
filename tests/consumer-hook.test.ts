@@ -18,11 +18,19 @@ vi.mock("better-auth/api", () => ({
 	APIError: MockAPIError,
 	sessionMiddleware: vi.fn(),
 	getSessionFromCtx: vi.fn(),
-	createAuthEndpoint: vi.fn((path: string, config: unknown, handler: unknown) => ({
-		path,
-		config,
-		handler,
-	})),
+	createAuthEndpoint: Object.assign(
+		vi.fn((path: string, config: unknown, handler: unknown) => ({
+			path,
+			config,
+			handler,
+		})),
+		{
+			serverOnly: vi.fn((config: unknown, handler: unknown) => ({
+				config,
+				handler,
+			})),
+		},
+	),
 }));
 
 import {
@@ -206,6 +214,59 @@ describe("consumer hooks", () => {
 
 				expect(ctx.context.logger.error).toHaveBeenCalledWith(
 					expect.stringContaining("already linked to external_id"),
+				);
+			});
+
+			it("REFUSES to adopt an organization-owned consumer during signup, even with email claims", async () => {
+				const options = createEagerTestStreamPayOptions({
+					client: mockClient,
+					claimExistingConsumerBy: ["email"],
+				});
+				mockClient.createConsumer.mockRejectedValue(duplicateError);
+				mockClient.listConsumers.mockResolvedValue(
+					createMockConsumerList([
+						createMockConsumer({
+							id: "cons_org_owned",
+							email: "test@example.com",
+							external_id: "ref:organization:org-1",
+						}),
+					]),
+				);
+
+				const user = createMockUser();
+				const ctx = createMockContext({ user });
+
+				await expect(invokeHook(onBeforeUserCreate(options), user, ctx)).rejects.toBeInstanceOf(
+					MockAPIError,
+				);
+				expect(mockClient.updateConsumer).not.toHaveBeenCalled();
+			});
+
+			it("REFUSES a signup adoption when the recovered consumer is linked to a local organization", async () => {
+				const options = createEagerTestStreamPayOptions({
+					client: mockClient,
+					claimExistingConsumerBy: ["email"],
+					organization: { enabled: false },
+				});
+				mockClient.createConsumer.mockRejectedValue(duplicateError);
+				mockClient.listConsumers.mockResolvedValue(
+					createMockConsumerList([
+						createMockConsumer({
+							id: "cons_stranded_org",
+							email: "test@example.com",
+							external_id: null,
+						}),
+					]),
+				);
+
+				const user = createMockUser();
+				const ctx = createMockContext({ user });
+				vi.mocked(ctx.context.adapter.findOne).mockImplementation(async (input) =>
+					(input as { model: string }).model === "organization" ? { id: "org-1" } : null,
+				);
+
+				await expect(invokeHook(onBeforeUserCreate(options), user, ctx)).rejects.toBeInstanceOf(
+					MockAPIError,
 				);
 			});
 
