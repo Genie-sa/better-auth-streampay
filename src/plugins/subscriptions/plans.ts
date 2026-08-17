@@ -135,14 +135,10 @@ function buildIndex(list: readonly StreamPayPlanLike[]): ResolvedPlans {
 	return { list, byName };
 }
 
-export function createPlanResolver(plans: PlansInput | undefined): () => Promise<ResolvedPlans> {
-	return async function getPlans(): Promise<ResolvedPlans> {
-		if (!plans) throw new TypeError("subscriptions(): `plans` is required.");
-
-		const list = typeof plans === "function" ? await plans() : plans;
-		validatePlansShape(list);
-		return buildIndex(list);
-	};
+export async function resolvePlans(plans: PlansInput): Promise<ResolvedPlans> {
+	const list = typeof plans === "function" ? await plans() : plans;
+	validatePlansShape(list);
+	return buildIndex(list);
 }
 
 export type FeatureKey<P> = P extends { limits?: infer L }
