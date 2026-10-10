@@ -329,7 +329,7 @@ describe("production reliability boundaries", () => {
 		expect(streamPayClient.listInvoices).toHaveBeenCalledWith({
 			organization_consumer_id: "owned-consumer",
 			page: 2,
-			size: 10,
+			limit: 10,
 		});
 		expect(await response.json()).toMatchObject({ pagination: { current_page: 2, limit: 10 } });
 		expect(

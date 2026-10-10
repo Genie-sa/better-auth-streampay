@@ -112,6 +112,7 @@ and backfill the column explicitly. For PostgreSQL with the default table name:
 ALTER TABLE subscription ADD COLUMN IF NOT EXISTS "catalogMapped" boolean DEFAULT true;
 ALTER TABLE subscription ALTER COLUMN "catalogMapped" SET DEFAULT true;
 UPDATE subscription SET "catalogMapped" = true WHERE "catalogMapped" IS NULL;
+ALTER TABLE subscription ADD COLUMN IF NOT EXISTS "renewalCallbackEventId" text;
 ```
 
 Use your configured table name and your database's boolean syntax when they differ. The column
@@ -121,7 +122,7 @@ SQL adapter handles null comparisons incorrectly, breaking ungrouped reads and r
 
 Reconciliation sets it to `false` when Stream's current products do not match a configured plan;
 billing details remain visible, but features and limits deny access. Dynamic plan factories
-resolve on each resolution; concurrent resolutions share the same in-flight call.
+resolve on each resolution.
 
 `streampayConsumerId` is unique. Before applying the generated unique index to an existing
 database, resolve any duplicate non-null consumer IDs. Checkout fails closed when a consumer link
@@ -265,6 +266,8 @@ const nextInvoices = await authClient.consumer.invoices.list({ query: { page: 2,
 
 Invoice and subscription lists return Stream's `pagination` alongside `data`. The consumer filter
 always comes from the signed-in account. `page` must be a positive safe integer; `size` is 1–100.
+The plugin translates `size` to Stream's documented `limit` query parameter; SDK 1.1.3's
+`size` parameter is ignored by the current API.
 
 To open [Stream's hosted customer portal](https://docs.streampay.sa/customer-portal/), configure a
 server-side session creator. Stream SDK 1.1.3 does not expose this endpoint yet:
@@ -550,7 +553,9 @@ does not provide exactly-once execution of external side effects.
 
 Typed handlers include `onPaymentPartiallyRefunded` and `onSubscriptionCycleRenewedSuccessfully`.
 Successful renewal events reconcile billing state and share renewal inference with completed
-invoices, avoiding a second renewal callback for an already projected cycle.
+invoices. The cycle update records its callback owner in `renewalCallbackEventId`; an interrupted
+owner can resume on replay, and competing events cannot take its pending callback. Apply this
+nullable column before deploying. External callback side effects still need idempotency.
 
 The StreamPay SDK does not export webhook payload types. This package provides checked event
 types based on StreamPay's documented payloads.
@@ -677,11 +682,18 @@ separate PostgreSQL service. Use a test database, not the application's staging 
 | Generic callbacks run twice | SQLite integration overlaps deliveries; PostgreSQL gives one of eight contenders the claim. Admin replay works with either plugin order. |
 | Crash loses payload | Initial claim retains payload/signature; PostgreSQL recovers an expired lease and fences stale completion/failure writes. |
 | Inbox conflict loses tracking | A unique conflict with no visible row raises a retryable failure instead of running untracked callbacks. |
+| Exhausted generic callback stays pending | The fifth failed delivery is durably dead-lettered immediately; later delivery does not run the callback again. |
 | Invalid usage count grants access | Invalid numeric counts fail closed; live HTTP rejects negative, fractional, non-finite, and unsafe counts. |
 | Hosted portal opens another consumer | Caller IDs are ignored; sessions require authentication, HTTPS, and no-store. Real portal opened as the dedicated consumer. |
 | Portal hides later pages | Authenticated page 2 preserves ownership and returns provider pagination; invalid live page/size requests return 400. |
 | Dynamic catalog stays stale | The upstream 2.2.1 resolver fix is retained and tested. |
 | Renewal evidence invokes callbacks twice | PostgreSQL aligns invoice and subscription events at the same old cycle; a conditional update gives one callback winner. |
+| Crash skips a renewal callback | SQLite simulates a lost update response and an interrupted worker; replay uses the durable callback owner. |
+| Checkout activates the wrong reservation | Known payment-link and consumer mismatches cannot bind a pending checkout. |
+| Portal client sends the wrong HTTP method | The real Better Auth client sends POST for the documented no-argument session call. |
+| Consumer lookup misses an existing account | Exact identity searches follow pagination; later-page failures and repeated provider pages fail instead of creating a duplicate consumer. |
+| Checkout cleanup overwrites activation | Conditional expiry/deletion preserves a reservation activated while a provider request is in flight. |
+| Older response restores canceled access | A provider timestamp check and conditional projection prevent older activation writes from overwriting newer cancellation state. |
 | Missing refund/renewal handlers | Dispatcher regressions cover both events; real partial/full-refund events reached the inbox. |
 | Forged webhooks mutate billing | Missing, invalid, expired, or tampered signatures and malformed JSON were rejected through the public tunnel without adding inbox rows. |
 

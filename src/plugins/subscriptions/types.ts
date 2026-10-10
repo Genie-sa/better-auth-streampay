@@ -80,6 +80,8 @@ export interface Subscription {
 	periodStart: Date | null;
 	periodEnd: Date | null;
 	currentCycleNumber: number | null;
+	/** Event that owns a projected cycle's pending renewal callback. */
+	renewalCallbackEventId?: string | null;
 	trialStart: Date | null;
 	trialEnd: Date | null;
 	cancelAtPeriodEnd: boolean;

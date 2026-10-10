@@ -89,7 +89,7 @@ export const portal =
 							const response = await client.listSubscriptions({
 								organization_consumer_id: consumerId,
 								page: ctx.query?.page ?? 1,
-								size: ctx.query?.size ?? size,
+								limit: ctx.query?.size ?? size,
 							});
 							return ctx.json({
 								hasConsumer: true,
@@ -113,7 +113,7 @@ export const portal =
 							const response = await client.listInvoices({
 								organization_consumer_id: consumerId,
 								page: ctx.query?.page ?? 1,
-								size: ctx.query?.size ?? size,
+								limit: ctx.query?.size ?? size,
 							});
 							return ctx.json({
 								hasConsumer: true,

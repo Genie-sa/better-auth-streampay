@@ -38,11 +38,14 @@ import type { portal } from "./plugins/portal";
 import type { subscriptions } from "./plugins/subscriptions";
 import type { webhooks } from "./plugins/webhooks";
 
-export type StreamPayListConsumersParams = PaginationParams & {
+// SDK 1.1.3 exposes `size`, but the current REST API uses `limit`.
+type StreamPayPaginationParams = PaginationParams & { limit?: number };
+
+export type StreamPayListConsumersParams = StreamPayPaginationParams & {
 	search_term?: string | null;
 };
 
-export type StreamPayListSubscriptionsParams = PaginationParams & {
+export type StreamPayListSubscriptionsParams = StreamPayPaginationParams & {
 	organization_consumer_id?: string | null;
 	statuses?: string[];
 	latest_invoice_is_paid?: boolean;
@@ -61,7 +64,7 @@ export type StreamPayListSubscriptionsParams = PaginationParams & {
 	sort_direction?: string;
 };
 
-export type StreamPayListInvoicesParams = PaginationParams & {
+export type StreamPayListInvoicesParams = StreamPayPaginationParams & {
 	organization_consumer_id?: string | null;
 	subscription_id?: string | null;
 	include_payments?: boolean;

@@ -20,8 +20,8 @@ describe("findConsumerByExternalId (search_term-based)", () => {
 		const params = client.listConsumers.mock.calls[0]?.[0];
 		expect(params).toEqual(expect.objectContaining({ search_term: "user-42" }));
 
-		expect(typeof params?.size).toBe("number");
-		expect(params?.size).toBeLessThanOrEqual(100);
+		expect(typeof params?.limit).toBe("number");
+		expect(params?.limit).toBeLessThanOrEqual(100);
 	});
 
 	it("filters out fuzzy-matching consumers whose external_id is not an exact match", async () => {

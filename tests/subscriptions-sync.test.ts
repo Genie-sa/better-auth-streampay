@@ -431,6 +431,7 @@ describe("syncWebhookPayload", () => {
 				model: "subscription",
 				data: createMockSubscriptionRow({
 					id: "row_1",
+					streampayConsumerId: "cons_1",
 					referenceId: "user-123",
 					plan: "pro",
 					status: "incomplete",
@@ -482,6 +483,7 @@ describe("syncWebhookPayload", () => {
 				model: "subscription",
 				data: createMockSubscriptionRow({
 					id: "row_exact_checkout",
+					streampayConsumerId: "cons_1",
 					referenceId: "user-123",
 					plan: "pro",
 					status: "incomplete",
@@ -494,6 +496,7 @@ describe("syncWebhookPayload", () => {
 				model: "subscription",
 				data: createMockSubscriptionRow({
 					id: "row_newer_other_checkout",
+					streampayConsumerId: "cons_1",
 					referenceId: "user-123",
 					plan: "pro",
 					status: "incomplete",

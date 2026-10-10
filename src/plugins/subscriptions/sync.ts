@@ -369,6 +369,7 @@ async function findIncompleteRow(
 	referenceType: SubscriptionReferenceType | null,
 	plan: string,
 	paymentLinkId: string | null,
+	consumerId: string | null,
 ): Promise<Subscription | null> {
 	const candidates = await ctx.context.adapter.findMany<Subscription>({
 		model: SUBSCRIPTION_MODEL,
@@ -378,15 +379,19 @@ async function findIncompleteRow(
 			{ field: "status", value: "incomplete" },
 		],
 	});
-	const scopedCandidates = referenceType
-		? candidates.filter((candidate) => (candidate.referenceType ?? "user") === referenceType)
-		: candidates;
+	const scopedCandidates = candidates.filter(
+		(candidate) =>
+			(!referenceType || (candidate.referenceType ?? "user") === referenceType) &&
+			(!consumerId ||
+				!candidate.streampayConsumerId ||
+				candidate.streampayConsumerId === consumerId),
+	);
 	if (scopedCandidates.length === 0) return null;
 	if (paymentLinkId) {
 		const exact = scopedCandidates.find(
 			(candidate) => candidate.streampayPaymentLinkId === paymentLinkId,
 		);
-		if (exact) return exact;
+		return exact ?? null;
 	}
 	if (
 		!referenceType &&
@@ -451,6 +456,41 @@ class SubscriptionCorrelationError extends Error {
 		super(message);
 		this.name = "SubscriptionCorrelationError";
 	}
+}
+
+async function updateReconciledSubscription(
+	ctx: SyncContext,
+	existing: Subscription,
+	projected: Partial<Subscription>,
+	streampaySubscriptionId: string,
+): Promise<Subscription> {
+	if (
+		existing.providerUpdatedAt instanceof Date &&
+		projected.providerUpdatedAt instanceof Date &&
+		projected.providerUpdatedAt.getTime() < existing.providerUpdatedAt.getTime()
+	) {
+		throw new Error(
+			`StreamPay returned stale subscription state for sub=${streampaySubscriptionId}. Retry reconciliation.`,
+		);
+	}
+	const updated = await ctx.context.adapter.update<Subscription>({
+		model: SUBSCRIPTION_MODEL,
+		update: projected,
+		where: [
+			{ field: "id", value: existing.id },
+			{ field: "providerUpdatedAt", value: existing.providerUpdatedAt ?? null },
+			{ field: "streampaySubscriptionId", value: existing.streampaySubscriptionId ?? null },
+			{ field: "streampayConsumerId", value: existing.streampayConsumerId ?? null },
+			{ field: "status", value: existing.status },
+			{ field: "billingStatus", value: existing.billingStatus },
+		],
+	});
+	if (!updated) {
+		throw new Error(
+			`Subscription state changed during reconciliation for sub=${streampaySubscriptionId}. Retry delivery.`,
+		);
+	}
+	return updated;
 }
 
 async function reconcileFromStreamPay(
@@ -527,18 +567,19 @@ async function reconcileFromStreamPay(
 				projected.activeSlotKey = desiredSlotKey;
 			}
 		}
-		const updated = await ctx.context.adapter.update<Subscription>({
-			model: SUBSCRIPTION_MODEL,
-			update: projected,
-			where: [{ field: "id", value: existing.id }],
-		});
+		const updated = await updateReconciledSubscription(
+			ctx,
+			existing,
+			projected,
+			streampaySubscriptionId,
+		);
 		if (eventIsStale) {
 			logger(ctx).info(
 				`webhook ${payload.event_type}: ignored stale lifecycle callback for sub=${streampaySubscriptionId}.`,
 			);
 			return { row: null, stream };
 		}
-		return { row: updated ?? { ...existing, ...projected }, stream };
+		return { row: updated, stream };
 	}
 
 	const planName =
@@ -569,6 +610,9 @@ async function reconcileFromStreamPay(
 			metadataRow.referenceId === referenceId &&
 			(!metadataReferenceType || (metadataRow.referenceType ?? "user") === metadataReferenceType) &&
 			metadataRow.plan === planName &&
+			(!metadataRow.streampayConsumerId ||
+				!stream.organization_consumer_id ||
+				metadataRow.streampayConsumerId === stream.organization_consumer_id) &&
 			(!metadataRow.streampaySubscriptionId ||
 				metadataRow.streampaySubscriptionId === streampaySubscriptionId) &&
 			(!metadataRow.streampayPaymentLinkId ||
@@ -590,12 +634,13 @@ async function reconcileFromStreamPay(
 								),
 						}),
 			};
-			const updated = await ctx.context.adapter.update<Subscription>({
-				model: SUBSCRIPTION_MODEL,
-				update: projectedWithSlot,
-				where: [{ field: "id", value: metadataRow.id }],
-			});
-			return { row: updated ?? { ...metadataRow, ...projectedWithSlot }, stream };
+			const updated = await updateReconciledSubscription(
+				ctx,
+				metadataRow,
+				projectedWithSlot,
+				streampaySubscriptionId,
+			);
+			return { row: updated, stream };
 		}
 		if (metadataRow) {
 			logger(ctx).warn(
@@ -612,6 +657,7 @@ async function reconcileFromStreamPay(
 		metadataReferenceType,
 		planName,
 		paymentLinkId,
+		stream.organization_consumer_id ?? null,
 	);
 	if (incomplete) {
 		const projectedWithSlot = {
@@ -629,13 +675,14 @@ async function reconcileFromStreamPay(
 							),
 					}),
 		};
-		const updated = await ctx.context.adapter.update<Subscription>({
-			model: SUBSCRIPTION_MODEL,
-			update: projectedWithSlot,
-			where: [{ field: "id", value: incomplete.id }],
-		});
+		const updated = await updateReconciledSubscription(
+			ctx,
+			incomplete,
+			projectedWithSlot,
+			streampaySubscriptionId,
+		);
 		return {
-			row: updated ?? { ...incomplete, ...projectedWithSlot },
+			row: updated,
 			stream,
 		};
 	}
@@ -823,21 +870,58 @@ async function handleRenewalEvidence(
 		projected.currentCycleNumber !== null &&
 		projected.currentCycleNumber !== undefined &&
 		projected.currentCycleNumber > existing.currentCycleNumber;
+	const eventId = extractEventId(payload);
+	const pendingCallback = existing.renewalCallbackEventId ?? null;
+	if (
+		!pendingCallback &&
+		existing.providerUpdatedAt instanceof Date &&
+		projected.providerUpdatedAt instanceof Date &&
+		projected.providerUpdatedAt.getTime() < existing.providerUpdatedAt.getTime()
+	) {
+		throw new Error(
+			`StreamPay returned stale subscription state for sub=${subscriptionId}; retry delivery.`,
+		);
+	}
+	if (pendingCallback && pendingCallback !== eventId) {
+		throw new Error(`Subscription renewal callback ${pendingCallback} is pending; retry delivery.`);
+	}
+	const deliverCallback =
+		(pendingCallback === eventId && pendingCallback !== null) ||
+		(!eventIsStale && (periodAdvanced || cycleAdvanced || retryingRenewalCallback));
+	const callbackOwner = deliverCallback && callbacks.onSubscriptionRenewed ? eventId : null;
 	const updated = await ctx.context.adapter.update<Subscription>({
 		model: SUBSCRIPTION_MODEL,
-		update: projected,
+		// Recovery must retain the pending cycle, even if Stream has already advanced again.
+		update: pendingCallback
+			? { renewalCallbackEventId: callbackOwner }
+			: { ...projected, renewalCallbackEventId: callbackOwner },
 		where: [
 			{ field: "id", value: existing.id },
 			{ field: "periodEnd", value: existing.periodEnd ?? null },
 			{ field: "currentCycleNumber", value: existing.currentCycleNumber ?? null },
+			{ field: "renewalCallbackEventId", value: pendingCallback },
+			{ field: "providerUpdatedAt", value: existing.providerUpdatedAt ?? null },
+			{ field: "status", value: existing.status },
+			{ field: "billingStatus", value: existing.billingStatus },
 		],
 	});
-	// Another renewal event already advanced this cycle; it owns the callback.
-	if (!updated) return;
+	if (!updated) {
+		if (pendingCallback && pendingCallback === eventId) {
+			throw new Error(`Subscription cycle changed during callback recovery; retry delivery.`);
+		}
+		const latest = await findSubscriptionByStreampayId(ctx, subscriptionId);
+		const anotherCallbackOwner = latest?.renewalCallbackEventId;
+		const desiredCycleAdvanced =
+			(periodAdvanced || cycleAdvanced) &&
+			(!periodAdvanced || (latest?.periodEnd?.getTime() ?? 0) >= (projectedPeriodEnd ?? 0)) &&
+			(!cycleAdvanced || (latest?.currentCycleNumber ?? 0) >= (projected.currentCycleNumber ?? 0));
+		if (anotherCallbackOwner && anotherCallbackOwner !== eventId && desiredCycleAdvanced) return;
+		throw new Error(`Subscription changed during renewal reconciliation; retry delivery.`);
+	}
 	const row = updated;
 
 	const user = await resolveRowUser(ctx, row);
-	if (!eventIsStale && (periodAdvanced || cycleAdvanced || retryingRenewalCallback)) {
+	if (deliverCallback) {
 		await fireCallback(
 			ctx,
 			callbacks.onSubscriptionRenewed,
@@ -845,6 +929,16 @@ async function handleRenewalEvidence(
 			"onSubscriptionRenewed",
 			retryOnCallbackError,
 		);
+		if (callbackOwner) {
+			await ctx.context.adapter.update({
+				model: SUBSCRIPTION_MODEL,
+				update: { renewalCallbackEventId: null },
+				where: [
+					{ field: "id", value: row.id },
+					{ field: "renewalCallbackEventId", value: callbackOwner },
+				],
+			});
+		}
 	}
 }
 

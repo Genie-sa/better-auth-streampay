@@ -168,7 +168,7 @@ describe("portal plugin", () => {
 			expect(mockClient.listSubscriptions).toHaveBeenCalledWith({
 				organization_consumer_id: LINKED_CONSUMER,
 				page: 1,
-				size: 100,
+				limit: 100,
 			});
 			expect(result).toMatchObject({ hasConsumer: true });
 			expect(result.data).toHaveLength(1);
@@ -198,7 +198,7 @@ describe("portal plugin", () => {
 			await handler2(ctx);
 
 			expect(mockClient.listSubscriptions).toHaveBeenCalledWith(
-				expect.objectContaining({ size: 100 }),
+				expect.objectContaining({ limit: 100 }),
 			);
 		});
 
@@ -246,7 +246,7 @@ describe("portal plugin", () => {
 			expect(mockClient.listInvoices).toHaveBeenCalledWith({
 				organization_consumer_id: LINKED_CONSUMER,
 				page: 1,
-				size: 100,
+				limit: 100,
 			});
 			expect(result.data).toHaveLength(1);
 			expect(result.data[0]?.id).toBe("inv_mine");

@@ -227,6 +227,110 @@ describe.runIf(connectionString)("PostgreSQL webhook persistence", () => {
 		});
 	});
 
+	it("fences an older activation response after a newer cancellation commits", async () => {
+		const subscriptionId = randomUUID();
+		await context.context.adapter.create({
+			model: "subscription",
+			data: {
+				referenceId: randomUUID(),
+				plan: "pro",
+				status: "inactive",
+				streampaySubscriptionId: subscriptionId,
+				providerUpdatedAt: new Date("2026-01-01T00:00:00Z"),
+				createdAt: new Date(),
+				updatedAt: new Date(),
+			},
+		});
+		const client = createMockStreamPayClient();
+		client.getSubscription
+			.mockResolvedValueOnce({
+				id: subscriptionId,
+				status: "ACTIVE",
+				updated_at: "2026-02-01T00:00:00Z",
+				items: [{ product_id: "known", quantity: 1 }],
+			})
+			.mockResolvedValueOnce({
+				id: subscriptionId,
+				status: "CANCELED",
+				updated_at: "2026-03-01T00:00:00Z",
+				items: [{ product_id: "known", quantity: 1 }],
+			});
+		let releaseActivation: () => void = () => undefined;
+		let announceActivation: () => void = () => undefined;
+		const activationBlocked = new Promise<void>((resolve) => {
+			announceActivation = resolve;
+		});
+		const activationRelease = new Promise<void>((resolve) => {
+			releaseActivation = resolve;
+		});
+		const racingContext: SyncContext = {
+			context: {
+				...context.context,
+				adapter: {
+					...context.context.adapter,
+					update: async <T, D extends object>(input: {
+						model: string;
+						update: D;
+						where: Array<{ field: string; value: unknown }>;
+					}) => {
+						if (
+							input.model === "subscription" &&
+							"status" in input.update &&
+							input.update.status === "active"
+						) {
+							announceActivation();
+							await activationRelease;
+						}
+						return context.context.adapter.update<T, D>(input);
+					},
+				},
+			},
+		};
+		const resolvedPlans = { list: plans, byName: new Map(plans.map((plan) => [plan.name, plan])) };
+		const activation = syncWebhookPayload(
+			racingContext,
+			createMockWebhookPayload({
+				event_type: "SUBSCRIPTION_ACTIVATED",
+				entity_id: subscriptionId,
+				timestamp: "2026-02-01T00:00:00Z",
+			}),
+			client,
+			resolvedPlans,
+			{},
+		);
+		await activationBlocked;
+		try {
+			await syncWebhookPayload(
+				context,
+				createMockWebhookPayload({
+					event_type: "SUBSCRIPTION_CANCELED",
+					entity_id: subscriptionId,
+					timestamp: "2026-03-01T00:00:00Z",
+				}),
+				client,
+				resolvedPlans,
+				{},
+			);
+		} finally {
+			releaseActivation();
+		}
+		await expect(activation).rejects.toThrow(/state changed during reconciliation/);
+		const stored = await pool.query(
+			'SELECT status, "activeSlotKey", "providerUpdatedAt" FROM subscription WHERE "streampaySubscriptionId" = $1',
+			[subscriptionId],
+		);
+		expect(stored.rows[0]).toEqual({
+			status: "canceled",
+			activeSlotKey: null,
+			providerUpdatedAt: new Date("2026-03-01T00:00:00Z"),
+		});
+		const receipt = await pool.query(
+			'SELECT status, "lockedBy" FROM "streampayWebhookEvent" WHERE "eventType" = $1 AND "eventId" LIKE $2',
+			["SUBSCRIPTION_ACTIVATED", `%:${subscriptionId}:%`],
+		);
+		expect(receipt.rows).toEqual([{ status: "pending", lockedBy: null }]);
+	});
+
 	it("migrates existing subscriptions with a true catalog default without losing their identity", async () => {
 		await pool.query('ALTER TABLE subscription DROP COLUMN "catalogMapped"');
 		await pool.query(

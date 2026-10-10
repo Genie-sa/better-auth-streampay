@@ -70,11 +70,35 @@ async function searchExact(
 	term: string,
 	predicate: (c: ConsumerResponse) => boolean,
 ): Promise<ConsumerResponse | null> {
-	const response = await client.listConsumers({
-		search_term: term,
-		page: 1,
-		size: SEARCH_PAGE_SIZE,
-	});
-	const items = response.data ?? [];
-	return items.find(predicate) ?? null;
+	const seenIds = new Set<string>();
+	for (let page = 1; ; page++) {
+		const response = await client.listConsumers({
+			search_term: term,
+			page,
+			limit: SEARCH_PAGE_SIZE,
+		});
+		const items = response.data ?? [];
+		const pagination = response.pagination;
+		if (pagination?.current_page !== undefined && pagination.current_page !== page) {
+			throw new Error("Consumer search pagination did not advance to the requested page.");
+		}
+		const hit = items.find(predicate);
+		if (hit) return hit;
+		const hasNext =
+			pagination?.has_next_page ??
+			(pagination?.max_page !== undefined
+				? page < pagination.max_page
+				: items.length === SEARCH_PAGE_SIZE);
+		if (!hasNext) return null;
+		let advanced = false;
+		for (const item of items) {
+			if (item.id && !seenIds.has(item.id)) {
+				seenIds.add(item.id);
+				advanced = true;
+			}
+		}
+		if (!advanced || page === Number.MAX_SAFE_INTEGER) {
+			throw new Error("Consumer search pagination returned no new consumers.");
+		}
+	}
 }

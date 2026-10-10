@@ -186,6 +186,7 @@ export const webhooks = (webhooksOptions: WebhooksOptions) => {
 									signatureHeader,
 									err,
 									row.lockedBy ?? undefined,
+									row.attemptCount >= DEFAULT_MAX_WEBHOOK_ATTEMPTS,
 								);
 							const message = err instanceof Error ? err.message : String(err);
 							logger.error(`webhook handler failed: ${message}`);
