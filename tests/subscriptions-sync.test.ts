@@ -99,6 +99,22 @@ describe("syncWebhookPayload", () => {
 	});
 
 	describe("event lifecycle via streampayWebhookEvent state machine", () => {
+		it("retries when a unique conflict cannot be resolved to a durable inbox row", async () => {
+			const ctx = createMockSyncContext();
+			ctx.context.adapter.create = vi
+				.fn()
+				.mockRejectedValue(Object.assign(new Error("unique conflict"), { code: "23505" }));
+			await expect(
+				claimOrAdvanceWebhookEvent(
+					ctx,
+					createMockWebhookPayload(),
+					"verified payload",
+					"signature",
+					5,
+				),
+			).rejects.toThrow(/inbox row/);
+		});
+
 		it("persists the verified payload before a worker can crash and allows recovery after lease expiry", async () => {
 			const ctx = createMockSyncContext();
 			const payload = createMockWebhookPayload();

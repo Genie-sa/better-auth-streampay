@@ -7,17 +7,23 @@ const client = StreamSDK.init(process.env.STREAMPAY_API_KEY, {
 });
 if (!(await client.getMe()).organization.sandbox) throw new Error("Sandbox credentials required.");
 const consumer = JSON.parse(await readFile(new URL("consumer.json", directory), "utf8"));
-try {
-	const file = new URL("subscription.json", directory);
-	const saved = JSON.parse(await readFile(file, "utf8"));
-	const subscription = await client.getSubscription(saved.id);
-	if (subscription.organization_consumer_id !== consumer.id)
-		throw new Error("Saved subscription is not owned by this demo.");
-	if (subscription.status !== "CANCELED")
-		await client.cancelSubscription(saved.id, { cancel_related_invoices: true });
-	await unlink(file);
-} catch (error) {
-	if (error.code !== "ENOENT") throw error;
+for (const filename of ["subscription.json", "paid-subscription.json"]) {
+	try {
+		const file = new URL(filename, directory);
+		const saved = JSON.parse(await readFile(file, "utf8"));
+		let subscription = await client.getSubscription(saved.id);
+		if (subscription.organization_consumer_id !== consumer.id)
+			throw new Error("Saved subscription is not owned by this demo.");
+		if (subscription.status !== "CANCELED" && !subscription.cancel_at_period_end)
+			subscription = await client.cancelSubscription(saved.id, { cancel_related_invoices: true });
+		if (subscription.status === "CANCELED") await unlink(file);
+		else
+			console.log(
+				`Subscription ${saved.id} will cancel at period end; its state file is retained.`,
+			);
+	} catch (error) {
+		if (error.code !== "ENOENT") throw error;
+	}
 }
 try {
 	const file = new URL("webhook.json", directory);
@@ -37,5 +43,5 @@ try {
 	if (error.code !== "ENOENT") throw error;
 }
 console.log(
-	"Demo trial canceled and webhook removed. The dedicated consumer and local database are retained.",
+	"Demo subscription cancellation requested and webhook removed. The dedicated consumer and local database are retained.",
 );

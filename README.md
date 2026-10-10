@@ -29,7 +29,7 @@ pnpm add better-auth-streampay @streamsdk/typescript
 
 Required versions:
 
-- `better-auth ^1.5.0`
+- `better-auth ^1.6.0`
 - `@streamsdk/typescript ^1.1.3`
 - `zod ^3.24.0 || ^4.0.0`
 
@@ -105,9 +105,23 @@ schema but never changes your database at runtime. For an existing subscription 
 `seats` to `1` in the same migration.
 
 Add `subscription.catalogMapped` with a default of `true` before deploying this version.
+Better Auth 1.6's migration generator does not apply static defaults to added columns. Review
+and backfill the column explicitly. For PostgreSQL with the default table name:
+
+```sql
+ALTER TABLE subscription ADD COLUMN IF NOT EXISTS "catalogMapped" boolean DEFAULT true;
+ALTER TABLE subscription ALTER COLUMN "catalogMapped" SET DEFAULT true;
+UPDATE subscription SET "catalogMapped" = true WHERE "catalogMapped" IS NULL;
+```
+
+Use your configured table name and your database's boolean syntax when they differ. The column
+remains nullable for rolling migrations; legacy null values preserve existing access until
+reconciliation provides a catalog decision. Better Auth 1.6.0 is the minimum because 1.5's built-in
+SQL adapter handles null comparisons incorrectly, breaking ungrouped reads and released leases.
+
 Reconciliation sets it to `false` when Stream's current products do not match a configured plan;
-billing details remain visible, but features and limits deny access. Dynamic plan factories now
-refresh on each resolution; concurrent resolutions share the same in-flight call.
+billing details remain visible, but features and limits deny access. Dynamic plan factories
+resolve on each resolution; concurrent resolutions share the same in-flight call.
 
 `streampayConsumerId` is unique. Before applying the generated unique index to an existing
 database, resolve any duplicate non-null consumer IDs. Checkout fails closed when a consumer link
@@ -638,30 +652,63 @@ Stream API does not include the plugin's checkout correlation metadata automatic
 The setup command creates or updates only the webhook saved in the demo's state file and
 synchronizes its signing secret, including after rotation. When done,
 run `pnpm demo:cleanup` to cancel its trial and remove its webhook, then stop the server and tunnel.
-Cleanup retains the dedicated consumer and local database.
+Cleanup also requests cancellation of a saved paid validation subscription, if present. Stream
+cancels active subscriptions at period end; cleanup retains their state files until cancellation
+completes. It retains the dedicated consumer and local database.
 
-Validation on 2026-10-10: lint, type checking, tests, and build passed with Better Auth 1.6.23 and
-1.7.7; Stream SDK 1.1.3 was used. Browser checks covered sign-in, pagination, rejected negative
-limits, subscription access, the inbox, and opening the hosted portal for the dedicated consumer. Real subscription/invoice events reached the tunnel;
-synthetic duplicate delivery processed once in each inbox scope. Eight live read-only tests
-passed; the eleven general live write tests were skipped.
+Validation on 2026-10-10 used Better Auth 1.7.7 and Stream SDK 1.1.3. Tests also ran on Node
+20.19.0 and 24.21.0, and in an isolated Better Auth 1.6.0 / Zod 3.24 installation. PostgreSQL
+17 tests run against a temporary schema and cover concurrent claims, expired-lease replay,
+stale worker fencing, simultaneous renewal evidence, and migration/backfill of an existing row.
 
-| Risk | Regression proof |
+```bash
+STREAMPAY_TEST_DATABASE_URL=postgres://USER:PASSWORD@localhost:5432/TEST_DATABASE pnpm test:postgres
+```
+
+Dependency builds are explicit in `pnpm-workspace.yaml`: esbuild is allowed; optional lefthook
+and MSW dependency scripts are disabled. The root prepare script installs the Git hooks.
+
+The PostgreSQL suite owns a randomly named schema and drops it afterward. CI runs it in a
+separate PostgreSQL service. Use a test database, not the application's staging or production database.
+
+| Risk | Regression or staging proof |
 | --- | --- |
-| Unknown product retains old access | Plan projection test and authenticated SQLite test deny access while retaining billing diagnostics. |
-| Generic callbacks run twice | SQLite integration overlaps two deliveries and checks a later repeat; admin replay works with either plugin order. |
-| Crash loses payload | Initial claim retains payload/signature and supports recovery after lease expiry. |
-| Invalid usage count grants access | Invalid numeric counts fail closed; HTTP query validation rejects negative counts. |
-| Hosted portal opens another consumer | Authenticated integration ignores caller IDs, creates fresh uncached HTTPS sessions, and handles provider failures; staging REST returned 201. |
-| Portal hides later pages | Authenticated page 2 preserves ownership and returns provider pagination. |
-| Dynamic catalog stays stale | Replacing a factory's catalog updates the next resolution. |
-| Missing refund/renewal handlers | Dispatcher regressions cover both events; renewal plus invoice emits one renewal callback. |
+| Unknown product retains old access | Plan projection and authenticated SQLite tests deny access while retaining billing diagnostics. |
+| Generic callbacks run twice | SQLite integration overlaps deliveries; PostgreSQL gives one of eight contenders the claim. Admin replay works with either plugin order. |
+| Crash loses payload | Initial claim retains payload/signature; PostgreSQL recovers an expired lease and fences stale completion/failure writes. |
+| Inbox conflict loses tracking | A unique conflict with no visible row raises a retryable failure instead of running untracked callbacks. |
+| Invalid usage count grants access | Invalid numeric counts fail closed; live HTTP rejects negative, fractional, non-finite, and unsafe counts. |
+| Hosted portal opens another consumer | Caller IDs are ignored; sessions require authentication, HTTPS, and no-store. Real portal opened as the dedicated consumer. |
+| Portal hides later pages | Authenticated page 2 preserves ownership and returns provider pagination; invalid live page/size requests return 400. |
+| Dynamic catalog stays stale | The upstream 2.2.1 resolver fix is retained and tested. |
+| Renewal evidence invokes callbacks twice | PostgreSQL aligns invoice and subscription events at the same old cycle; a conditional update gives one callback winner. |
+| Missing refund/renewal handlers | Dispatcher regressions cover both events; real partial/full-refund events reached the inbox. |
+| Forged webhooks mutate billing | Missing, invalid, expired, or tampered signatures and malformed JSON were rejected through the public tunnel without adding inbox rows. |
 
-The staging trial was canceled after validation. Stream rejected its product switch because it
-was scheduled to cancel and only active subscriptions can be uncanceled; unknown-product behavior
-is proven by deterministic regression tests, not that live switch. Paid checkout, actual refunds,
-multi-process PostgreSQL contention, and long-running worker recovery remain separate validation
-work. These checks do not establish that the plugin has zero bugs.
+The browser exercised a declined card through sandbox 3DS, then successful recurring checkout.
+Repeated subscription upgrade reused its checkout link. Provider-created subscription, invoice,
+payment, and activation events reconciled the local reservation into an active subscription without
+synthetic correlation. A 1 SAR partial refund of the 80 SAR test payment returned
+`PARTIALLY_REFUNDED`; a separate 1 SAR payment was fully refunded and returned `REFUNDED`.
+Both invoices remained completed, as documented. Generic refund callbacks do not automatically
+cancel a subscription; applications own their refund/access policy.
+
+Provider discrepancy: refunding the remaining 79 SAR after the partial refund returned HTTP 400
+`PAYMENT_REFUNDED_ALREADY`, both with an explicit amount and with the amount omitted. Stream's
+current [webhook guide](https://docs.streampay.sa/webhooks/) describes cumulative refunds, but
+this staging organization did not permit them. Do not assume multiple-refund support without
+confirming it with Stream.
+
+The paid subscription was scheduled to cancel at period end; Stream does not support immediate
+cancellation of active subscriptions. Both checkout links completed their single allowed payment.
+
+A same-price product switch was accepted and deferred to the next billing period; its pending
+change was removed afterward. The earlier trial switch was blocked because it was scheduled to
+cancel. Immediate transitions to an unmapped product are proven by deterministic tests, not by
+waiting for a live billing boundary. General live write tests remain skipped to protect shared
+fixtures. Long-duration renewal scheduling, real process termination during external side effects,
+and all supported third-party database adapters remain outside this validation. Callbacks must
+remain idempotent; these checks do not establish zero bugs.
 
 ## License
 

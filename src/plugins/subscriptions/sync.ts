@@ -160,10 +160,9 @@ export async function claimOrAdvanceWebhookEvent(
 		where: [{ field: "eventId", value: eventId }],
 	});
 	if (!existing) {
-		logger(ctx).warn(
-			`webhook ${payload.event_type} (${eventId}): unique conflict but row missing, processing without tracking.`,
+		throw new Error(
+			`Webhook inbox row missing after unique conflict for ${eventId}; retry delivery.`,
 		);
-		return { action: "process", row: null };
 	}
 
 	if (existing.status === "completed") {
@@ -827,9 +826,15 @@ async function handleRenewalEvidence(
 	const updated = await ctx.context.adapter.update<Subscription>({
 		model: SUBSCRIPTION_MODEL,
 		update: projected,
-		where: [{ field: "id", value: existing.id }],
+		where: [
+			{ field: "id", value: existing.id },
+			{ field: "periodEnd", value: existing.periodEnd ?? null },
+			{ field: "currentCycleNumber", value: existing.currentCycleNumber ?? null },
+		],
 	});
-	const row = updated ?? { ...existing, ...projected };
+	// Another renewal event already advanced this cycle; it owns the callback.
+	if (!updated) return;
+	const row = updated;
 
 	const user = await resolveRowUser(ctx, row);
 	if (!eventIsStale && (periodAdvanced || cycleAdvanced || retryingRenewalCallback)) {

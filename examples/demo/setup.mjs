@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import StreamSDK from "@streamsdk/typescript";
+import { STREAMPAY_SUBSCRIPTION_EVENT_TYPES } from "../../dist/index.js";
 
 const directory = new URL(".data/", import.meta.url);
 await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -44,14 +45,14 @@ if (tunnel) {
 		if (error.code !== "ENOENT") throw error;
 	}
 	const subscriptions = [
-		"SUBSCRIPTION_CREATED",
-		"SUBSCRIPTION_PLAN_UPDATED",
-		"SUBSCRIPTION_PLAN_CHANGED",
-		"SUBSCRIPTION_CANCELED",
-		"SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY",
+		...STREAMPAY_SUBSCRIPTION_EVENT_TYPES,
 		"INVOICE_CREATED",
+		"INVOICE_COMPLETED",
 		"PAYMENT_SUCCEEDED",
+		"PAYMENT_FAILED",
+		"PAYMENT_LINK_PAY_ATTEMPT_FAILED",
 		"PAYMENT_PARTIALLY_REFUNDED",
+		"PAYMENT_REFUNDED",
 	];
 	const listing = await fetch(`${process.env.STREAMPAY_BASE_URL}/api/v2/webhooks`, {
 		headers: { "x-api-key": process.env.STREAMPAY_API_KEY },
