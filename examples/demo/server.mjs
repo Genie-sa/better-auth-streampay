@@ -109,7 +109,7 @@ createServer(async (request, response) => {
 				.end(JSON.stringify({ sandbox: true, sdk: "1.1.3", events: rows }));
 			return;
 		}
-		if (request.url === "/") {
+		if (request.url === "/" || request.url?.startsWith("/?")) {
 			response
 				.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" })
 				.end(html);

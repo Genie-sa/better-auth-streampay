@@ -22,3 +22,10 @@ ungrouped billing reads and replay claims. Apply and explicitly backfill catalog
 deployment; older migration generators omit static defaults. Add nullable renewalCallbackEventId
 before deploying. Apply the inbox migration before
 enabling generic callback deduplication.
+
+Preserve consumed trial history and guard endpoint projections against concurrent webhook updates.
+Handle active freeze windows and incomplete freeze pagination without false success. Accept RFC3339
+offsets and reject unsafe integers and non-finite checkout metadata under both supported Zod majors.
+Protect consumer identity from callback overrides, condition admin consumer deletion on its current
+local owner, and safely decode discarded webhook IDs. Map server-resolved checkout to POST.
+Register all supported events in the staging demo and accept checkout redirect query parameters.

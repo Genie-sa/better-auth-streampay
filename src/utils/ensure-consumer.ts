@@ -131,11 +131,11 @@ export async function ensureConsumerForUser(
 		: {};
 
 	const payload: ConsumerCreate = {
+		consumer_type: "INDIVIDUAL",
+		...extras,
 		name: user.name || user.email,
 		email: user.email,
 		external_id: user.id,
-		consumer_type: "INDIVIDUAL",
-		...extras,
 	};
 
 	try {

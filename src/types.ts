@@ -92,7 +92,7 @@ export interface StreamPayClient {
 	deleteConsumer(consumerId: string): Promise<void>;
 
 	createPaymentLink(input: CreatePaymentLinkDto): Promise<PaymentLinkDetailed>;
-	listPaymentLinks(params?: PaginationParams): Promise<PaymentLinkListResponse>;
+	listPaymentLinks(params?: StreamPayPaginationParams): Promise<PaymentLinkListResponse>;
 	getPaymentLink(paymentLinkId: string): Promise<PaymentLinkDetailed>;
 	updatePaymentLinkStatus?(
 		paymentLinkId: string,
@@ -101,13 +101,13 @@ export interface StreamPayClient {
 	getPaymentUrl(link: PaymentLinkDetailed): string | null;
 
 	createProduct(input: ProductCreate): Promise<ProductDto>;
-	listProducts(params?: PaginationParams): Promise<ProductListResponse>;
+	listProducts(params?: StreamPayPaginationParams): Promise<ProductListResponse>;
 	getProduct(productId: string): Promise<ProductDto>;
 	updateProduct(productId: string, input: ProductUpdate): Promise<ProductDto>;
 	deleteProduct(productId: string): Promise<void>;
 
 	createCoupon(input: CouponCreate): Promise<CouponDetailed>;
-	listCoupons(params?: PaginationParams): Promise<CouponListResponse>;
+	listCoupons(params?: StreamPayPaginationParams): Promise<CouponListResponse>;
 	getCoupon(couponId: string): Promise<CouponDetailed>;
 	updateCoupon(couponId: string, input: CouponUpdate): Promise<CouponDetailed>;
 	deleteCoupon(couponId: string): Promise<void>;
@@ -143,6 +143,7 @@ export interface StreamPayClient {
 	listPayments(params?: {
 		page?: number;
 		size?: number;
+		limit?: number;
 		invoice_id?: string;
 	}): Promise<PaymentListResponse>;
 	getPayment(paymentId: string): Promise<PaymentResponse>;

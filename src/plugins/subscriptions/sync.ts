@@ -518,7 +518,7 @@ async function reconcileFromStreamPay(
 
 	const existing = await findSubscriptionByStreampayId(ctx, streampaySubscriptionId);
 	let projected: Partial<Subscription> = {
-		...projectSubscriptionFields(stream),
+		...projectSubscriptionFields(stream, existing),
 		...projectPlanFields(stream, plans),
 	};
 	const eventAt = parseDate(payload.timestamp);
@@ -850,7 +850,7 @@ async function handleRenewalEvidence(
 			eventAt.getTime() < existing.providerUpdatedAt.getTime(),
 	);
 	const projected: Partial<Subscription> = {
-		...projectSubscriptionFields(stream),
+		...projectSubscriptionFields(stream, existing),
 		...projectPlanFields(stream, plans),
 		...(eventIsStale
 			? existing.billingStatus === "past_due" && toLocalStatus(stream.status) === "active"

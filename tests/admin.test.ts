@@ -45,6 +45,7 @@ import {
 	type MockedStreamPayClient,
 	type MockUser,
 } from "./utils/mocks";
+import { createMockAdapter } from "./utils/subscription-helpers";
 
 type AdminMockUser = MockUser & { role?: string | null };
 
@@ -273,11 +274,15 @@ describe("admin() plugin", () => {
 			const handler = adminHandler(mockClient, "adminDeleteConsumer");
 			const ctx = createMockContext({ user: createAdminUser() });
 			ctx.params = { id: "cons_linked" };
+			const adapter = createMockAdapter();
+			await adapter.create({
+				model: "user",
+				data: { id: "user-42", streampayConsumerId: "cons_linked" },
+			});
+			ctx.context.adapter = adapter;
 
 			await expect(handler(ctx)).resolves.toEqual({ deleted: true });
-			expect(ctx.context.internalAdapter.updateUser).toHaveBeenCalledWith("user-42", {
-				streampayConsumerId: null,
-			});
+			expect(adapter.tables.user?.[0]).toMatchObject({ id: "user-42", streampayConsumerId: null });
 		});
 
 		it("does not clear a user row when upstream delete fails with non-404", async () => {
@@ -292,7 +297,7 @@ describe("admin() plugin", () => {
 			ctx.params = { id: "cons_x" };
 
 			await expect(handler(ctx)).rejects.toMatchObject({ code: "INTERNAL_SERVER_ERROR" });
-			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
+			expect(ctx.context.adapter.update).not.toHaveBeenCalled();
 		});
 
 		it("treats delete 404 as already-deleted and logs local link-clear failures", async () => {
@@ -304,7 +309,8 @@ describe("admin() plugin", () => {
 			);
 			const handler = adminHandler(mockClient, "adminDeleteConsumer");
 			const ctx = createMockContext({ user: createAdminUser() });
-			ctx.context.internalAdapter.updateUser.mockRejectedValue(new Error("row not found"));
+			ctx.context.adapter.findOne = vi.fn().mockResolvedValue({ id: "user-42" });
+			ctx.context.adapter.update = vi.fn().mockRejectedValue(new Error("row not found"));
 			ctx.params = { id: "cons_race" };
 
 			await expect(handler(ctx)).resolves.toEqual({ deleted: true });
