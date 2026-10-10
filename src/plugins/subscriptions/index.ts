@@ -73,6 +73,7 @@ export interface StreamPayPluginRegistry {
 		ctx: GenericEndpointContext,
 		eventId: string,
 	) => Promise<{ replayed: true; eventId: string }>;
+	replayWebhookHandler?: NonNullable<StreamPayPluginRegistry["replayWebhookEvent"]>;
 }
 
 export function subscriptions(subsOptions: SubscriptionsOptions) {
@@ -132,6 +133,9 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 
 			if (dedupeEnabled) {
 				registry.replayWebhookEvent = async (ctx, eventId) => {
+					if (eventId.startsWith("handlers:") && registry.replayWebhookHandler) {
+						return registry.replayWebhookHandler(ctx, eventId);
+					}
 					const syncCtx: SyncContext = {
 						context: ctx.context as SyncContext["context"],
 					};

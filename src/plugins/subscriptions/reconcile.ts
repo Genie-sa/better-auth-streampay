@@ -239,6 +239,7 @@ export function projectPlanFields(
 	Pick<
 		Subscription,
 		| "plan"
+		| "catalogMapped"
 		| "planVersion"
 		| "productId"
 		| "group"
@@ -277,6 +278,7 @@ export function projectPlanFields(
 		Boolean(inferredPendingPlan) &&
 		(inferredPendingPlan !== currentPlan || pendingProductId !== currentProductId);
 	return {
+		catalogMapped: Boolean(currentPlan),
 		...(currentPlan
 			? {
 					plan: currentPlan,

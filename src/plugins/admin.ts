@@ -916,6 +916,14 @@ const WebhookEventsListQuery = z
 	})
 	.passthrough();
 
+function decodeWebhookEventId(value: string): string {
+	try {
+		return decodeURIComponent(value);
+	} catch {
+		throw new APIError("BAD_REQUEST", { message: "Invalid webhook event identifier." });
+	}
+}
+
 function buildWebhookEventsEndpoints(
 	adminOptions: AdminOptions,
 	registry: StreamPayPluginRegistry | undefined,
@@ -964,7 +972,7 @@ function buildWebhookEventsEndpoints(
 				const adapter = getAdapter(ctx);
 				const row = await adapter.findOne({
 					model: WEBHOOK_EVENT_MODEL,
-					where: [{ field: "eventId", value: ctx.params.eventId }],
+					where: [{ field: "eventId", value: decodeWebhookEventId(ctx.params.eventId) }],
 				});
 				if (!row) {
 					throw new APIError("NOT_FOUND", {
@@ -988,11 +996,14 @@ function buildWebhookEventsEndpoints(
 				if (!registry?.replayWebhookEvent) {
 					throw new APIError("BAD_REQUEST", {
 						message:
-							"Replay unavailable — `subscriptions()` plugin must be in `use` and `enableWebhookEventTable` left enabled.",
+							"Replay unavailable — enable the subscriptions webhook inbox or webhooks({ deduplicate: true }).",
 					});
 				}
 				try {
-					const result = await registry.replayWebhookEvent(ctx, ctx.params.eventId);
+					const result = await registry.replayWebhookEvent(
+						ctx,
+						decodeWebhookEventId(ctx.params.eventId),
+					);
 					return ctx.json(result);
 				} catch (err) {
 					if (err instanceof APIError) throw err;

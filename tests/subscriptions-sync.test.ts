@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { checkLimit, hasFeature } from "../src/plugins/subscriptions/plans";
 import { parseDate, projectPlanFields } from "../src/plugins/subscriptions/reconcile";
 import {
 	claimOrAdvanceWebhookEvent,
@@ -78,7 +79,51 @@ describe("syncWebhookPayload", () => {
 		).toThrow(/multiple configured plan products/);
 	});
 
+	it("denies the previous plan's entitlements after Stream switches to an unmapped product", () => {
+		const plan = { ...PLAN, limits: { projects: 10, teams: true } };
+		const projection = projectPlanFields(
+			{ id: "sub_unmapped", items: [{ product_id: "prod_unknown", quantity: 2 }] },
+			resolvedPlans(),
+		);
+		const row = { ...createMockSubscriptionRow({ status: "active" }), ...projection };
+		expect(hasFeature(row, plan, "teams")).toBe(false);
+		expect(checkLimit(row, plan, "projects", 1).allowed).toBe(false);
+		const recovered = {
+			...row,
+			...projectPlanFields(
+				{ id: "sub_unmapped", items: [{ product_id: PLAN.productId, quantity: 2 }] },
+				resolvedPlans(),
+			),
+		};
+		expect(hasFeature(recovered, plan, "teams")).toBe(true);
+	});
+
 	describe("event lifecycle via streampayWebhookEvent state machine", () => {
+		it("persists the verified payload before a worker can crash and allows recovery after lease expiry", async () => {
+			const ctx = createMockSyncContext();
+			const payload = createMockWebhookPayload();
+			const raw = JSON.stringify(payload);
+			const claim = await claimOrAdvanceWebhookEvent(ctx, payload, raw, "verified-signature", 5);
+			expect(claim.action).toBe("process");
+			const rows = await ctx.adapter.findMany<WebhookEventRow>({ model: "streampayWebhookEvent" });
+			expect(rows[0]?.rawPayload).toBe(raw);
+			expect(rows[0]?.signatureHeader).toBe("verified-signature");
+			if (!rows[0]) throw new Error("expected persisted event");
+			await ctx.adapter.update({
+				model: "streampayWebhookEvent",
+				where: [{ field: "id", value: rows[0].id }],
+				update: { lockedAt: new Date(0) },
+			});
+			const recovered = await ctx.adapter.findOne<WebhookEventRow>({
+				model: "streampayWebhookEvent",
+				where: [{ field: "id", value: rows[0].id }],
+			});
+			if (!recovered) throw new Error("expected recoverable event");
+			expect(await claimWebhookEventForReplay(ctx, recovered)).toMatchObject({
+				rawPayload: raw,
+				attemptCount: 2,
+			});
+		});
 		it("claims a dead-letter replay once and rejects a concurrent replay", async () => {
 			const ctx = createMockSyncContext();
 			const row = await ctx.adapter.create<WebhookEventRow>({
@@ -1431,6 +1476,60 @@ describe("syncWebhookPayload", () => {
 	});
 
 	describe("INVOICE_COMPLETED renewal inference", () => {
+		it("reconciles successful renewal events and emits one callback when the invoice follows", async () => {
+			const ctx = createMockSyncContext();
+			await ctx.adapter.create({
+				model: "subscription",
+				data: createMockSubscriptionRow({
+					streampaySubscriptionId: "sub_success",
+					status: "past_due",
+					billingStatus: "past_due",
+					periodEnd: new Date("2026-02-01T00:00:00Z"),
+					currentCycleNumber: 1,
+				}),
+			});
+			client.getSubscription.mockResolvedValue({
+				id: "sub_success",
+				status: "ACTIVE",
+				organization_consumer_id: "cons_1",
+				items: [{ product_id: PLAN.productId, quantity: 1 }],
+				current_period_end: "2026-03-01T00:00:00Z",
+				current_cycle_number: 2,
+			});
+			client.getInvoice.mockResolvedValue({
+				id: "inv_success",
+				subscription_id: "sub_success",
+				currency: "SAR",
+			});
+			const renewed = vi.fn();
+			await syncWebhookPayload(
+				ctx,
+				createMockWebhookPayload({
+					event_type: "SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY",
+					entity_id: "sub_success",
+				}),
+				client,
+				resolvedPlans(),
+				{ onSubscriptionRenewed: renewed },
+			);
+			expect(ctx.adapter.tables.subscription?.[0]).toMatchObject({
+				status: "active",
+				billingStatus: "current",
+				currentCycleNumber: 2,
+			});
+			await syncWebhookPayload(
+				ctx,
+				createMockWebhookPayload({
+					event_type: "INVOICE_COMPLETED",
+					entity_type: "INVOICE",
+					entity_id: "inv_success",
+				}),
+				client,
+				resolvedPlans(),
+				{ onSubscriptionRenewed: renewed },
+			);
+			expect(renewed).toHaveBeenCalledTimes(1);
+		});
 		it("fires onSubscriptionRenewed when invoice has a subscription_id", async () => {
 			const ctx = createMockSyncContext();
 			await ctx.adapter.create({

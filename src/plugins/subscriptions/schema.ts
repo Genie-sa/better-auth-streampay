@@ -41,6 +41,12 @@ export const subscriptionTable = {
 				type: "string",
 				required: true,
 			},
+			catalogMapped: {
+				type: "boolean",
+				required: false,
+				defaultValue: true,
+				input: false,
+			},
 			planVersion: {
 				type: "string",
 				required: false,

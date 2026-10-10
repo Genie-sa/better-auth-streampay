@@ -4,7 +4,11 @@ import type { StreamPayClient } from "../../types";
 import { readEnvelope, readSdkErrorFields } from "../../utils/error-envelope";
 import { type ScopedLogger, scopedLogger } from "../../utils/logger";
 import { asSessionUser, type StreamPaySessionUser } from "../../utils/session";
-import type { StreamPayWebhookData, StreamPayWebhookPayload } from "../../webhooks/events";
+import type {
+	StreamPayWebhookData,
+	StreamPayWebhookEnvelope,
+	StreamPayWebhookPayload,
+} from "../../webhooks/events";
 import type { PluginAdapter } from "./adapter";
 import type { ResolvedPlans } from "./plans";
 import {
@@ -112,12 +116,14 @@ const WEBHOOK_RETRY_DELAYS_MS = [5, 30, 120, 360, 720].map((minutes) => minutes 
 
 export async function claimOrAdvanceWebhookEvent(
 	ctx: SyncContext,
-	payload: StreamPayWebhookPayload,
+	payload: StreamPayWebhookEnvelope,
 	rawBody: string | null,
 	signatureHeader: string | null,
 	maxAttempts: number,
+	scope?: string,
 ): Promise<ClaimAdvanceResult> {
-	const eventId = extractEventId(payload);
+	const sourceEventId = extractEventId(payload);
+	const eventId = sourceEventId && (scope ? `${scope}:${sourceEventId}` : sourceEventId);
 	if (!eventId) {
 		logger(ctx).warn(
 			`webhook ${payload.event_type}: missing entity_id/timestamp — processing without dedupe.`,
@@ -140,6 +146,8 @@ export async function claimOrAdvanceWebhookEvent(
 				lastAttemptAt: now,
 				lockedAt: now,
 				lockedBy: lockId,
+				rawPayload: rawBody,
+				signatureHeader,
 			},
 		});
 		return { action: "process", row: inserted };
@@ -328,7 +336,7 @@ export async function recordWebhookEventFailure(
 	});
 }
 
-function extractEventId(payload: StreamPayWebhookPayload): string | null {
+function extractEventId(payload: StreamPayWebhookEnvelope): string | null {
 	if (!payload.timestamp || !payload.entity_id) return null;
 	return `${payload.event_type}:${payload.entity_id}:${payload.timestamp}`;
 }
@@ -698,8 +706,11 @@ export async function syncWebhookPayload(
 	const trackedLockId = claim.row?.lockedBy ?? undefined;
 
 	try {
-		if (payload.event_type === "INVOICE_COMPLETED") {
-			await handleInvoiceCompleted(
+		if (
+			payload.event_type === "INVOICE_COMPLETED" ||
+			payload.event_type === "SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY"
+		) {
+			await handleRenewalEvidence(
 				ctx,
 				payload,
 				client,
@@ -745,7 +756,7 @@ export async function syncWebhookPayload(
 	}
 }
 
-async function handleInvoiceCompleted(
+async function handleRenewalEvidence(
 	ctx: SyncContext,
 	payload: StreamPayWebhookPayload,
 	client: StreamPayClient,
@@ -756,17 +767,20 @@ async function handleInvoiceCompleted(
 ): Promise<void> {
 	const invoiceId = payload.data?.invoice?.id ?? payload.entity_id;
 	if (!invoiceId) return;
-	let subscriptionId: string | null = null;
-	try {
-		const invoice = await client.getInvoice(invoiceId);
-		if (invoice && typeof invoice === "object" && "subscription_id" in invoice) {
-			const subId = invoice.subscription_id;
-			if (typeof subId === "string" && subId.length > 0) subscriptionId = subId;
+	let subscriptionId: string | null =
+		payload.entity_type === "SUBSCRIPTION" ? payload.entity_id : null;
+	if (!subscriptionId) {
+		try {
+			const invoice = await client.getInvoice(invoiceId);
+			if (invoice && typeof invoice === "object" && "subscription_id" in invoice) {
+				const subId = invoice.subscription_id;
+				if (typeof subId === "string" && subId.length > 0) subscriptionId = subId;
+			}
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			logger(ctx).error(`${payload.event_type}: getInvoice(${invoiceId}) failed: ${msg}`);
+			throw err;
 		}
-	} catch (err: unknown) {
-		const msg = err instanceof Error ? err.message : String(err);
-		logger(ctx).error(`INVOICE_COMPLETED: getInvoice(${invoiceId}) failed: ${msg}`);
-		throw err;
 	}
 
 	if (!subscriptionId) return;
@@ -776,7 +790,7 @@ async function handleInvoiceCompleted(
 		stream = await client.getSubscription(subscriptionId);
 	} catch (err: unknown) {
 		const msg = err instanceof Error ? err.message : String(err);
-		logger(ctx).error(`INVOICE_COMPLETED: getSubscription(${subscriptionId}) failed: ${msg}`);
+		logger(ctx).error(`${payload.event_type}: getSubscription(${subscriptionId}) failed: ${msg}`);
 		throw err;
 	}
 

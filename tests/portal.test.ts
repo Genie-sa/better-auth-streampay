@@ -117,6 +117,13 @@ describe("portal plugin", () => {
 			expect(result).toMatchObject({ hasConsumer: true });
 		});
 
+		it("translates consumer lookup failures as well as direct consumer failures", async () => {
+			mockClient.listConsumers.mockRejectedValue(mockApiError(429, { message: "rate limited" }));
+			const ctx = createMockContext({ user: createMockUser({ streampayConsumerId: null }) });
+			await expect(handler(ctx)).rejects.toMatchObject({ code: "TOO_MANY_REQUESTS" });
+			expect(ctx.context.logger.error).toHaveBeenCalled();
+		});
+
 		it("translates SDK errors into INTERNAL_SERVER_ERROR", async () => {
 			mockClient.getConsumer.mockRejectedValue(mockApiError(500, { error: { message: "down" } }));
 			const ctx = createMockContext({

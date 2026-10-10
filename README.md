@@ -104,6 +104,11 @@ Review the generated schema, then use your normal migration process. The plugin 
 schema but never changes your database at runtime. For an existing subscription table, backfill
 `seats` to `1` in the same migration.
 
+Add `subscription.catalogMapped` with a default of `true` before deploying this version.
+Reconciliation sets it to `false` when Stream's current products do not match a configured plan;
+billing details remain visible, but features and limits deny access. Dynamic plan factories now
+refresh on each resolution; concurrent resolutions share the same in-flight call.
+
 `streampayConsumerId` is unique. Before applying the generated unique index to an existing
 database, resolve any duplicate non-null consumer IDs. Checkout fails closed when a consumer link
 cannot be stored safely.
@@ -230,17 +235,61 @@ storefront has a different origin.
 
 ## Billing portal
 
-`portal()` adds three signed-in user actions:
+`portal()` adds signed-in user actions:
 
 - `state`
 - `subscriptions`
 - `invoices`
+- `portal.session` when hosted session creation is configured
 
 ```ts
 const state = await authClient.consumer.state();
 const subscriptions = await authClient.consumer.subscriptions.list();
 const invoices = await authClient.consumer.invoices.list();
+const nextInvoices = await authClient.consumer.invoices.list({ query: { page: 2, size: 10 } });
 ```
+
+Invoice and subscription lists return Stream's `pagination` alongside `data`. The consumer filter
+always comes from the signed-in account. `page` must be a positive safe integer; `size` is 1–100.
+
+To open [Stream's hosted customer portal](https://docs.streampay.sa/customer-portal/), configure a
+server-side session creator. Stream SDK 1.1.3 does not expose this endpoint yet:
+
+```ts
+portal({
+  createSession: async (input) => {
+    const response = await fetch(`${process.env.STREAMPAY_BASE_URL}/api/v2/consumer_portal/sessions`, {
+      method: "POST",
+      headers: {
+        "x-api-key": process.env.STREAMPAY_API_KEY!,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(input),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) {
+      throw Object.assign(new Error("Portal session creation failed."), { status: response.status });
+    }
+    return response.json();
+  },
+});
+
+// Frontend, using streampayClient():
+const { data, error } = await authClient.consumer.portal.session();
+if (error) throw new Error(error.message);
+if (data) window.location.assign(data.url);
+```
+
+`POST /consumer/portal/session` resolves the consumer from the session and ignores consumer IDs
+in the request. Missing consumers or configuration return 404; anonymous sessions are rejected.
+Each request creates a fresh URL, requires HTTPS, and sends `Cache-Control: no-store`. Treat the
+single-use URL as a credential: do not log, persist, or share it. Keep API keys on the server.
+
+Enable customer permissions and branding in Stream's dashboard. Product switches require switch
+groups; add-ons require catalog mappings. Stream controls proration and payment confirmation.
+Keep webhook reconciliation enabled so portal changes update local subscription access. This
+initial integration opens the consumer's portal; subscription deep links are not exposed. The
+current OpenAPI omits the guide's `return_url` field, so the plugin does not send it.
 
 ## Subscriptions
 
@@ -457,6 +506,7 @@ Then add the handlers you need:
 ```ts
 webhooks({
   secret: process.env.STREAMPAY_WEBHOOK_SECRET!,
+  deduplicate: true,
 
   onPaymentSucceeded: async (event) => {},
   onPaymentFailed: async (event) => {},
@@ -473,6 +523,20 @@ The plugin:
 - deduplicates subscription sync and lifecycle callbacks
 - retries temporary failures
 - stores failed subscription events for admin replay
+
+`deduplicate: true` also persists generic handler deliveries in `streampayWebhookEvent`, including
+unknown event envelopes. Apply the inbox table migration before enabling it. Handler receipts use
+the `handlers:` event ID prefix and support the existing authenticated admin replay endpoint.
+The default is `false` to preserve existing installations that have no inbox table.
+
+Verified payloads are persisted when processing is claimed, so an interrupted delivery can be
+recovered after its lease expires. Callbacks must still be idempotent: a crash after an external
+side effect, or failure of a later callback, can repeat earlier work on retry. Inbox deduplication
+does not provide exactly-once execution of external side effects.
+
+Typed handlers include `onPaymentPartiallyRefunded` and `onSubscriptionCycleRenewedSuccessfully`.
+Successful renewal events reconcile billing state and share renewal inference with completed
+invoices, avoiding a second renewal callback for an already projected cycle.
 
 The StreamPay SDK does not export webhook payload types. This package provides checked event
 types based on StreamPay's documented payloads.
@@ -546,6 +610,58 @@ import {
   verifyWebhook,
 } from "better-auth-streampay";
 ```
+
+## Local staging demo
+
+The demo uses Node 22's SQLite support, real Better Auth sessions, and a Stream sandbox organization.
+It binds to `127.0.0.1:3100`; the tunnel exposes only signed webhook ingress. Credentials and local
+state are ignored by Git. It is a single-account test harness, not a deployable application.
+
+Copy `examples/demo/.env.example` to `.env.local` in the same directory, fill in sandbox credentials
+and the recurring starter product ID, and generate distinct random auth and webhook secrets.
+
+```bash
+pnpm build
+pnpm demo:setup
+pnpm demo
+# In another terminal:
+cloudflared tunnel --url http://localhost:3100 --no-autoupdate
+pnpm demo:setup https://YOUR-TUNNEL.trycloudflare.com
+```
+
+Open `http://localhost:3100`, create a local account, then run `pnpm demo:exercise`. The script
+creates a dedicated free trial with notifications disabled, and sends an explicitly synthetic
+signed event twice to correlate that fixture with the local account. Provider-created events
+arrive separately through the registered webhook. Creating a subscription directly through the
+Stream API does not include the plugin's checkout correlation metadata automatically.
+
+The setup command creates or updates only the webhook saved in the demo's state file and
+synchronizes its signing secret, including after rotation. When done,
+run `pnpm demo:cleanup` to cancel its trial and remove its webhook, then stop the server and tunnel.
+Cleanup retains the dedicated consumer and local database.
+
+Validation on 2026-10-10: lint, type checking, tests, and build passed with Better Auth 1.6.23 and
+1.7.7; Stream SDK 1.1.3 was used. Browser checks covered sign-in, pagination, rejected negative
+limits, subscription access, the inbox, and opening the hosted portal for the dedicated consumer. Real subscription/invoice events reached the tunnel;
+synthetic duplicate delivery processed once in each inbox scope. Eight live read-only tests
+passed; the eleven general live write tests were skipped.
+
+| Risk | Regression proof |
+| --- | --- |
+| Unknown product retains old access | Plan projection test and authenticated SQLite test deny access while retaining billing diagnostics. |
+| Generic callbacks run twice | SQLite integration overlaps two deliveries and checks a later repeat; admin replay works with either plugin order. |
+| Crash loses payload | Initial claim retains payload/signature and supports recovery after lease expiry. |
+| Invalid usage count grants access | Invalid numeric counts fail closed; HTTP query validation rejects negative counts. |
+| Hosted portal opens another consumer | Authenticated integration ignores caller IDs, creates fresh uncached HTTPS sessions, and handles provider failures; staging REST returned 201. |
+| Portal hides later pages | Authenticated page 2 preserves ownership and returns provider pagination. |
+| Dynamic catalog stays stale | Replacing a factory's catalog updates the next resolution. |
+| Missing refund/renewal handlers | Dispatcher regressions cover both events; renewal plus invoice emits one renewal callback. |
+
+The staging trial was canceled after validation. Stream rejected its product switch because it
+was scheduled to cancel and only active subscriptions can be uncanceled; unknown-product behavior
+is proven by deterministic regression tests, not that live switch. Paid checkout, actual refunds,
+multi-process PostgreSQL contention, and long-running worker recovery remain separate validation
+work. These checks do not establish that the plugin has zero bugs.
 
 ## License
 

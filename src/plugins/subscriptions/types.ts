@@ -62,6 +62,8 @@ export interface Subscription {
 	streampayConsumerId: string | null;
 	streampayPaymentLinkId: string | null;
 	plan: string;
+	/** False when Stream's effective products cannot be mapped to a configured plan. */
+	catalogMapped?: boolean;
 	planVersion: string | null;
 	productId: string | null;
 	group: string | null;

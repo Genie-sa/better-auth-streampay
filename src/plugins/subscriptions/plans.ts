@@ -148,7 +148,7 @@ export function createPlanResolver(plans: PlansInput | undefined): () => Promise
 			const list = typeof plans === "function" ? await plans() : plans;
 			validatePlansShape(list);
 			const resolved = buildIndex(list);
-			cached = resolved;
+			if (typeof plans !== "function") cached = resolved;
 			return resolved;
 		})();
 
@@ -167,10 +167,10 @@ export type FeatureKey<P> = P extends { limits?: infer L }
 	: string;
 
 export function hasSubscriptionAccess(
-	subscription: Pick<Subscription, "status">,
+	subscription: Pick<Subscription, "status" | "catalogMapped">,
 	accessStatuses: readonly SubscriptionStatus[] = DEFAULT_ACCESS_STATUSES,
 ): boolean {
-	return accessStatuses.includes(subscription.status);
+	return subscription.catalogMapped !== false && accessStatuses.includes(subscription.status);
 }
 
 export function hasFeature<P extends StreamPayPlanLike>(
@@ -205,8 +205,10 @@ export function checkLimit<P extends StreamPayPlanLike>(
 	}
 	const raw = plan.limits[feature];
 	const limit = typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
-	const normalizedRequested = Number.isFinite(requested) && requested >= 0 ? requested : 0;
-	const allowed = normalizedRequested <= limit;
-	const remaining = Math.max(0, limit - normalizedRequested);
+	if (!Number.isSafeInteger(requested) || requested < 0) {
+		return { allowed: false, limit, remaining: 0 };
+	}
+	const allowed = requested <= limit;
+	const remaining = Math.max(0, limit - requested);
 	return { allowed, limit, remaining };
 }

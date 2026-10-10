@@ -38,12 +38,13 @@ describe("webhook type narrowing", () => {
 	});
 
 	describe("per-entity event subtype unions", () => {
-		it("StreamPayPaymentEventType is the 5 payment literals", () => {
+		it("StreamPayPaymentEventType includes partial refunds", () => {
 			expectTypeOf<StreamPayPaymentEventType>().toEqualTypeOf<
 				| "PAYMENT_SUCCEEDED"
 				| "PAYMENT_FAILED"
 				| "PAYMENT_CANCELED"
 				| "PAYMENT_REFUNDED"
+				| "PAYMENT_PARTIALLY_REFUNDED"
 				| "PAYMENT_MARKED_AS_PAID"
 			>();
 		});
@@ -68,6 +69,7 @@ describe("webhook type narrowing", () => {
 				| "SUBSCRIPTION_CANCELED"
 				| "SUBSCRIPTION_FROZEN"
 				| "SUBSCRIPTION_CYCLE_RENEWAL_FAILED"
+				| "SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY"
 				| "SUBSCRIPTION_CANCEL_AT_PERIOD_END"
 				| "SUBSCRIPTION_FREEZE_NOW"
 				| "SUBSCRIPTION_UNFREEZE_NOW"

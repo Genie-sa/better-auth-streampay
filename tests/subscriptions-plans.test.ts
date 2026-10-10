@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { validatePlansShape } from "../src/plugins/subscriptions/plans";
+import {
+	checkLimit,
+	createPlanResolver,
+	validatePlansShape,
+} from "../src/plugins/subscriptions/plans";
 
 describe("validatePlansShape", () => {
 	const baseline = {
@@ -147,6 +151,30 @@ describe("validatePlansShape", () => {
 });
 
 describe("hasFeature / checkLimit", () => {
+	it.each([
+		NaN,
+		Infinity,
+		-Infinity,
+		-1,
+		0.5,
+		Number.MAX_SAFE_INTEGER + 1,
+	])("rejects invalid usage count %s instead of treating it as zero", (requested) => {
+		const plan = {
+			name: "pro",
+			productId: "p",
+			priceInSmallestUnit: 0,
+			billingInterval: "MONTH" as const,
+			limits: { seats: 10 },
+		};
+		expect(
+			checkLimit(
+				{ status: "active" } as Parameters<typeof checkLimit>[0],
+				plan,
+				"seats",
+				requested,
+			),
+		).toEqual({ allowed: false, limit: 10, remaining: 0 });
+	});
 	it("hasFeature returns false on non-active subscription", async () => {
 		const { hasFeature } = await import("../src/plugins/subscriptions/plans");
 		const sub = {
@@ -280,5 +308,22 @@ describe("hasFeature / checkLimit", () => {
 		};
 		const result = checkLimit(sub, plan, "seats", 1);
 		expect(result).toEqual({ allowed: false, limit: 0, remaining: 0 });
+	});
+});
+
+describe("dynamic plan resolution", () => {
+	it("reflects catalog changes on the next request", async () => {
+		const baseline = {
+			name: "pro",
+			productId: "prod_pro",
+			priceInSmallestUnit: 9900,
+			billingInterval: "MONTH" as const,
+			limits: { seats: 10 },
+		};
+		let list = [baseline];
+		const resolve = createPlanResolver(() => list);
+		expect((await resolve()).byName.get("pro")?.limits?.seats).toBe(10);
+		list = [{ ...baseline, limits: { seats: 20 } }];
+		expect((await resolve()).byName.get("pro")?.limits?.seats).toBe(20);
 	});
 });
