@@ -2,9 +2,10 @@ import { APIError, createAuthEndpoint, sessionMiddleware } from "better-auth/api
 import { z } from "zod";
 import type { StreamPayClient, StreamPayOptions } from "../types";
 import { findConsumerByExternalId } from "../utils/consumer";
+import type { StreamPayLoggerContext } from "../utils/ensure-consumer";
 import { rejectUnauthorized, toAPIError } from "../utils/errors";
 import { getLogger } from "../utils/logger";
-import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
+import { asSessionUser, getCurrentConsumerUser, type StreamPaySessionUser } from "../utils/session";
 
 export interface PortalOptions {
 	pageSize?: number;
@@ -19,11 +20,13 @@ const paginationQuery = z.object({
 });
 
 async function getConsumerIdOrNull(
+	ctx: StreamPayLoggerContext,
 	client: StreamPayClient,
 	user: StreamPaySessionUser | null,
 ): Promise<string | null> {
 	rejectUnauthorized(user, "Anonymous users cannot access the billing portal.");
-	if (user.streampayConsumerId) return user.streampayConsumerId;
+	const current = await getCurrentConsumerUser(ctx, user);
+	if (current.streampayConsumerId) return current.streampayConsumerId;
 	return findConsumerByExternalId(client, { externalId: user.id });
 }
 
@@ -41,6 +44,7 @@ export const portal =
 						ctx.setHeader("cache-control", "no-store");
 						try {
 							const consumerId = await getConsumerIdOrNull(
+								ctx,
 								client,
 								asSessionUser(ctx.context.session?.user),
 							);
@@ -68,7 +72,7 @@ export const portal =
 					async (ctx) => {
 						const user = asSessionUser(ctx.context.session?.user);
 						try {
-							const consumerId = await getConsumerIdOrNull(client, user);
+							const consumerId = await getConsumerIdOrNull(ctx, client, user);
 							if (!consumerId) return ctx.json({ hasConsumer: false, consumer: null });
 							const consumer = await client.getConsumer(consumerId);
 							return ctx.json({ hasConsumer: true, consumer });
@@ -84,7 +88,7 @@ export const portal =
 					async (ctx) => {
 						const user = asSessionUser(ctx.context.session?.user);
 						try {
-							const consumerId = await getConsumerIdOrNull(client, user);
+							const consumerId = await getConsumerIdOrNull(ctx, client, user);
 							if (!consumerId) return ctx.json({ hasConsumer: false, data: [] });
 							const response = await client.listSubscriptions({
 								organization_consumer_id: consumerId,
@@ -108,7 +112,7 @@ export const portal =
 					async (ctx) => {
 						const user = asSessionUser(ctx.context.session?.user);
 						try {
-							const consumerId = await getConsumerIdOrNull(client, user);
+							const consumerId = await getConsumerIdOrNull(ctx, client, user);
 							if (!consumerId) return ctx.json({ hasConsumer: false, data: [] });
 							const response = await client.listInvoices({
 								organization_consumer_id: consumerId,

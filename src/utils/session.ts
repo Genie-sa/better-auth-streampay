@@ -1,9 +1,34 @@
+import { APIError } from "better-auth/api";
+import type { StreamPayLoggerContext } from "./ensure-consumer";
+
 export interface StreamPaySessionUser {
 	id: string;
 	email?: string;
 	name?: string;
 	isAnonymous?: boolean;
 	streampayConsumerId?: string | null;
+}
+
+export async function getCurrentConsumerUser(
+	ctx: StreamPayLoggerContext,
+	user: StreamPaySessionUser,
+): Promise<StreamPaySessionUser> {
+	if (!user.streampayConsumerId) return user;
+	if (!ctx.context.adapter) {
+		throw new APIError("INTERNAL_SERVER_ERROR", { message: "Consumer storage is unavailable." });
+	}
+	// Cookie and secondary-storage sessions can outlive a link change or rollback.
+	const current = await ctx.context.adapter.findOne<StreamPaySessionUser>({
+		model: "user",
+		where: [{ field: "id", value: user.id }],
+	});
+	if (!current || current.id !== user.id) {
+		throw new APIError("UNAUTHORIZED", { message: "The account no longer exists." });
+	}
+	if (current.streampayConsumerId != null && typeof current.streampayConsumerId !== "string") {
+		throw new APIError("INTERNAL_SERVER_ERROR", { message: "Invalid stored consumer link." });
+	}
+	return { ...user, streampayConsumerId: current.streampayConsumerId ?? null };
 }
 
 export function asSessionUser(user: unknown): StreamPaySessionUser | null {

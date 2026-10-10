@@ -172,6 +172,7 @@ describe("checkout plugin", () => {
 				},
 			});
 			const ctx = createMockContext({
+				user: createMockUser({ streampayConsumerId: "cons_resolved" }),
 				body: {
 					referenceId: "client-reference",
 					redirect: false,
@@ -368,7 +369,10 @@ describe("checkout plugin", () => {
 					streampayConsumerId: "cons_linked_7",
 				}),
 			});
-			const ctx = createMockContext({ body: { products: PRODUCT_ID } });
+			const ctx = createMockContext({
+				user: createMockUser({ id: "user-linked", streampayConsumerId: "cons_linked_7" }),
+				body: { products: PRODUCT_ID },
+			});
 			await handler(ctx);
 
 			expect(mockClient.createPaymentLink).toHaveBeenCalledWith(
@@ -395,6 +399,7 @@ describe("checkout plugin", () => {
 				user: createMockUser({ id: "user-owner", streampayConsumerId: "cons_mine" }),
 			});
 			const ctx = createMockContext({
+				user: createMockUser({ id: "user-owner", streampayConsumerId: "cons_mine" }),
 				body: { products: PRODUCT_ID, consumerId: "cons_theirs" },
 			});
 			await handler(ctx);

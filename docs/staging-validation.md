@@ -101,3 +101,59 @@ trial history, stale endpoint responses and database races. These checks cannot 
 
 Sources: [customer portal](https://docs.streampay.sa/customer-portal/),
 [webhooks](https://docs.streampay.sa/webhooks/), and the current public API reference.
+
+## Repeat audit of 3.0.0
+
+Three Luna agents reviewed billing, portal/API contracts, and webhook reliability. The main
+checkout passed the complete local check, including PostgreSQL. The npm 3.0.0 package was also
+checked for ESM and CommonJS exports, its reported version, and accidental credential files.
+Registry checks still returned Better Auth 1.7.7 and Stream SDK 1.1.3 on October 10, 2026.
+
+The repeat staging checks passed:
+
+- Eight read-only live tests. Eleven generic write tests stayed disabled.
+- A new unpaid hosted checkout retained quantity two, the 10% coupon, metadata, custom fields,
+  and redirects, producing 180 halalas. Its link was deactivated and temporary catalog entries
+  were deleted after validation.
+- Admin authentication and authorization, pagination across seven resources, product/coupon CRUD,
+  and updates/deletion of a dedicated consumer. Previously refunded payments were read; a new
+  refund was not submitted in this repeat.
+- Scheduled freeze cancellation on page 7, repeated cancellation, and active unfreeze on page 8.
+- Seat validation, unchanged quantity reuse, a scheduled quantity change, pending-change
+  cancellation and reuse, and a same-price plan switch. Temporary changes were removed.
+- Local-demo freeze/unfreeze reconciled both provider and SQLite state. Cancellation at period
+  end was restored afterward.
+- The browser opened the authenticated hosted portal. Real subscription events reached the
+  public webhook tunnel and completed in the inbox. An unsigned webhook returned 401 without
+  adding an inbox row; public diagnostics returned 404.
+- An eager duplicate signup against an existing sandbox identity returned 409
+  `STREAMPAY_CONSUMER_LINK_CONFLICT`, preserving the provider's original external ID and the
+  existing local owner. Sandbox rules prohibit arbitrary customer emails and phone numbers, so
+  this live test seeded local ownership before attempting the duplicate signup.
+
+Real Better Auth/SQLite regressions also cover unclaimed duplicate signup recovery and cleanup
+of an old missing consumer while another request replaces its local link. Ownership reads inside
+signup use Better Auth's transaction-aware internal adapter; reading through the outer adapter
+can deadlock on SQLite. Cleanup compares the stored link with the failed link before clearing it.
+
+The database unique constraint still decides the winner when two eager signups simultaneously
+claim an initially unclaimed consumer. A losing signup may receive a database validation error
+instead of the explicit ownership conflict. Webhook callbacks must finish within their processing
+lease or tolerate replay; deduplication cannot make external side effects exactly once. These
+limits and the earlier untested provider scenarios remain part of the coverage boundary.
+
+The repeat audit found and fixed four consumer-link defects: eager recovery returned a database
+validation error for an established owner; stale 404 cleanup could clear a concurrent replacement;
+lazy recovery changed the provider external ID before winning the local claim; and session caches
+could keep using a link after database rollback. Nine real Better Auth/SQLite regressions cover
+these paths, including recovery after failed backfill, preserving a replacement during rollback,
+and rejecting a cached linked account after deletion or a failed database read. Linked billing
+requests now read the current database link before using a cached consumer ID. This adds one
+database read to the linked checkout, subscription-creation, and portal paths.
+
+Final local validation passed 568 tests across 35 files on Node 22 and Node 24, including
+PostgreSQL. The minimum-peer run passed the same 568 tests with Better Auth 1.6.0, Zod 3.24.0,
+and SDK 1.1.3. Node 20 passed 511 tests in its supported subset; four cases and SQLite integration
+were excluded or skipped because that runtime lacks the SQLite features used by the test harness.
+ESM and CommonJS imports passed on Node 20. The package archive includes the three documentation
+guides and contains no local credentials or fixture data.

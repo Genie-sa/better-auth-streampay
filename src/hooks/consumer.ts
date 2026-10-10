@@ -3,6 +3,7 @@ import type { User } from "better-auth";
 import { APIError } from "better-auth/api";
 import type { StreamPayOptions } from "../types";
 import {
+	assertConsumerUnclaimed,
 	isDuplicateConsumerError,
 	isNotFoundError,
 	resolveDuplicateConsumer,
@@ -16,24 +17,6 @@ export type StreamPayHookContext = StreamPayLoggerContext;
 
 const isAnonymous = (user: User | Partial<User>): boolean =>
 	"isAnonymous" in user && user.isAnonymous === true;
-
-type StreamPayMutableHookContext = StreamPayHookContext & {
-	context: {
-		internalAdapter: {
-			updateUser: (userId: string, data: Record<string, unknown>) => Promise<unknown>;
-		};
-	};
-};
-
-function hasInternalAdapter(ctx: StreamPayHookContext): ctx is StreamPayMutableHookContext {
-	return (
-		"internalAdapter" in ctx.context &&
-		ctx.context.internalAdapter !== null &&
-		typeof ctx.context.internalAdapter === "object" &&
-		"updateUser" in ctx.context.internalAdapter &&
-		typeof ctx.context.internalAdapter.updateUser === "function"
-	);
-}
 
 export const onBeforeUserCreate =
 	(options: StreamPayOptions) =>
@@ -77,6 +60,7 @@ export const onBeforeUserCreate =
 			if (isDuplicateConsumerError(err)) {
 				const reusedId = await resolveDuplicateConsumer(options, createPayload, context);
 				if (reusedId) {
+					await assertConsumerUnclaimed(context, reusedId);
 					return { data: { streampayConsumerId: reusedId } };
 				}
 			}
@@ -140,10 +124,15 @@ export const onUserUpdate =
 				getLogger(context).error(
 					`consumer ${sessionUser.streampayConsumerId} not found for user=${sessionUser.id}; clearing stale link for re-provisioning.`,
 				);
-				if (hasInternalAdapter(context)) {
+				if (typeof context.context.adapter?.update === "function") {
 					try {
-						await context.context.internalAdapter.updateUser(sessionUser.id, {
-							streampayConsumerId: null,
+						await context.context.adapter.update({
+							model: "user",
+							where: [
+								{ field: "id", value: sessionUser.id },
+								{ field: "streampayConsumerId", value: sessionUser.streampayConsumerId },
+							],
+							update: { streampayConsumerId: null },
 						});
 					} catch (clearErr: unknown) {
 						getLogger(context).error(
