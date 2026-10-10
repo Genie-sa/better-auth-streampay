@@ -6,7 +6,7 @@ import { getLogger } from "../../utils/logger";
 import type { StreamPayWebhookPayload } from "../../webhooks/events";
 import { isKnownStreamPayWebhookPayload, isStreamPayWebhookEnvelope } from "../../webhooks/events";
 import { buildSubscriptionEndpoints } from "./endpoints";
-import { createPlanResolver, validatePlansShape } from "./plans";
+import { resolvePlans, validatePlansShape } from "./plans";
 import { subscriptionTable, webhookEventTable } from "./schema";
 import { SUBSCRIPTION_STATUSES } from "./status";
 import {
@@ -97,7 +97,7 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 	const dedupeEnabled = subsOptions.enableWebhookEventTable !== false;
 
 	return (options: StreamPayOptions, registry?: StreamPayPluginRegistry) => {
-		const resolvePlans = createPlanResolver(subsOptions.plans);
+		const plansRef = () => resolvePlans(subsOptions.plans);
 
 		if (registry) {
 			registry.subscriptionWebhookSync = async (
@@ -108,7 +108,7 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 				const syncCtx: SyncContext = {
 					context: ctx.context as SyncContext["context"],
 				};
-				const plans = await resolvePlans();
+				const plans = await plansRef();
 				try {
 					await syncWebhookPayload(syncCtx, payload, options.client, plans, subsOptions, {
 						dedupe: dedupeEnabled,
@@ -172,7 +172,7 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 						});
 					}
 					const payload = parsedPayload;
-					const plans = await resolvePlans();
+					const plans = await plansRef();
 					const claimed = await claimWebhookEventForReplay(syncCtx, row);
 					if (!claimed?.lockedBy) {
 						throw new APIError("CONFLICT", {
@@ -213,7 +213,7 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 		};
 
 		return {
-			endpoints: buildSubscriptionEndpoints(options, subsOptions, resolvePlans),
+			endpoints: buildSubscriptionEndpoints(options, subsOptions, plansRef),
 			schema,
 		};
 	};

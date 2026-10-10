@@ -135,29 +135,10 @@ function buildIndex(list: readonly StreamPayPlanLike[]): ResolvedPlans {
 	return { list, byName };
 }
 
-export function createPlanResolver(plans: PlansInput | undefined): () => Promise<ResolvedPlans> {
-	let cached: ResolvedPlans | null = null;
-	let inFlight: Promise<ResolvedPlans> | null = null;
-
-	return async function getPlans(): Promise<ResolvedPlans> {
-		if (cached) return cached;
-		if (inFlight) return inFlight;
-		if (!plans) throw new TypeError("subscriptions(): `plans` is required.");
-
-		inFlight = (async () => {
-			const list = typeof plans === "function" ? await plans() : plans;
-			validatePlansShape(list);
-			const resolved = buildIndex(list);
-			if (typeof plans !== "function") cached = resolved;
-			return resolved;
-		})();
-
-		try {
-			return await inFlight;
-		} finally {
-			inFlight = null;
-		}
-	};
+export async function resolvePlans(plans: PlansInput): Promise<ResolvedPlans> {
+	const list = typeof plans === "function" ? await plans() : plans;
+	validatePlansShape(list);
+	return buildIndex(list);
 }
 
 export type FeatureKey<P> = P extends { limits?: infer L }
