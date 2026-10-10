@@ -29,3 +29,7 @@ offsets and reject unsafe integers and non-finite checkout metadata under both s
 Protect consumer identity from callback overrides, condition admin consumer deletion on its current
 local owner, and safely decode discarded webhook IDs. Map server-resolved checkout to POST.
 Register all supported events in the staging demo and accept checkout redirect query parameters.
+
+Add an optional paginated freeze-history REST adapter for SDK 1.1.3. Cancellation and unfreeze
+search later pages with progress checks and a bounded page count; configure the adapter to
+resolve freezes beyond the SDK's first page.

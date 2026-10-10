@@ -8,6 +8,8 @@ import { getMigrations } from "better-auth/db/migration";
 import { toNodeHandler } from "better-auth/node";
 import { portal, streampay, subscriptions, webhooks } from "../../dist/index.js";
 
+import { listSubscriptionFreezes } from "./freeze-pages.mjs";
+
 const directory = fileURLToPath(new URL(".data/", import.meta.url));
 await mkdir(directory, { recursive: true, mode: 0o700 });
 const client = StreamSDK.init(process.env.STREAMPAY_API_KEY, {
@@ -63,7 +65,7 @@ const options = {
 						return response.json();
 					},
 				}),
-				subscriptions({ plans }),
+				subscriptions({ plans, listSubscriptionFreezes }),
 				webhooks({
 					secret: process.env.STREAMPAY_WEBHOOK_SECRET,
 					deduplicate: true,

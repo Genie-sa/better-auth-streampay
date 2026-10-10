@@ -1,5 +1,6 @@
 import type {
 	CreatePaymentLinkDto,
+	FreezeSubscriptionBase,
 	FreezeSubscriptionCreateRequest,
 	SubscriptionCancel,
 	SubscriptionDetailed,
@@ -21,6 +22,7 @@ import {
 import { deleteReservedSubscription, resumeOrReserveCheckoutSlot } from "./checkout-reservation";
 import {
 	configuredPlanForSubscription,
+	findSubscriptionFreeze,
 	isAlreadyCanceledFreezeError,
 	subscriptionCouponIds,
 	subscriptionItemsForUpdate,
@@ -1050,8 +1052,7 @@ export function buildSubscriptionEndpoints(
 
 				const nowMs = Date.now();
 				try {
-					const freezes = await client.listSubscriptionFreezes(row.streampaySubscriptionId);
-					const isActiveFreeze = (freeze: NonNullable<typeof freezes.data>[number]) => {
+					const isActiveFreeze = (freeze: FreezeSubscriptionBase) => {
 						if (!freeze.id || !freeze.freeze_start_datetime) return false;
 						const start = parseDate(freeze.freeze_start_datetime)?.getTime();
 						const end = freeze.freeze_end_datetime
@@ -1059,8 +1060,14 @@ export function buildSubscriptionEndpoints(
 							: Number.POSITIVE_INFINITY;
 						return start !== undefined && end !== undefined && start <= nowMs && nowMs < end;
 					};
-					let active = freezes.data?.find(isActiveFreeze);
-					if (!active && freezes.pagination?.has_next_page) {
+					const result = await findSubscriptionFreeze(
+						client,
+						subsOptions,
+						row.streampaySubscriptionId,
+						isActiveFreeze,
+					);
+					let active = result.freeze;
+					if (!active && result.hasMore) {
 						const stream = await client.getSubscription(row.streampaySubscriptionId);
 						if (
 							stream.status === "FROZEN" &&
@@ -1125,9 +1132,14 @@ export function buildSubscriptionEndpoints(
 				);
 
 				try {
-					const freezes = await client.listSubscriptionFreezes(row.streampaySubscriptionId);
-					if (!freezes.data?.some((freeze) => freeze.id === ctx.body.freezeId)) {
-						if (freezes.pagination?.has_next_page) {
+					const result = await findSubscriptionFreeze(
+						client,
+						subsOptions,
+						row.streampaySubscriptionId,
+						(freeze) => freeze.id === ctx.body.freezeId,
+					);
+					if (!result.freeze) {
+						if (result.hasMore) {
 							throw new APIError("CONFLICT", {
 								code: $ERROR_CODES.SUBSCRIPTION_INVALID_STATE.code,
 								message:

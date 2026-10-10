@@ -72,9 +72,24 @@ remain idempotent; these checks do not establish zero bugs.
 
 ## Remaining limits
 
-SDK 1.1.3 does not expose pagination arguments for subscription freeze history. The plugin
-uses the authoritative latest freeze when possible and returns a conflict when cancellation
-cannot safely resolve a freeze hidden on later pages. It does not silently report success.
+SDK 1.1.3 does not expose pagination arguments for subscription freeze history. The plugin now
+accepts a server-side `subscriptions({ listSubscriptionFreezes })` REST adapter to traverse pages
+for cancellation and unfreeze. The demo configures it. Without the adapter, SDK-only integrations
+retain the authoritative latest-freeze fallback and 409 when later pages cannot be resolved safely.
+Live isolated plugin/API testing with one item per page canceled the scheduled freeze on page 5,
+returned reused success on repeat, and unfroze the active freeze on page 6. The fixture returned
+to ACTIVE with cancellation scheduled at period end.
+
+Traversal rejects malformed/nonadvancing pages and stops after 100 pages; it never reports
+absence after a partial or failed read.
+
+| Freeze pagination risk | Protection |
+| --- | --- |
+| Later-page freeze is missed | Cancellation and unfreeze regressions find a target on page two. |
+| Missing target falsely reported canceled after failed read | Later-page failures reject both actions without provider mutation. |
+| Repeated or malformed pages | Invalid metadata/data, empty advancing pages and repeated IDs return 409. |
+| Unbounded history traversal | A 100-page ceiling rejects continued history without mutation. |
+| Foreign subscription leaks to REST callback | Ownership denial happens before the callback. |
 
 Natural renewals, future scheduled transitions, every hosted-portal permission combination,
 every payment method/currency, and every third-party database adapter have not been verified

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type {
 	CreatePaymentLinkDto,
 	CurrencyCode,
+	FreezeListResponse,
 	SubscriptionDetailed,
 } from "@streamsdk/typescript";
 import type { GenericEndpointContext } from "better-auth";
@@ -169,6 +170,12 @@ export function subscriptionSlotKey(
 
 interface SubscriptionsOptionsBase extends SubscriptionCallbacks {
 	plans: PlansInput;
+
+	/** Paginated REST adapter for SDK versions that cannot pass freeze query parameters. */
+	listSubscriptionFreezes?: (
+		subscriptionId: string,
+		params: { page: number; limit: number },
+	) => Promise<FreezeListResponse>;
 
 	authorizeReference?: (
 		data: AuthorizeReferenceContext,

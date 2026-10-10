@@ -1,9 +1,15 @@
-import type { SubscriptionDetailed, SubscriptionUpdate } from "@streamsdk/typescript";
+import type {
+	FreezeSubscriptionBase,
+	SubscriptionDetailed,
+	SubscriptionUpdate,
+} from "@streamsdk/typescript";
 import { APIError } from "better-auth/api";
 import { $ERROR_CODES } from "../../error-codes";
+import type { StreamPayClient } from "../../types";
 import { readEnvelope, readSdkErrorFields } from "../../utils/error-envelope";
 import type { ResolvedPlans } from "./plans";
 import { subscriptionItemProductId } from "./reconcile";
+import type { SubscriptionsOptions } from "./types";
 
 export function isAlreadyCanceledFreezeError(err: unknown): boolean {
 	const sdkError = readSdkErrorFields(err);
@@ -91,4 +97,53 @@ export function configuredPlanForSubscription(
 		);
 	}
 	return matches[0];
+}
+
+export async function findSubscriptionFreeze(
+	client: StreamPayClient,
+	options: SubscriptionsOptions,
+	subscriptionId: string,
+	matches: (freeze: FreezeSubscriptionBase) => boolean,
+): Promise<{ freeze: FreezeSubscriptionBase | undefined; hasMore: boolean }> {
+	const listPage = options.listSubscriptionFreezes;
+	if (!listPage) {
+		const response = await client.listSubscriptionFreezes(subscriptionId);
+		return {
+			freeze: response.data?.find(matches),
+			hasMore: response.pagination?.has_next_page ?? false,
+		};
+	}
+	const seenIds = new Set<string>();
+	for (let page = 1; page <= 100; page++) {
+		const response = await listPage(subscriptionId, { page, limit: 100 });
+		const pagination = response.pagination;
+		if (
+			!Array.isArray(response.data) ||
+			!pagination ||
+			pagination.current_page !== page ||
+			typeof pagination.has_next_page !== "boolean"
+		) {
+			throw freezePaginationConflict("StreamPay returned invalid freeze pagination.");
+		}
+		let advanced = false;
+		for (const freeze of response.data) {
+			if (freeze.id && !seenIds.has(freeze.id)) {
+				seenIds.add(freeze.id);
+				advanced = true;
+			}
+		}
+		if (!advanced && (pagination.has_next_page || response.data.length > 0)) {
+			throw freezePaginationConflict("StreamPay freeze pagination returned no new entries.");
+		}
+		const freeze = response.data.find(matches);
+		if (freeze || !pagination.has_next_page) return { freeze, hasMore: false };
+	}
+	throw freezePaginationConflict("StreamPay freeze pagination exceeded 100 pages.");
+}
+
+function freezePaginationConflict(message: string): APIError {
+	return new APIError("CONFLICT", {
+		code: $ERROR_CODES.SUBSCRIPTION_INVALID_STATE.code,
+		message,
+	});
 }

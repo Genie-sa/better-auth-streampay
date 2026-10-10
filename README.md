@@ -416,6 +416,44 @@ await authClient.subscription.freeze.cancel({
 });
 ```
 
+SDK 1.1.3 cannot request later freeze pages. Configure `listSubscriptionFreezes` on the
+server to enable complete freeze lookup for cancellation and unfreezing:
+
+```ts
+import { StreamSDKError } from "@streamsdk/typescript";
+
+subscriptions({
+  plans,
+  listSubscriptionFreezes: async (subscriptionId, { page, limit }) => {
+    const url = new URL(
+      `/api/v2/subscriptions/${encodeURIComponent(subscriptionId)}/freeze`,
+      process.env.STREAMPAY_BASE_URL!,
+    );
+    url.search = new URLSearchParams({
+      page: String(page), limit: String(limit),
+      sort_field: "created_at", sort_direction: "asc",
+    }).toString();
+    const response = await fetch(url, {
+      headers: { "x-api-key": process.env.STREAMPAY_API_KEY! },
+      signal: AbortSignal.timeout(15000),
+    });
+    const body = await response.json();
+    if (!response.ok) {
+      throw new StreamSDKError("Freeze history request failed", {
+        status: response.status, body,
+      });
+    }
+    return body;
+  },
+});
+```
+
+The callback receives only an authorized subscription ID. Return the API's complete page
+response, including pagination. The plugin requests up to 100 entries per page and searches
+up to 100 pages, stopping when it finds the freeze. Invalid or nonadvancing pages return 409;
+API failures propagate without reporting cancellation. Without this callback, the plugin uses
+the SDK's first page and retains the safe latest-freeze fallback or 409 for unresolved history.
+
 ### Read access and limits
 
 ```ts
