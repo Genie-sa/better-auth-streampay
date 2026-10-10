@@ -192,6 +192,7 @@ export function createMockSubscriptionRow(overrides: Partial<Subscription> = {})
 		periodStart: overrides.periodStart ?? null,
 		periodEnd: overrides.periodEnd ?? null,
 		currentCycleNumber: overrides.currentCycleNumber ?? null,
+		renewalCallbackEventId: overrides.renewalCallbackEventId ?? null,
 		trialStart: overrides.trialStart ?? null,
 		trialEnd: overrides.trialEnd ?? null,
 		cancelAtPeriodEnd: overrides.cancelAtPeriodEnd ?? false,

@@ -22,6 +22,7 @@ export interface WebhookHandlers {
 	onPaymentFailed?: WebhookHandler<"PAYMENT_FAILED", "PAYMENT">;
 	onPaymentCanceled?: WebhookHandler<"PAYMENT_CANCELED", "PAYMENT">;
 	onPaymentRefunded?: WebhookHandler<"PAYMENT_REFUNDED", "PAYMENT">;
+	onPaymentPartiallyRefunded?: WebhookHandler<"PAYMENT_PARTIALLY_REFUNDED", "PAYMENT">;
 	onPaymentMarkedAsPaid?: WebhookHandler<"PAYMENT_MARKED_AS_PAID", "PAYMENT">;
 
 	onInvoiceCreated?: WebhookHandler<"INVOICE_CREATED", "INVOICE">;
@@ -39,6 +40,10 @@ export interface WebhookHandlers {
 	onSubscriptionFrozen?: WebhookHandler<"SUBSCRIPTION_FROZEN", "SUBSCRIPTION">;
 	onSubscriptionCycleRenewalFailed?: WebhookHandler<
 		"SUBSCRIPTION_CYCLE_RENEWAL_FAILED",
+		"SUBSCRIPTION"
+	>;
+	onSubscriptionCycleRenewedSuccessfully?: WebhookHandler<
+		"SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY",
 		"SUBSCRIPTION"
 	>;
 	onSubscriptionCancelAtPeriodEnd?: WebhookHandler<
@@ -87,6 +92,9 @@ export async function dispatchWebhook(
 		case "PAYMENT_REFUNDED":
 			await handlers.onPaymentRefunded?.(payload);
 			return;
+		case "PAYMENT_PARTIALLY_REFUNDED":
+			await handlers.onPaymentPartiallyRefunded?.(payload);
+			return;
 		case "PAYMENT_MARKED_AS_PAID":
 			await handlers.onPaymentMarkedAsPaid?.(payload);
 			return;
@@ -130,6 +138,9 @@ export async function dispatchWebhook(
 			return;
 		case "SUBSCRIPTION_CYCLE_RENEWAL_FAILED":
 			await handlers.onSubscriptionCycleRenewalFailed?.(payload);
+			return;
+		case "SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY":
+			await handlers.onSubscriptionCycleRenewedSuccessfully?.(payload);
 			return;
 		case "SUBSCRIPTION_CANCEL_AT_PERIOD_END":
 			await handlers.onSubscriptionCancelAtPeriodEnd?.(payload);

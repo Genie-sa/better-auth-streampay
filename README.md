@@ -29,7 +29,7 @@ pnpm add better-auth-streampay @streamsdk/typescript
 
 Required versions:
 
-- `better-auth ^1.5.0`
+- `better-auth ^1.6.0`
 - `@streamsdk/typescript ^1.1.3`
 - `zod ^3.24.0 || ^4.0.0`
 
@@ -103,6 +103,26 @@ npx auth@latest generate --config path/to/auth.ts
 Review the generated schema, then use your normal migration process. The plugin declares the
 schema but never changes your database at runtime. For an existing subscription table, backfill
 `seats` to `1` in the same migration.
+
+Add `subscription.catalogMapped` with a default of `true` before deploying this version.
+Better Auth 1.6's migration generator does not apply static defaults to added columns. Review
+and backfill the column explicitly. For PostgreSQL with the default table name:
+
+```sql
+ALTER TABLE subscription ADD COLUMN IF NOT EXISTS "catalogMapped" boolean DEFAULT true;
+ALTER TABLE subscription ALTER COLUMN "catalogMapped" SET DEFAULT true;
+UPDATE subscription SET "catalogMapped" = true WHERE "catalogMapped" IS NULL;
+ALTER TABLE subscription ADD COLUMN IF NOT EXISTS "renewalCallbackEventId" text;
+```
+
+Use your configured table name and your database's boolean syntax when they differ. The column
+remains nullable for rolling migrations; legacy null values preserve existing access until
+reconciliation provides a catalog decision. Better Auth 1.6.0 is the minimum because 1.5's built-in
+SQL adapter handles null comparisons incorrectly, breaking ungrouped reads and released leases.
+
+Reconciliation sets it to `false` when Stream's current products do not match a configured plan;
+billing details remain visible, but features and limits deny access. Dynamic plan factories
+resolve on each resolution.
 
 `streampayConsumerId` is unique. Before applying the generated unique index to an existing
 database, resolve any duplicate non-null consumer IDs. Checkout fails closed when a consumer link
@@ -230,17 +250,63 @@ storefront has a different origin.
 
 ## Billing portal
 
-`portal()` adds three signed-in user actions:
+`portal()` adds signed-in user actions:
 
 - `state`
 - `subscriptions`
 - `invoices`
+- `portal.session` when hosted session creation is configured
 
 ```ts
 const state = await authClient.consumer.state();
 const subscriptions = await authClient.consumer.subscriptions.list();
 const invoices = await authClient.consumer.invoices.list();
+const nextInvoices = await authClient.consumer.invoices.list({ query: { page: 2, size: 10 } });
 ```
+
+Invoice and subscription lists return Stream's `pagination` alongside `data`. The consumer filter
+always comes from the signed-in account. `page` must be a positive safe integer; `size` is 1–100.
+The plugin translates `size` to Stream's documented `limit` query parameter; SDK 1.1.3's
+`size` parameter is ignored by the current API.
+
+To open [Stream's hosted customer portal](https://docs.streampay.sa/customer-portal/), configure a
+server-side session creator. Stream SDK 1.1.3 does not expose this endpoint yet:
+
+```ts
+portal({
+  createSession: async (input) => {
+    const response = await fetch(`${process.env.STREAMPAY_BASE_URL}/api/v2/consumer_portal/sessions`, {
+      method: "POST",
+      headers: {
+        "x-api-key": process.env.STREAMPAY_API_KEY!,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(input),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) {
+      throw Object.assign(new Error("Portal session creation failed."), { status: response.status });
+    }
+    return response.json();
+  },
+});
+
+// Frontend, using streampayClient():
+const { data, error } = await authClient.consumer.portal.session();
+if (error) throw new Error(error.message);
+if (data) window.location.assign(data.url);
+```
+
+`POST /consumer/portal/session` resolves the consumer from the session and ignores consumer IDs
+in the request. Missing consumers or configuration return 404; anonymous sessions are rejected.
+Each request creates a fresh URL, requires HTTPS, and sends `Cache-Control: no-store`. Treat the
+single-use URL as a credential: do not log, persist, or share it. Keep API keys on the server.
+
+Enable customer permissions and branding in Stream's dashboard. Product switches require switch
+groups; add-ons require catalog mappings. Stream controls proration and payment confirmation.
+Keep webhook reconciliation enabled so portal changes update local subscription access. This
+initial integration opens the consumer's portal; subscription deep links are not exposed. The
+current OpenAPI omits the guide's `return_url` field, so the plugin does not send it.
 
 ## Subscriptions
 
@@ -350,6 +416,44 @@ await authClient.subscription.freeze.cancel({
 });
 ```
 
+SDK 1.1.3 cannot request later freeze pages. Configure `listSubscriptionFreezes` on the
+server to enable complete freeze lookup for cancellation and unfreezing:
+
+```ts
+import { StreamSDKError } from "@streamsdk/typescript";
+
+subscriptions({
+  plans,
+  listSubscriptionFreezes: async (subscriptionId, { page, limit }) => {
+    const url = new URL(
+      `/api/v2/subscriptions/${encodeURIComponent(subscriptionId)}/freeze`,
+      process.env.STREAMPAY_BASE_URL!,
+    );
+    url.search = new URLSearchParams({
+      page: String(page), limit: String(limit),
+      sort_field: "created_at", sort_direction: "asc",
+    }).toString();
+    const response = await fetch(url, {
+      headers: { "x-api-key": process.env.STREAMPAY_API_KEY! },
+      signal: AbortSignal.timeout(15000),
+    });
+    const body = await response.json();
+    if (!response.ok) {
+      throw new StreamSDKError("Freeze history request failed", {
+        status: response.status, body,
+      });
+    }
+    return body;
+  },
+});
+```
+
+The callback receives only an authorized subscription ID. Return the API's complete page
+response, including pagination. The plugin requests up to 100 entries per page and searches
+up to 100 pages, stopping when it finds the freeze. Invalid or nonadvancing pages return 409;
+API failures propagate without reporting cancellation. Without this callback, the plugin uses
+the SDK's first page and retains the safe latest-freeze fallback or 409 for unresolved history.
+
 ### Read access and limits
 
 ```ts
@@ -457,6 +561,7 @@ Then add the handlers you need:
 ```ts
 webhooks({
   secret: process.env.STREAMPAY_WEBHOOK_SECRET!,
+  deduplicate: true,
 
   onPaymentSucceeded: async (event) => {},
   onPaymentFailed: async (event) => {},
@@ -473,6 +578,22 @@ The plugin:
 - deduplicates subscription sync and lifecycle callbacks
 - retries temporary failures
 - stores failed subscription events for admin replay
+
+`deduplicate: true` also persists generic handler deliveries in `streampayWebhookEvent`, including
+unknown event envelopes. Apply the inbox table migration before enabling it. Handler receipts use
+the `handlers:` event ID prefix and support the existing authenticated admin replay endpoint.
+The default is `false` to preserve existing installations that have no inbox table.
+
+Verified payloads are persisted when processing is claimed, so an interrupted delivery can be
+recovered after its lease expires. Callbacks must still be idempotent: a crash after an external
+side effect, or failure of a later callback, can repeat earlier work on retry. Inbox deduplication
+does not provide exactly-once execution of external side effects.
+
+Typed handlers include `onPaymentPartiallyRefunded` and `onSubscriptionCycleRenewedSuccessfully`.
+Successful renewal events reconcile billing state and share renewal inference with completed
+invoices. The cycle update records its callback owner in `renewalCallbackEventId`; an interrupted
+owner can resume on replay, and competing events cannot take its pending callback. Apply this
+nullable column before deploying. External callback side effects still need idempotency.
 
 The StreamPay SDK does not export webhook payload types. This package provides checked event
 types based on StreamPay's documented payloads.
@@ -546,6 +667,55 @@ import {
   verifyWebhook,
 } from "better-auth-streampay";
 ```
+
+## Local staging demo
+
+The demo uses Node 22's SQLite support, real Better Auth sessions, and a Stream sandbox organization.
+It binds to `127.0.0.1:3100`; the tunnel exposes only signed webhook ingress. Credentials and local
+state are ignored by Git. It is a single-account test harness, not a deployable application.
+
+Copy `examples/demo/.env.example` to `.env.local` in the same directory, fill in sandbox credentials
+and the recurring starter product ID, and generate distinct random auth and webhook secrets.
+
+```bash
+pnpm build
+pnpm demo:setup
+pnpm demo
+# In another terminal:
+cloudflared tunnel --url http://localhost:3100 --no-autoupdate
+pnpm demo:setup https://YOUR-TUNNEL.trycloudflare.com
+```
+
+Open `http://localhost:3100`, create a local account, then run `pnpm demo:exercise`. The script
+creates a dedicated free trial with notifications disabled, and sends an explicitly synthetic
+signed event twice to correlate that fixture with the local account. Provider-created events
+arrive separately through the registered webhook. Creating a subscription directly through the
+Stream API does not include the plugin's checkout correlation metadata automatically.
+
+The setup command creates or updates only the webhook saved in the demo's state file and
+synchronizes its signing secret, including after rotation. When done,
+run `pnpm demo:cleanup` to cancel its trial and remove its webhook, then stop the server and tunnel.
+Cleanup also requests cancellation of a saved paid validation subscription, if present. Stream
+cancels active subscriptions at period end; cleanup retains their state files until cancellation
+completes. It retains the dedicated consumer and local database.
+
+Validation on 2026-10-10 used Better Auth 1.7.7 and Stream SDK 1.1.3. Tests also ran on Node
+20.19.0 and 24.21.0, and in an isolated Better Auth 1.6.0 / Zod 3.24 installation. PostgreSQL
+17 tests run against a temporary schema and cover concurrent claims, expired-lease replay,
+stale worker fencing, simultaneous renewal evidence, and migration/backfill of an existing row.
+
+```bash
+STREAMPAY_TEST_DATABASE_URL=postgres://USER:PASSWORD@localhost:5432/TEST_DATABASE pnpm test:postgres
+```
+
+Dependency builds are explicit in `pnpm-workspace.yaml`: esbuild is allowed; optional lefthook
+and MSW dependency scripts are disabled. The root prepare script installs the Git hooks.
+
+The PostgreSQL suite owns a randomly named schema and drops it afterward. CI runs it in a
+separate PostgreSQL service. Use a test database, not the application's staging or production database.
+
+See [staging validation](docs/staging-validation.md) for the live coverage, regression evidence,
+provider discrepancies and remaining limits.
 
 ## License
 

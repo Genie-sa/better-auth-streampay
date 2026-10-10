@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type {
 	CreatePaymentLinkDto,
 	CurrencyCode,
+	FreezeListResponse,
 	SubscriptionDetailed,
 } from "@streamsdk/typescript";
 import type { GenericEndpointContext } from "better-auth";
@@ -62,6 +63,8 @@ export interface Subscription {
 	streampayConsumerId: string | null;
 	streampayPaymentLinkId: string | null;
 	plan: string;
+	/** False when Stream's effective products cannot be mapped to a configured plan. */
+	catalogMapped?: boolean | null;
 	planVersion: string | null;
 	productId: string | null;
 	group: string | null;
@@ -78,6 +81,8 @@ export interface Subscription {
 	periodStart: Date | null;
 	periodEnd: Date | null;
 	currentCycleNumber: number | null;
+	/** Event that owns a projected cycle's pending renewal callback. */
+	renewalCallbackEventId?: string | null;
 	trialStart: Date | null;
 	trialEnd: Date | null;
 	cancelAtPeriodEnd: boolean;
@@ -165,6 +170,12 @@ export function subscriptionSlotKey(
 
 interface SubscriptionsOptionsBase extends SubscriptionCallbacks {
 	plans: PlansInput;
+
+	/** Paginated REST adapter for SDK versions that cannot pass freeze query parameters. */
+	listSubscriptionFreezes?: (
+		subscriptionId: string,
+		params: { page: number; limit: number },
+	) => Promise<FreezeListResponse>;
 
 	authorizeReference?: (
 		data: AuthorizeReferenceContext,

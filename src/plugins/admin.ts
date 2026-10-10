@@ -108,7 +108,7 @@ function forwardedBody<T extends object>() {
 
 const PaymentsListQuery = z
 	.object({
-		page: z.coerce.number().int().positive().optional(),
+		page: z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
 		size: z.coerce.number().int().positive().max(100).optional(),
 		invoice_id: z.string().uuid().optional(),
 	})
@@ -116,14 +116,14 @@ const PaymentsListQuery = z
 
 const PaginationOnlyQuery = z
 	.object({
-		page: z.coerce.number().int().positive().optional(),
+		page: z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
 		size: z.coerce.number().int().positive().max(100).optional(),
 	})
 	.passthrough();
 
 const ConsumersListQuery = z
 	.object({
-		page: z.coerce.number().int().positive().optional(),
+		page: z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
 		size: z.coerce.number().int().positive().max(100).optional(),
 		search_term: z.string().optional(),
 	})
@@ -172,9 +172,9 @@ function buildPaymentsEndpoints(client: StreamPayClient, adminOptions: AdminOpti
 			},
 			async (ctx) => {
 				await requireAdmin(ctx, adminOptions);
-				const params: { page?: number; size?: number; invoice_id?: string } = {};
+				const params: { page?: number; limit?: number; invoice_id?: string } = {};
 				if (ctx.query.page !== undefined) params.page = ctx.query.page;
-				if (ctx.query.size !== undefined) params.size = ctx.query.size;
+				if (ctx.query.size !== undefined) params.limit = ctx.query.size;
 				if (ctx.query.invoice_id !== undefined) params.invoice_id = ctx.query.invoice_id;
 				try {
 					const response = await client.listPayments(params);
@@ -283,9 +283,9 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 			},
 			async (ctx) => {
 				await requireAdmin(ctx, adminOptions);
-				const params: { page?: number; size?: number } = {};
+				const params: { page?: number; limit?: number } = {};
 				if (ctx.query.page !== undefined) params.page = ctx.query.page;
-				if (ctx.query.size !== undefined) params.size = ctx.query.size;
+				if (ctx.query.size !== undefined) params.limit = ctx.query.size;
 				try {
 					const response = await client.listSubscriptions(params);
 					return ctx.json(response);
@@ -484,9 +484,9 @@ function buildConsumersEndpoints(client: StreamPayClient, adminOptions: AdminOpt
 			},
 			async (ctx) => {
 				await requireAdmin(ctx, adminOptions);
-				const params: { page?: number; size?: number; search_term?: string } = {};
+				const params: { page?: number; limit?: number; search_term?: string } = {};
 				if (ctx.query.page !== undefined) params.page = ctx.query.page;
-				if (ctx.query.size !== undefined) params.size = ctx.query.size;
+				if (ctx.query.size !== undefined) params.limit = ctx.query.size;
 				if (ctx.query.search_term !== undefined) params.search_term = ctx.query.search_term;
 				try {
 					const response = await client.listConsumers(params);
@@ -553,20 +553,6 @@ function buildConsumersEndpoints(client: StreamPayClient, adminOptions: AdminOpt
 				await requireAdmin(ctx, adminOptions);
 				const consumerId = ctx.params.id;
 
-				let externalId: string | undefined;
-				try {
-					const consumer = await client.getConsumer(consumerId);
-					if (typeof consumer.external_id === "string" && consumer.external_id.length > 0) {
-						externalId = consumer.external_id;
-					}
-				} catch (err) {
-					toAPIError(
-						`StreamPay getConsumer failed for consumer=${consumerId}:`,
-						err,
-						getLogger(ctx),
-					);
-				}
-
 				try {
 					await client.deleteConsumer(consumerId);
 				} catch (err) {
@@ -579,16 +565,26 @@ function buildConsumersEndpoints(client: StreamPayClient, adminOptions: AdminOpt
 					}
 				}
 
-				if (externalId) {
-					try {
-						await ctx.context.internalAdapter.updateUser(externalId, {
-							streampayConsumerId: null,
+				try {
+					const adapter = getAdapter(ctx);
+					const user = await adapter.findOne<{ id: string }>({
+						model: "user",
+						where: [{ field: "streampayConsumerId", value: consumerId }],
+					});
+					if (user) {
+						await adapter.update({
+							model: "user",
+							update: { streampayConsumerId: null },
+							where: [
+								{ field: "id", value: user.id },
+								{ field: "streampayConsumerId", value: consumerId },
+							],
 						});
-					} catch (err: unknown) {
-						getLogger(ctx).error(
-							`StreamPay admin delete: link clear failed for user=${externalId} consumer=${consumerId}: ${formatStreamPayError(err)}`,
-						);
 					}
+				} catch (err: unknown) {
+					getLogger(ctx).error(
+						`StreamPay admin delete: link clear failed for consumer=${consumerId}: ${formatStreamPayError(err)}`,
+					);
 				}
 
 				return ctx.json({ deleted: true });
@@ -608,9 +604,9 @@ function buildInvoicesEndpoints(client: StreamPayClient, adminOptions: AdminOpti
 			},
 			async (ctx) => {
 				await requireAdmin(ctx, adminOptions);
-				const params: { page?: number; size?: number } = {};
+				const params: { page?: number; limit?: number } = {};
 				if (ctx.query.page !== undefined) params.page = ctx.query.page;
-				if (ctx.query.size !== undefined) params.size = ctx.query.size;
+				if (ctx.query.size !== undefined) params.limit = ctx.query.size;
 				try {
 					const response = await client.listInvoices(params);
 					return ctx.json(response);
@@ -673,9 +669,9 @@ function buildProductsEndpoints(client: StreamPayClient, adminOptions: AdminOpti
 			},
 			async (ctx) => {
 				await requireAdmin(ctx, adminOptions);
-				const params: { page?: number; size?: number } = {};
+				const params: { page?: number; limit?: number } = {};
 				if (ctx.query.page !== undefined) params.page = ctx.query.page;
-				if (ctx.query.size !== undefined) params.size = ctx.query.size;
+				if (ctx.query.size !== undefined) params.limit = ctx.query.size;
 				try {
 					const response = await client.listProducts(params);
 					return ctx.json(response);
@@ -784,9 +780,9 @@ function buildCouponsEndpoints(client: StreamPayClient, adminOptions: AdminOptio
 			},
 			async (ctx) => {
 				await requireAdmin(ctx, adminOptions);
-				const params: { page?: number; size?: number } = {};
+				const params: { page?: number; limit?: number } = {};
 				if (ctx.query.page !== undefined) params.page = ctx.query.page;
-				if (ctx.query.size !== undefined) params.size = ctx.query.size;
+				if (ctx.query.size !== undefined) params.limit = ctx.query.size;
 				try {
 					const response = await client.listCoupons(params);
 					return ctx.json(response);
@@ -872,9 +868,9 @@ function buildPaymentLinksEndpoints(client: StreamPayClient, adminOptions: Admin
 			},
 			async (ctx) => {
 				await requireAdmin(ctx, adminOptions);
-				const params: { page?: number; size?: number } = {};
+				const params: { page?: number; limit?: number } = {};
 				if (ctx.query.page !== undefined) params.page = ctx.query.page;
-				if (ctx.query.size !== undefined) params.size = ctx.query.size;
+				if (ctx.query.size !== undefined) params.limit = ctx.query.size;
 				try {
 					const response = await client.listPaymentLinks(params);
 					return ctx.json(response);
@@ -911,10 +907,18 @@ const WebhookEventsListQuery = z
 	.object({
 		status: z.enum(["pending", "completed", "dead_letter"]).optional(),
 		eventType: z.string().optional(),
-		page: z.coerce.number().int().positive().optional(),
+		page: z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
 		size: z.coerce.number().int().positive().max(100).optional(),
 	})
 	.passthrough();
+
+function decodeWebhookEventId(value: string): string {
+	try {
+		return decodeURIComponent(value);
+	} catch {
+		throw new APIError("BAD_REQUEST", { message: "Invalid webhook event identifier." });
+	}
+}
 
 function buildWebhookEventsEndpoints(
 	adminOptions: AdminOptions,
@@ -964,7 +968,7 @@ function buildWebhookEventsEndpoints(
 				const adapter = getAdapter(ctx);
 				const row = await adapter.findOne({
 					model: WEBHOOK_EVENT_MODEL,
-					where: [{ field: "eventId", value: ctx.params.eventId }],
+					where: [{ field: "eventId", value: decodeWebhookEventId(ctx.params.eventId) }],
 				});
 				if (!row) {
 					throw new APIError("NOT_FOUND", {
@@ -988,11 +992,14 @@ function buildWebhookEventsEndpoints(
 				if (!registry?.replayWebhookEvent) {
 					throw new APIError("BAD_REQUEST", {
 						message:
-							"Replay unavailable — `subscriptions()` plugin must be in `use` and `enableWebhookEventTable` left enabled.",
+							"Replay unavailable — enable the subscriptions webhook inbox or webhooks({ deduplicate: true }).",
 					});
 				}
 				try {
-					const result = await registry.replayWebhookEvent(ctx, ctx.params.eventId);
+					const result = await registry.replayWebhookEvent(
+						ctx,
+						decodeWebhookEventId(ctx.params.eventId),
+					);
 					return ctx.json(result);
 				} catch (err) {
 					if (err instanceof APIError) throw err;
@@ -1015,9 +1022,10 @@ function buildWebhookEventsEndpoints(
 			async (ctx) => {
 				await requireAdmin(ctx, adminOptions);
 				const adapter = getAdapter(ctx);
-				const row = await adapter.findOne<{ id: string }>({
+				const eventId = decodeWebhookEventId(ctx.params.eventId);
+				const row = await adapter.findOne<WebhookEventRow>({
 					model: WEBHOOK_EVENT_MODEL,
-					where: [{ field: "eventId", value: ctx.params.eventId }],
+					where: [{ field: "eventId", value: eventId }],
 				});
 				if (!row) {
 					throw new APIError("NOT_FOUND", {
@@ -1025,8 +1033,29 @@ function buildWebhookEventsEndpoints(
 						message: `Webhook event ${ctx.params.eventId} not found.`,
 					});
 				}
+				if (
+					registry?.subscriptionWebhookSync &&
+					!eventId.startsWith("handlers:") &&
+					(row.eventType === "INVOICE_COMPLETED" ||
+						row.eventType === "SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY")
+				) {
+					const subscription = await adapter.findOne<{ id: string }>({
+						model: "subscription",
+						where: [{ field: "renewalCallbackEventId", value: eventId }],
+					});
+					if (subscription) {
+						await adapter.update({
+							model: "subscription",
+							update: { renewalCallbackEventId: null },
+							where: [
+								{ field: "id", value: subscription.id },
+								{ field: "renewalCallbackEventId", value: eventId },
+							],
+						});
+					}
+				}
 				await markWebhookEventCompleted({ context: { adapter } }, row.id);
-				return ctx.json({ discarded: true, eventId: ctx.params.eventId });
+				return ctx.json({ discarded: true, eventId });
 			},
 		),
 	};

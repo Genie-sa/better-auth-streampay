@@ -63,6 +63,7 @@ applicable, or has not yet been confirmed upstream.
 | `streampayConsumerId` | nullable string, indexed, server-managed | Provider consumer UUID used for checkout and fallback reconciliation. Kept on the row even for non-user references. |
 | `streampayPaymentLinkId` | nullable string, unique, server-managed | Hosted-checkout correlation/recovery ID. Lets an idempotent upgrade return the existing URL and helps verify success reconciliation. |
 | `plan` | string, required | Stable application-facing plan name. Code should use this instead of a raw provider product ID. |
+| `catalogMapped` | nullable boolean, default `true`, server-managed | False when effective provider products cannot be mapped to the catalog; access is denied while billing diagnostics remain available. Backfill existing rows to true during migration. |
 | `planVersion` | nullable string | Optional catalog/config version snapshot for auditing which plan definition was active. |
 | `productId` | nullable string, indexed | Current configured StreamPay product UUID. Webhooks use it to infer `plan`; it may remain populated even if the plan is later removed from configuration. |
 | `group` | nullable string, indexed | Mutually exclusive plan family such as `main` or `workspace`. Combined with the reference to form the active slot. |
@@ -78,6 +79,7 @@ applicable, or has not yet been confirmed upstream.
 | `periodStart` | nullable date | Start of the current provider billing period. |
 | `periodEnd` | nullable date | End of the current provider billing period and usual effective time for a deferred change. |
 | `currentCycleNumber` | nullable number | Provider cycle counter; helps identify genuine renewals and avoid duplicate renewal callbacks. |
+| `renewalCallbackEventId` | nullable string, server-managed | Event that owns a pending renewal callback. Saved atomically with cycle advancement and cleared after delivery so replay can recover interrupted callbacks. |
 | `trialStart` | nullable date | Start of a known trial. Also records trial history for one-trial-per-group eligibility. |
 | `trialEnd` | nullable date | Provider trial end. |
 | `cancelAtPeriodEnd` | boolean, default `false` | Whether renewal is scheduled to stop after the current period. |

@@ -33,7 +33,10 @@ export async function deleteReservedSubscription(
 	try {
 		await adapter.delete({
 			model: SUBSCRIPTION_MODEL,
-			where: [{ field: "id", value: rowId }],
+			where: [
+				{ field: "id", value: rowId },
+				{ field: "status", value: "incomplete" },
+			],
 		});
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
@@ -93,11 +96,15 @@ export async function resumeOrReserveCheckoutSlot(args: {
 		if (recovery.kind === "recovered") {
 			return { kind: "recovered", row: reuseCandidate, url: recovery.url };
 		}
-		await adapter.update({
+		const released = await adapter.update({
 			model: SUBSCRIPTION_MODEL,
 			update: { status: "incomplete_expired", activeSlotKey: null, updatedAt: new Date() },
-			where: [{ field: "id", value: reuseCandidate.id }],
+			where: [
+				{ field: "id", value: reuseCandidate.id },
+				{ field: "status", value: "incomplete" },
+			],
 		});
+		if (!released) throw checkoutInProgressError();
 	}
 
 	const { data: reservationData, consumerId } = await args.createReservation();
@@ -144,6 +151,7 @@ export async function resumeOrReserveCheckoutSlot(args: {
 			update: { status: "incomplete_expired", activeSlotKey: null, updatedAt: new Date() },
 			where: [
 				{ field: "id", value: reserved.id },
+				{ field: "status", value: "incomplete" },
 				{ field: "activeSlotKey", value: activeSlotKey },
 			],
 		});

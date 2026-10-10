@@ -41,6 +41,12 @@ export const subscriptionTable = {
 				type: "string",
 				required: true,
 			},
+			catalogMapped: {
+				type: "boolean",
+				required: false,
+				defaultValue: true,
+				input: false,
+			},
 			planVersion: {
 				type: "string",
 				required: false,
@@ -109,6 +115,11 @@ export const subscriptionTable = {
 			currentCycleNumber: {
 				type: "number",
 				required: false,
+			},
+			renewalCallbackEventId: {
+				type: "string",
+				required: false,
+				input: false,
 			},
 			trialStart: {
 				type: "date",

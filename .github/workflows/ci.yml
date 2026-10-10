@@ -26,7 +26,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@a15d269cd4658e1107c09f1fabf4cbd7bd1f308a # v4.4.0
         with:
-          version: 10.13.1
+          version: 10.26.0
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -46,7 +46,7 @@ jobs:
         run: pnpm lint && pnpm typecheck && pnpm vitest run --exclude tests/live/**/*.test.ts --exclude tests/integration/**/*.test.ts && pnpm build && node -e 'import("./dist/index.js")' && node -e 'require("./dist/index.cjs")'
 
   minimum-peer-compatibility:
-    name: Better Auth 1.5 / Zod 3.24 compatibility
+    name: Better Auth 1.6.0 / Zod 3.24 compatibility
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -55,7 +55,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@a15d269cd4658e1107c09f1fabf4cbd7bd1f308a # v4.4.0
         with:
-          version: 10.13.1
+          version: 10.26.0
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -67,7 +67,38 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Install minimum supported peers
-        run: pnpm add --save-dev better-auth@1.5.0 zod@3.24.0 --lockfile=false
+        run: pnpm add --save-dev better-auth@1.6.0 zod@3.24.0 --lockfile=false
 
       - name: Verify compatibility
         run: pnpm typecheck && pnpm test && pnpm build
+
+  postgres:
+    name: PostgreSQL migrations and webhook claims
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: streampay_test
+          POSTGRES_PASSWORD: test-only-password
+          POSTGRES_DB: streampay_plugin_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U streampay_test -d streampay_plugin_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      STREAMPAY_TEST_DATABASE_URL: postgres://streampay_test:test-only-password@127.0.0.1:5432/streampay_plugin_test
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: pnpm/action-setup@a15d269cd4658e1107c09f1fabf4cbd7bd1f308a # v4.4.0
+        with:
+          version: 10.26.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:postgres

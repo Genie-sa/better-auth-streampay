@@ -55,11 +55,13 @@ export const onBeforeUserCreate =
 			: {};
 
 		const createPayload: ConsumerCreate = {
-			name: user.name || user.email,
-			email: user.email,
 			consumer_type: "INDIVIDUAL",
 			...extras,
+			name: user.name || user.email,
+			email: user.email,
 		};
+		// The auth user ID is assigned after insertion, then linked by the after-create hook.
+		delete createPayload.external_id;
 
 		try {
 			const consumer = await options.client.createConsumer(createPayload);

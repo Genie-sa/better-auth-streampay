@@ -48,7 +48,42 @@ export function projectSubscriptionAgainstExisting(
 	existing: Subscription,
 	stream: SubscriptionDetailed,
 ): Partial<Subscription> {
-	return reconcileProjectionAgainstExisting(existing, projectSubscriptionFields(stream));
+	return reconcileProjectionAgainstExisting(existing, projectSubscriptionFields(stream, existing));
+}
+
+export async function persistSubscriptionProjection(
+	adapter: PluginAdapter,
+	existing: Subscription,
+	projection: Partial<Subscription>,
+	log: { warn: (message: string) => void },
+	source: string,
+): Promise<Subscription | null> {
+	const stale =
+		existing.providerUpdatedAt instanceof Date &&
+		projection.providerUpdatedAt instanceof Date &&
+		projection.providerUpdatedAt.getTime() < existing.providerUpdatedAt.getTime();
+	if (!stale) {
+		const updated = await adapter.update<Subscription>({
+			model: SUBSCRIPTION_MODEL,
+			update: projection,
+			where: [
+				{ field: "id", value: existing.id },
+				{ field: "providerUpdatedAt", value: existing.providerUpdatedAt ?? null },
+				{ field: "streampaySubscriptionId", value: existing.streampaySubscriptionId ?? null },
+				{ field: "streampayConsumerId", value: existing.streampayConsumerId ?? null },
+				{ field: "status", value: existing.status },
+				{ field: "billingStatus", value: existing.billingStatus },
+			],
+		});
+		if (updated) return updated;
+	}
+	log.warn(
+		`${source}: retained newer local subscription state for row=${existing.id}. The provider action is not rolled back.`,
+	);
+	return adapter.findOne<Subscription>({
+		model: SUBSCRIPTION_MODEL,
+		where: [{ field: "id", value: existing.id }],
+	});
 }
 
 export async function applySubscriptionProjection(
@@ -65,11 +100,13 @@ export async function applySubscriptionProjection(
 			where: [{ field: "streampaySubscriptionId", value: streampaySubscriptionId }],
 		});
 		if (!existing) return;
-		await adapter.update({
-			model: SUBSCRIPTION_MODEL,
-			update: projectSubscriptionAgainstExisting(existing, stream),
-			where: [{ field: "id", value: existing.id }],
-		});
+		await persistSubscriptionProjection(
+			adapter,
+			existing,
+			projectSubscriptionAgainstExisting(existing, stream),
+			log,
+			source,
+		);
 	} catch (err: unknown) {
 		const message = err instanceof Error ? err.message : String(err);
 		log.warn(
@@ -101,7 +138,10 @@ export async function syncSubscriptionFromUpstream(
 	await applySubscriptionProjection(adapter, stream, log, source);
 }
 
-export function projectSubscriptionFields(sub: SubscriptionDetailed): Partial<Subscription> {
+export function projectSubscriptionFields(
+	sub: SubscriptionDetailed,
+	existing?: Pick<Subscription, "trialStart"> | null,
+): Partial<Subscription> {
 	const status = toLocalStatus(sub.status);
 	const terminal = isTerminalSubscriptionStatus(status);
 	const periodStart = parseDate(sub.current_period_start);
@@ -125,7 +165,10 @@ export function projectSubscriptionFields(sub: SubscriptionDetailed): Partial<Su
 		periodStart,
 		periodEnd,
 		currentCycleNumber: sub.current_cycle_number ?? null,
-		trialStart: sub.trial_end ? (parseDate(sub.started_at) ?? periodStart) : null,
+		trialStart:
+			(sub.trial_end ? (parseDate(sub.started_at) ?? periodStart) : null) ??
+			existing?.trialStart ??
+			null,
 		trialEnd: parseDate(sub.trial_end),
 		cancelAtPeriodEnd: Boolean(sub.cancel_at_period_end),
 		cancelAt: sub.cancel_at_period_end ? periodEnd : null,
@@ -239,6 +282,7 @@ export function projectPlanFields(
 	Pick<
 		Subscription,
 		| "plan"
+		| "catalogMapped"
 		| "planVersion"
 		| "productId"
 		| "group"
@@ -277,6 +321,7 @@ export function projectPlanFields(
 		Boolean(inferredPendingPlan) &&
 		(inferredPendingPlan !== currentPlan || pendingProductId !== currentProductId);
 	return {
+		catalogMapped: Boolean(currentPlan),
 		...(currentPlan
 			? {
 					plan: currentPlan,

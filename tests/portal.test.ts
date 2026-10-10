@@ -117,6 +117,13 @@ describe("portal plugin", () => {
 			expect(result).toMatchObject({ hasConsumer: true });
 		});
 
+		it("translates consumer lookup failures as well as direct consumer failures", async () => {
+			mockClient.listConsumers.mockRejectedValue(mockApiError(429, { message: "rate limited" }));
+			const ctx = createMockContext({ user: createMockUser({ streampayConsumerId: null }) });
+			await expect(handler(ctx)).rejects.toMatchObject({ code: "TOO_MANY_REQUESTS" });
+			expect(ctx.context.logger.error).toHaveBeenCalled();
+		});
+
 		it("translates SDK errors into INTERNAL_SERVER_ERROR", async () => {
 			mockClient.getConsumer.mockRejectedValue(mockApiError(500, { error: { message: "down" } }));
 			const ctx = createMockContext({
@@ -161,7 +168,7 @@ describe("portal plugin", () => {
 			expect(mockClient.listSubscriptions).toHaveBeenCalledWith({
 				organization_consumer_id: LINKED_CONSUMER,
 				page: 1,
-				size: 100,
+				limit: 100,
 			});
 			expect(result).toMatchObject({ hasConsumer: true });
 			expect(result.data).toHaveLength(1);
@@ -191,7 +198,7 @@ describe("portal plugin", () => {
 			await handler2(ctx);
 
 			expect(mockClient.listSubscriptions).toHaveBeenCalledWith(
-				expect.objectContaining({ size: 100 }),
+				expect.objectContaining({ limit: 100 }),
 			);
 		});
 
@@ -239,7 +246,7 @@ describe("portal plugin", () => {
 			expect(mockClient.listInvoices).toHaveBeenCalledWith({
 				organization_consumer_id: LINKED_CONSUMER,
 				page: 1,
-				size: 100,
+				limit: 100,
 			});
 			expect(result.data).toHaveLength(1);
 			expect(result.data[0]?.id).toBe("inv_mine");

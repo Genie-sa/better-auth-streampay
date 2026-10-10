@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolvePlans, validatePlansShape } from "../src/plugins/subscriptions/plans";
+import { checkLimit, resolvePlans, validatePlansShape } from "../src/plugins/subscriptions/plans";
 
 describe("resolvePlans", () => {
 	it("resolves function-backed plans again after the previous resolution completes", async () => {
@@ -216,6 +216,30 @@ describe("validatePlansShape", () => {
 });
 
 describe("hasFeature / checkLimit", () => {
+	it.each([
+		NaN,
+		Infinity,
+		-Infinity,
+		-1,
+		0.5,
+		Number.MAX_SAFE_INTEGER + 1,
+	])("rejects invalid usage count %s instead of treating it as zero", (requested) => {
+		const plan = {
+			name: "pro",
+			productId: "p",
+			priceInSmallestUnit: 0,
+			billingInterval: "MONTH" as const,
+			limits: { seats: 10 },
+		};
+		expect(
+			checkLimit(
+				{ status: "active" } as Parameters<typeof checkLimit>[0],
+				plan,
+				"seats",
+				requested,
+			),
+		).toEqual({ allowed: false, limit: 10, remaining: 0 });
+	});
 	it("hasFeature returns false on non-active subscription", async () => {
 		const { hasFeature } = await import("../src/plugins/subscriptions/plans");
 		const sub = {

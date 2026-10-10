@@ -30,7 +30,7 @@ const HasFeatureQuery = z.object({
 const CheckLimitQuery = z.object({
 	...ReferenceQueryFields,
 	feature: z.string().min(1),
-	count: z.coerce.number().int().min(0),
+	count: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
 	group: z.string().min(1).optional(),
 });
 
@@ -40,7 +40,7 @@ function presentSubscription(row: Subscription, plans: ResolvedPlans) {
 		// The column is nullable during safe rolling migrations. Keep the public
 		// contract stable while applications backfill legacy rows to one seat.
 		seats: row.seats ?? 1,
-		plan: plans.byName.get(row.plan) ?? null,
+		plan: row.catalogMapped === false ? null : (plans.byName.get(row.plan) ?? null),
 	};
 }
 

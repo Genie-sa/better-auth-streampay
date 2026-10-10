@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StreamPay staging validation</title>
+<style>
+body{font:16px system-ui;margin:48px auto;padding:0 24px;max-width:900px;color:#172a32;background:#f5f8f7}h1{font-size:32px;margin-bottom:8px}p{color:#45605c}section{background:white;border:1px solid #d2dfd9;border-radius:12px;padding:24px;margin:24px 0}label{display:block;margin:12px 0}input{font:inherit;padding:10px;border:1px solid #94afa4;border-radius:6px;width:min(360px,90%)}button{font:inherit;background:#145e49;color:white;padding:10px 16px;border:0;border-radius:6px;margin:6px 8px 6px 0;cursor:pointer}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#edf4f0;padding:20px;border-radius:8px;max-height:450px;overflow:auto}.badge{color:#145e49;font-weight:600}button:focus-visible,input:focus-visible{outline:3px solid #d8a439;outline-offset:3px}
+</style>
+<main>
+<span class="badge">SANDBOX · Local validation</span>
+<h1>StreamPay plugin demo</h1>
+<p>Real Better Auth sessions, SQLite persistence, and Stream staging APIs. Only signed webhook ingress is exposed through the tunnel.</p>
+<section><h2>Demo account</h2><form id="account">
+<label>Name <input name="name" autocomplete="name" value="Staging validation" required></label>
+<label>Email <input name="email" type="email" autocomplete="email" required></label>
+<label>Password <input name="password" type="password" autocomplete="new-password" minlength="8" required></label>
+<button type="submit">Create sandbox account</button><button type="button" id="signin">Sign in</button>
+</form></section>
+<section><h2>Read and validate</h2>
+<button data-path="/api/auth/get-session">Session</button>
+<button data-path="/api/auth/consumer/state">Consumer</button>
+<button data-path="/api/auth/subscription/current">Current subscription</button>
+<button data-path="/api/auth/consumer/invoices/list?page=1&amp;size=10">Invoices · page 1</button>
+<button data-path="/api/auth/consumer/invoices/list?page=2&amp;size=10">Invoices · page 2</button>
+<button data-path="/api/auth/consumer/subscriptions/list?page=2&amp;size=10">Subscriptions · page 2</button>
+<button data-path="/api/auth/subscription/check-limit?feature=projects&amp;count=-1">Reject invalid limit</button>
+<button data-path="/api/auth/subscription/has-feature?feature=teams">Check team access</button>
+<button id="portal">Open customer portal</button>
+<button data-path="/diagnostics">Webhook inbox</button>
+<pre id="result" role="status" aria-live="polite">Create an account to start. No payment is initiated by this demo.</pre>
+</section></main>
+<script type="module">
+const result = document.querySelector('#result');
+async function request(path, body) {
+  result.textContent = 'Loading…';
+  try {
+    const response = await fetch(path, body ? { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body) } : {});
+    result.textContent = `${response.status} ${response.statusText}\n${JSON.stringify(await response.json(),(key,value)=>key==='token'?'[redacted]':value,2)}`;
+  } catch { result.textContent = 'Request failed. Check the demo server.'; }
+}
+document.querySelector('#portal').addEventListener('click', async () => {
+  const button = document.querySelector('#portal');
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/auth/consumer/portal/session', { method: 'POST' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.message ?? 'Portal request failed.');
+    const url = new URL(data.url);
+    if (url.protocol !== 'https:') throw new Error('Invalid portal URL.');
+    window.location.assign(url.href);
+  } catch (error) { result.textContent = error.message; }
+  finally { button.disabled = false; }
+});
+function credentials(){ return Object.fromEntries(new FormData(document.querySelector('#account'))); }
+document.querySelector('#account').addEventListener('submit',event=>{event.preventDefault();request('/api/auth/sign-up/email',credentials());});
+document.querySelector('#signin').addEventListener('click',()=>{const {email,password}=credentials();request('/api/auth/sign-in/email',{email,password});});
+document.querySelectorAll('[data-path]').forEach(button=>button.addEventListener('click',()=>request(button.dataset.path)));
+</script>
+</html>

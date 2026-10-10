@@ -90,7 +90,7 @@ const CheckoutRequestBody = z.object({
 				.array(
 					z.object({
 						productId: z.string().uuid(),
-						quantity: z.number().int().positive().optional(),
+						quantity: z.number().int().positive().safe().optional(),
 					}),
 				)
 				.min(1, "`products` must contain at least one item."),
@@ -98,15 +98,17 @@ const CheckoutRequestBody = z.object({
 			z.string().uuid(),
 		])
 		.optional(),
-	slug: z.string().optional(),
+	slug: z.string().min(1).optional(),
 	referenceId: z.string().optional(),
 	name: z.string().min(1).optional(),
 	description: z.string().optional(),
-	metadata: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
+	metadata: z
+		.record(z.string(), z.union([z.string(), z.number().finite(), z.boolean()]))
+		.optional(),
 	successUrl: RelativeOrAbsoluteUrl.optional(),
 	failureUrl: RelativeOrAbsoluteUrl.optional(),
-	maxNumberOfPayments: z.number().int().positive().optional(),
-	validUntil: z.string().datetime().optional(),
+	maxNumberOfPayments: z.number().int().positive().safe().optional(),
+	validUntil: z.string().datetime({ offset: true }).optional(),
 	couponIds: z.array(z.string().uuid()).optional(),
 	redirect: z.coerce.boolean().optional(),
 });

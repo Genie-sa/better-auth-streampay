@@ -8,6 +8,7 @@ export const streampayClient = () => {
 	return {
 		id: "streampay-client",
 		$InferServerPlugin: {} as ReturnType<typeof streampay>,
+		pathMethods: { "/consumer/portal/session": "POST", "/checkout": "POST" },
 		$ERROR_CODES,
 	} satisfies BetterAuthClientPlugin;
 };
