@@ -16,10 +16,27 @@ import {
 import { readEnvelope, readSdkErrorFields } from "./error-envelope";
 import { formatStreamPayError } from "./format-error";
 import { getLogger } from "./logger";
-import type { StreamPaySessionUser } from "./session";
+import { getCurrentConsumerUser, type StreamPaySessionUser } from "./session";
 
 export interface StreamPayLoggerContext {
 	context: {
+		adapter?: {
+			findOne: <T = unknown>(input: { model: string; where: Where[] }) => Promise<T | null>;
+			update?: (input: {
+				model: string;
+				update: Record<string, unknown>;
+				where: Where[];
+			}) => Promise<unknown>;
+		};
+		internalAdapter?: {
+			updateUser?: (userId: string, data: Record<string, unknown>) => Promise<unknown>;
+			listUsers?: (
+				limit: number,
+				offset: number,
+				sortBy: undefined,
+				where: Where[],
+			) => Promise<Record<string, unknown>[]>;
+		};
 		logger: {
 			error: (message: string) => void;
 			warn: (message: string) => void;
@@ -105,6 +122,7 @@ export async function ensureConsumerForUser(
 	ctx: EnsureConsumerContext,
 	user: StreamPaySessionUser,
 ): Promise<{ consumerId: string; created: boolean }> {
+	user = await getCurrentConsumerUser(ctx, user);
 	if (user.streampayConsumerId) {
 		return { consumerId: user.streampayConsumerId, created: false };
 	}
@@ -153,10 +171,26 @@ export async function ensureConsumerForUser(
 		if (isDuplicateConsumerError(err)) {
 			const reusedId = await resolveDuplicateConsumer(options, payload, ctx);
 			if (reusedId) {
-				await assertConsumerUnclaimed(ctx, reusedId, user.id);
+				// Claim the unique local link before changing the provider's owner.
+				await persistConsumerId(ctx, user.id, reusedId);
 				try {
 					await options.client.updateConsumer(reusedId, { external_id: user.id });
 				} catch (backfillErr: unknown) {
+					try {
+						if (!ctx.context.adapter.update) throw consumerLinkUnavailable();
+						await ctx.context.adapter.update({
+							model: "user",
+							where: [
+								{ field: "id", value: user.id },
+								{ field: "streampayConsumerId", value: reusedId },
+							],
+							update: { streampayConsumerId: null },
+						});
+					} catch (clearErr: unknown) {
+						getLogger(ctx).error(
+							`consumer claim cleanup failed for user=${user.id} consumer=${reusedId}: ${formatStreamPayError(clearErr)}`,
+						);
+					}
 					getLogger(ctx).error(
 						`consumer external_id backfill failed for user=${user.id} consumer=${reusedId}: ${formatStreamPayError(backfillErr)}`,
 					);
@@ -165,7 +199,6 @@ export async function ensureConsumerForUser(
 						message: "StreamPay consumer linking failed. Please try again.",
 					});
 				}
-				await persistConsumerId(ctx, user.id, reusedId);
 				return { consumerId: reusedId, created: false };
 			}
 		}
@@ -187,13 +220,21 @@ function consumerLinkUnavailable(): APIError {
 }
 
 async function findConsumerOwner(
-	ctx: EnsureConsumerContext,
+	ctx: StreamPayLoggerContext,
 	consumerId: string,
 ): Promise<Record<string, unknown> | null> {
 	try {
+		// Better Auth before-create hooks run inside a transaction. Its internal
+		// adapter uses that transaction; the outer adapter can deadlock on SQLite.
+		const where: Where[] = [{ field: "streampayConsumerId", value: consumerId }];
+		if (ctx.context.internalAdapter?.listUsers) {
+			const owners = await ctx.context.internalAdapter.listUsers(1, 0, undefined, where);
+			return owners[0] ?? null;
+		}
+		if (!ctx.context.adapter) throw consumerLinkUnavailable();
 		return await ctx.context.adapter.findOne<Record<string, unknown>>({
 			model: "user",
-			where: [{ field: "streampayConsumerId", value: consumerId }],
+			where,
 		});
 	} catch (err: unknown) {
 		getLogger(ctx).error(
@@ -203,10 +244,10 @@ async function findConsumerOwner(
 	}
 }
 
-async function assertConsumerUnclaimed(
-	ctx: EnsureConsumerContext,
+export async function assertConsumerUnclaimed(
+	ctx: StreamPayLoggerContext,
 	consumerId: string,
-	userId: string,
+	userId?: string,
 ): Promise<void> {
 	const owner = await findConsumerOwner(ctx, consumerId);
 	if (!owner) return;

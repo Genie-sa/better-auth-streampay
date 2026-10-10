@@ -148,7 +148,11 @@ export interface MockCtx {
 			findOne: <T = unknown>(input: { model: string; where: Where[] }) => Promise<T | null>;
 			findMany?: unknown;
 			create?: unknown;
-			update?: unknown;
+			update?: (input: {
+				model: string;
+				update: Record<string, unknown>;
+				where: Where[];
+			}) => Promise<unknown>;
 			delete?: unknown;
 		};
 	};
@@ -178,7 +182,15 @@ export const createMockContext = (options: MockCtxOptions = {}): MockCtx => {
 			adapter: {
 				findOne: vi
 					.fn()
-					.mockResolvedValue(null) as unknown as MockCtx["context"]["adapter"]["findOne"],
+					.mockImplementation(async ({ model, where }) =>
+						model === "user" &&
+						where.length === 1 &&
+						where[0].field === "id" &&
+						user &&
+						where[0].value === user.id
+							? { ...user }
+							: null,
+					) as unknown as MockCtx["context"]["adapter"]["findOne"],
 				findMany: vi.fn().mockResolvedValue([]),
 				create: vi.fn().mockResolvedValue(undefined),
 				update: vi.fn().mockResolvedValue(undefined),

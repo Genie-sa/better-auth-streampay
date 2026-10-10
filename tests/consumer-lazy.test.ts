@@ -66,7 +66,9 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 	describe("ensureConsumerForUser", () => {
 		it("short-circuits when the user already has a streampayConsumerId", async () => {
 			const options = createTestStreamPayOptions({ client: mockClient });
-			const ctx = createMockContext();
+			const ctx = createMockContext({
+				user: createMockUser({ id: "user-1", streampayConsumerId: "cons_existing" }),
+			});
 
 			const result = await ensureConsumerForUser(options, ctx, {
 				id: "user-1",
@@ -225,7 +227,17 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 				code: "INTERNAL_SERVER_ERROR",
 				errorCode: "STREAMPAY_CONSUMER_LINK_WRITE_FAILED",
 			});
-			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
+			expect(ctx.context.internalAdapter.updateUser).toHaveBeenCalledWith("user-1", {
+				streampayConsumerId: "cons_stranded",
+			});
+			expect(ctx.context.adapter.update).toHaveBeenCalledWith({
+				model: "user",
+				where: [
+					{ field: "id", value: "user-1" },
+					{ field: "streampayConsumerId", value: "cons_stranded" },
+				],
+				update: { streampayConsumerId: null },
+			});
 		});
 
 		it("handles DUPLICATE_CONSUMER when the existing consumer is already linked to the same user (idempotent)", async () => {

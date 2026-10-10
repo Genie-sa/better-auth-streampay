@@ -84,6 +84,11 @@ function setupCtx(overrides: {
 	if (overrides.query !== undefined) ctxOptions.query = overrides.query;
 	const ctx = createMockContext(ctxOptions);
 	ctx.context.adapter = adapter;
+	const user = ctx.context.session.user;
+	adapter.tables.user ??= [];
+	if (user && !adapter.tables.user.some((stored) => stored.id === user.id)) {
+		adapter.tables.user.push({ ...user });
+	}
 	return { ctx, adapter };
 }
 

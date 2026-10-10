@@ -45,6 +45,7 @@ describe("subscription lifecycle contract audit", () => {
 		);
 		const ctx = createMockContext({ body: { plan: "pro" } });
 		ctx.context.adapter = adapter;
+		adapter.tables.user = [{ ...ctx.context.session.user }];
 		await expect(unwrapHandler(endpoints.upgradeSubscription)(ctx)).rejects.toThrow(/no URL/);
 		expect(adapter.tables.subscription?.[0]).toMatchObject({
 			status: "active",
@@ -81,6 +82,7 @@ describe("subscription lifecycle contract audit", () => {
 		);
 		const ctx = createMockContext({ body: { plan: "pro" } });
 		ctx.context.adapter = adapter;
+		adapter.tables.user = [{ ...ctx.context.session.user }];
 		await expect(unwrapHandler(endpoints.upgradeSubscription)(ctx)).resolves.toMatchObject({
 			url: "https://checkout.example.test/created",
 		});

@@ -482,10 +482,15 @@ describe("consumer hooks", () => {
 			expect(ctx.context.logger.error).toHaveBeenCalledWith(
 				expect.stringContaining("clearing stale link"),
 			);
-			expect(ctx.context.internalAdapter.updateUser).toHaveBeenCalledWith(
-				"user-123",
-				expect.objectContaining({ streampayConsumerId: null }),
-			);
+			expect(ctx.context.adapter.update).toHaveBeenCalledWith({
+				model: "user",
+				where: [
+					{ field: "id", value: "user-123" },
+					{ field: "streampayConsumerId", value: "cons_linked" },
+				],
+				update: { streampayConsumerId: null },
+			});
+			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
 		});
 
 		it("logs but never throws when getConsumer fails with a non-404 error", async () => {
