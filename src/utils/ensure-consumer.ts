@@ -211,8 +211,10 @@ export async function ensureConsumerForUser(
 		if (transient) {
 			try {
 				recoveredId = await findConsumerByExternalId(options.client, { externalId: user.id });
-			} catch {
-				recoveredId = null;
+			} catch (searchErr: unknown) {
+				getLogger(ctx).warn(
+					`consumer recovery search failed for user=${user.id}: ${formatStreamPayError(searchErr)}`,
+				);
 			}
 		}
 		if (recoveredId) {

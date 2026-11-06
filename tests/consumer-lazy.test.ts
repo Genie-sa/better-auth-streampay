@@ -297,6 +297,39 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 			await expect(
 				ensureConsumerForUser(options, createMockContext(), { id: "user-1", email: "a@b.com" }),
 			).rejects.toMatchObject({ code, errorCode });
+			expect(mockClient.listConsumers).toHaveBeenCalledTimes(1);
+		});
+
+		it("surfaces the provider failure when recovery finds no customer", async () => {
+			mockClient.createConsumer.mockRejectedValue(mockApiError(503, {}));
+			const ctx = createMockContext();
+			await expect(
+				ensureConsumerForUser(createTestStreamPayOptions({ client: mockClient }), ctx, {
+					id: "user-1",
+					email: "a@b.com",
+				}),
+			).rejects.toMatchObject({ code: "INTERNAL_SERVER_ERROR" });
+			expect(mockClient.listConsumers).toHaveBeenCalledTimes(2);
+			expect(mockClient.createConsumer).toHaveBeenCalledTimes(1);
+			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
+		});
+
+		it("surfaces the provider failure and logs when the recovery search fails", async () => {
+			mockClient.createConsumer.mockRejectedValue(new TypeError("fetch failed"));
+			mockClient.listConsumers
+				.mockResolvedValueOnce(createMockConsumerList())
+				.mockRejectedValueOnce(mockApiError(503, {}));
+			const ctx = createMockContext();
+			await expect(
+				ensureConsumerForUser(createTestStreamPayOptions({ client: mockClient }), ctx, {
+					id: "user-1",
+					email: "a@b.com",
+				}),
+			).rejects.toMatchObject({ code: "INTERNAL_SERVER_ERROR" });
+			expect(ctx.context.logger.warn).toHaveBeenCalledWith(
+				expect.stringContaining("consumer recovery search failed for user=user-1"),
+			);
+			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
 		});
 
 		it("recovers a lost creation response by exact external ID without another create", async () => {
