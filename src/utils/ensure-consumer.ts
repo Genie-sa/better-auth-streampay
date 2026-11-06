@@ -14,6 +14,7 @@ import {
 	samePhone,
 } from "./consumer";
 import { readEnvelope, readSdkErrorFields } from "./error-envelope";
+import { toAPIError } from "./errors";
 import { formatStreamPayError } from "./format-error";
 import { getLogger } from "./logger";
 import { getCurrentConsumerUser, type StreamPaySessionUser } from "./session";
@@ -203,12 +204,32 @@ export async function ensureConsumerForUser(
 			}
 		}
 
-		getLogger(ctx).error(
-			`consumer creation failed for user=${user.id}: ${formatStreamPayError(err)}`,
+		const { status } = readSdkErrorFields(err);
+		const transient =
+			(status !== undefined && status >= 500) || (status === undefined && err instanceof TypeError);
+		let recoveredId: string | null = null;
+		if (transient) {
+			try {
+				recoveredId = await findConsumerByExternalId(options.client, { externalId: user.id });
+			} catch (searchErr: unknown) {
+				getLogger(ctx).warn(
+					`consumer recovery search failed for user=${user.id}: ${formatStreamPayError(searchErr)}`,
+				);
+			}
+		}
+		if (recoveredId) {
+			await persistConsumerId(ctx, user.id, recoveredId);
+			getLogger(ctx).warn(`consumer recovered after failed creation for user=${user.id}`);
+			return { consumerId: recoveredId, created: false };
+		}
+		toAPIError(
+			{
+				logPrefix: `consumer creation failed for user=${user.id}:`,
+				userMessage: "StreamPay consumer provisioning failed. Please try again.",
+			},
+			err,
+			getLogger(ctx),
 		);
-		throw new APIError("INTERNAL_SERVER_ERROR", {
-			message: "StreamPay consumer provisioning failed. Please try again.",
-		});
 	}
 }
 
