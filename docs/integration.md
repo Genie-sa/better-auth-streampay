@@ -593,8 +593,10 @@ const { succeeded, failed } = await auth.api.processDueStreampayWebhookEvents({
 
 It processes pending events whose retry time has passed or whose lease expired, keeps failures
 pending with backoff until the attempt budget is spent, and then dead-letters them. The endpoint
-has no HTTP route. Dead-lettered events still need the admin replay endpoint. A callback that outlives the lease can run again
-when another delivery claims it. Callbacks must still be idempotent: a crash after an external
+has no HTTP route. Dead-lettered events still need the admin replay endpoint. A failed admin
+replay follows the same rules: a pending event stays pending unless the failure is permanent or
+its attempts are spent, and a dead-lettered event returns to dead letter. A callback that outlives
+the lease can run again when another delivery claims it. Callbacks must still be idempotent: a crash after an external
 side effect, or failure of a later callback, can repeat earlier work on retry. Inbox deduplication
 does not provide exactly-once execution of external side effects.
 

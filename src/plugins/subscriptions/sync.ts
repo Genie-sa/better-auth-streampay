@@ -127,7 +127,7 @@ export class WebhookEventInProgressError extends Error {
 }
 
 export interface WebhookReplayOptions {
-	/** Keep a failed replay retryable until the inbox attempt budget is spent instead of dead-lettering it. */
+	/** @deprecated No effect: a failed replay keeps a pending event retryable until its attempts are spent. */
 	retryUntilExhausted?: boolean;
 }
 
