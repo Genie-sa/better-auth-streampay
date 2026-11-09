@@ -10,6 +10,7 @@ import type {
 	StreamPayWebhookPayload,
 } from "../../webhooks/events";
 import type { PluginAdapter } from "./adapter";
+import { deactivatePaymentLink } from "./lifecycle";
 import type { ResolvedPlans } from "./plans";
 import {
 	inferPlanFromItems,
@@ -508,8 +509,88 @@ class SubscriptionCorrelationError extends Error {
 	}
 }
 
+/**
+ * A provider-confirmed subscription outranks an unpaid checkout reservation for the same slot.
+ * Deactivating the reservation's link is best effort: it must never block the paid subscription.
+ */
+async function takeSlotFromReservation(
+	ctx: SyncContext,
+	client: StreamPayClient,
+	slotKey: string,
+	ownerRowId: string | null,
+	streampaySubscriptionId: string,
+): Promise<void> {
+	const holder = await ctx.context.adapter.findOne<Subscription>({
+		model: SUBSCRIPTION_MODEL,
+		where: [{ field: "activeSlotKey", value: slotKey }],
+	});
+	if (!holder || holder.id === ownerRowId) return;
+	if (holder.status !== "incomplete" || holder.streampaySubscriptionId) {
+		throw new SubscriptionCorrelationError(
+			`StreamPay sub=${streampaySubscriptionId} needs the billing slot held by live row=${holder.id} (${holder.status}). Resolve the duplicate subscription, then replay.`,
+		);
+	}
+	if (holder.streampayPaymentLinkId) {
+		try {
+			await deactivatePaymentLink(client, holder.streampayPaymentLinkId, logger(ctx));
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			logger(ctx).error(
+				`payment link=${holder.streampayPaymentLinkId} of released row=${holder.id} could not be deactivated and may still be paid; deactivate it manually: ${message}`,
+			);
+		}
+	}
+	const released = await ctx.context.adapter.update<Subscription>({
+		model: SUBSCRIPTION_MODEL,
+		update: { status: "incomplete_expired", activeSlotKey: null, updatedAt: new Date() },
+		where: [
+			{ field: "id", value: holder.id },
+			{ field: "status", value: "incomplete" },
+			{ field: "activeSlotKey", value: slotKey },
+			{ field: "streampayPaymentLinkId", value: holder.streampayPaymentLinkId ?? null },
+		],
+	});
+	if (!released) {
+		throw new Error(`Checkout reservation row=${holder.id} changed while releasing its slot.`);
+	}
+	logger(ctx).warn(
+		`released checkout reservation row=${holder.id} for paid StreamPay sub=${streampaySubscriptionId}.`,
+	);
+}
+
+async function linkReservedRow(
+	ctx: SyncContext,
+	client: StreamPayClient,
+	row: Subscription,
+	projected: Partial<Subscription>,
+	metadataReferenceType: SubscriptionReferenceType | null,
+	streampaySubscriptionId: string,
+): Promise<Subscription> {
+	const activeSlotKey =
+		projected.activeSlotKey === null
+			? null
+			: (row.activeSlotKey ??
+				subscriptionSlotKey(
+					row.referenceType ?? metadataReferenceType ?? "user",
+					row.referenceId,
+					projected.group === undefined ? row.group : projected.group,
+				));
+	return updateReconciledSubscription(
+		ctx,
+		client,
+		row,
+		{
+			...projected,
+			billingStatus: row.billingStatus ?? "current",
+			...(activeSlotKey === null ? {} : { activeSlotKey }),
+		},
+		streampaySubscriptionId,
+	);
+}
+
 async function updateReconciledSubscription(
 	ctx: SyncContext,
+	client: StreamPayClient,
 	existing: Subscription,
 	projected: Partial<Subscription>,
 	streampaySubscriptionId: string,
@@ -521,6 +602,15 @@ async function updateReconciledSubscription(
 	) {
 		throw new Error(
 			`StreamPay returned stale subscription state for sub=${streampaySubscriptionId}. Retry reconciliation.`,
+		);
+	}
+	if (projected.activeSlotKey && projected.activeSlotKey !== existing.activeSlotKey) {
+		await takeSlotFromReservation(
+			ctx,
+			client,
+			projected.activeSlotKey,
+			existing.id,
+			streampaySubscriptionId,
 		);
 	}
 	const updated = await ctx.context.adapter.update<Subscription>({
@@ -619,6 +709,7 @@ async function reconcileFromStreamPay(
 		}
 		const updated = await updateReconciledSubscription(
 			ctx,
+			client,
 			existing,
 			projected,
 			streampaySubscriptionId,
@@ -669,25 +760,12 @@ async function reconcileFromStreamPay(
 				!paymentLinkId ||
 				metadataRow.streampayPaymentLinkId === paymentLinkId)
 		) {
-			const projectedWithSlot = {
-				...projected,
-				billingStatus: metadataRow.billingStatus ?? "current",
-				...(projected.activeSlotKey === null
-					? {}
-					: {
-							activeSlotKey:
-								metadataRow.activeSlotKey ??
-								subscriptionSlotKey(
-									metadataRow.referenceType ?? metadataReferenceType ?? "user",
-									metadataRow.referenceId,
-									projected.group === undefined ? metadataRow.group : projected.group,
-								),
-						}),
-			};
-			const updated = await updateReconciledSubscription(
+			const updated = await linkReservedRow(
 				ctx,
+				client,
 				metadataRow,
-				projectedWithSlot,
+				projected,
+				metadataReferenceType,
 				streampaySubscriptionId,
 			);
 			return { row: updated, stream };
@@ -710,35 +788,25 @@ async function reconcileFromStreamPay(
 		stream.organization_consumer_id ?? null,
 	);
 	if (incomplete) {
-		const projectedWithSlot = {
-			...projected,
-			billingStatus: incomplete.billingStatus ?? "current",
-			...(projected.activeSlotKey === null
-				? {}
-				: {
-						activeSlotKey:
-							incomplete.activeSlotKey ??
-							subscriptionSlotKey(
-								incomplete.referenceType ?? metadataReferenceType ?? "user",
-								incomplete.referenceId,
-								projected.group === undefined ? incomplete.group : projected.group,
-							),
-					}),
-		};
-		const updated = await updateReconciledSubscription(
+		const updated = await linkReservedRow(
 			ctx,
+			client,
 			incomplete,
-			projectedWithSlot,
+			projected,
+			metadataReferenceType,
 			streampaySubscriptionId,
 		);
-		return {
-			row: updated,
-			stream,
-		};
+		return { row: updated, stream };
 	}
 
 	const plan = plans.byName.get(planName);
 	const referenceType = metadataReferenceType ?? "custom";
+	const activeSlotKey = isTerminalSubscriptionStatus(projected.status)
+		? null
+		: subscriptionSlotKey(referenceType, referenceId, plan?.group);
+	if (activeSlotKey) {
+		await takeSlotFromReservation(ctx, client, activeSlotKey, null, streampaySubscriptionId);
+	}
 	const row = await ctx.context.adapter.create<Subscription>({
 		model: SUBSCRIPTION_MODEL,
 		data: {
@@ -747,9 +815,7 @@ async function reconcileFromStreamPay(
 			...projected,
 			referenceId,
 			referenceType,
-			activeSlotKey: isTerminalSubscriptionStatus(projected.status)
-				? null
-				: subscriptionSlotKey(referenceType, referenceId, plan?.group),
+			activeSlotKey,
 			streampayPaymentLinkId: paymentLinkId,
 			plan: planName,
 			planVersion: plan?.version ?? null,

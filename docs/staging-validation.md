@@ -36,6 +36,7 @@ Tests cover the plugin's implemented features, not every feature of the Stream p
 | Dynamic catalog stays stale | The upstream 2.2.1 resolver fix is retained and tested. |
 | Renewal evidence invokes callbacks twice | PostgreSQL aligns invoice and subscription events at the same old cycle; a conditional update gives one callback winner. |
 | Crash skips a renewal callback | SQLite simulates a lost update response and an interrupted worker; replay uses the durable callback owner. |
+| Paid abandoned checkout loses access | Live sandbox payment of a replaced checkout link: the original code dead-lettered the activation and left `/subscription/current` empty; the fix activated it on the first delivery and StreamPay reported the replacement link `INACTIVE`. Replaced links show "Payment link is inactive". See [state machines](state-machines.md#live-sandbox-evidence-for-f1). |
 | Checkout activates the wrong reservation | Known payment-link and consumer mismatches cannot bind a pending checkout. |
 | Portal client sends the wrong HTTP method | The real Better Auth client sends POST for the documented no-argument session call. |
 | Consumer lookup misses an existing account | Exact identity searches follow pagination; later-page failures and repeated provider pages fail instead of creating a duplicate consumer. |

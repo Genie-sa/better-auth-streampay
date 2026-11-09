@@ -215,7 +215,10 @@ updateSeats(newSeats)
 
 The upgrade reservation is idempotent by plan **and** seat count. A second request for a different
 quantity cannot accidentally recover an earlier checkout URL; it returns a conflict until that
-reservation expires.
+reservation expires. Replacing an expired reservation first deactivates its StreamPay payment
+link. If a customer still completes an older checkout, the paid subscription takes the slot from any
+unpaid reservation. Two paid subscriptions in one slot are dead-lettered for manual review.
+[State machines](state-machines.md) lists every reservation and lifecycle transition.
 
 ## Migration
 

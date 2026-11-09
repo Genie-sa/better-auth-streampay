@@ -21,6 +21,29 @@ export function isAlreadyCanceledFreezeError(err: unknown): boolean {
 	);
 }
 
+/**
+ * Makes an abandoned checkout link unpayable before its reservation releases the slot.
+ * A missing link is already unpayable. Custom clients without the status API cannot be
+ * compensated, so the release proceeds and a late payment is handled by webhook slot recovery.
+ */
+export async function deactivatePaymentLink(
+	client: StreamPayClient,
+	paymentLinkId: string,
+	log: { warn: (message: string) => void },
+): Promise<void> {
+	if (!client.updatePaymentLinkStatus) {
+		log.warn(
+			`payment link=${paymentLinkId} stays payable: client does not implement updatePaymentLinkStatus.`,
+		);
+		return;
+	}
+	try {
+		await client.updatePaymentLinkStatus(paymentLinkId, { status: "INACTIVE" });
+	} catch (err) {
+		if (readSdkErrorFields(err).status !== 404) throw err;
+	}
+}
+
 export function subscriptionCouponIds(
 	stream: SubscriptionDetailed,
 ): NonNullable<SubscriptionUpdate["coupons"]> {
