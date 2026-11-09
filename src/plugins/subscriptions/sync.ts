@@ -511,7 +511,7 @@ class SubscriptionCorrelationError extends Error {
 
 /**
  * A provider-confirmed subscription outranks an unpaid checkout reservation for the same slot.
- * The reservation's link is deactivated before release so it cannot become a second charge.
+ * Deactivating the reservation's link is best effort: it must never block the paid subscription.
  */
 async function takeSlotFromReservation(
 	ctx: SyncContext,
@@ -525,13 +525,20 @@ async function takeSlotFromReservation(
 		where: [{ field: "activeSlotKey", value: slotKey }],
 	});
 	if (!holder || holder.id === ownerRowId) return;
-	if (holder.status !== "incomplete") {
+	if (holder.status !== "incomplete" || holder.streampaySubscriptionId) {
 		throw new SubscriptionCorrelationError(
 			`StreamPay sub=${streampaySubscriptionId} needs the billing slot held by live row=${holder.id} (${holder.status}). Resolve the duplicate subscription, then replay.`,
 		);
 	}
 	if (holder.streampayPaymentLinkId) {
-		await deactivatePaymentLink(client, holder.streampayPaymentLinkId, logger(ctx));
+		try {
+			await deactivatePaymentLink(client, holder.streampayPaymentLinkId, logger(ctx));
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			logger(ctx).error(
+				`payment link=${holder.streampayPaymentLinkId} of released row=${holder.id} could not be deactivated and may still be paid; deactivate it manually: ${message}`,
+			);
+		}
 	}
 	const released = await ctx.context.adapter.update<Subscription>({
 		model: SUBSCRIPTION_MODEL,
@@ -540,6 +547,7 @@ async function takeSlotFromReservation(
 			{ field: "id", value: holder.id },
 			{ field: "status", value: "incomplete" },
 			{ field: "activeSlotKey", value: slotKey },
+			{ field: "streampayPaymentLinkId", value: holder.streampayPaymentLinkId ?? null },
 		],
 	});
 	if (!released) {
@@ -567,11 +575,9 @@ async function linkReservedRow(
 					row.referenceId,
 					projected.group === undefined ? row.group : projected.group,
 				));
-	if (activeSlotKey && activeSlotKey !== row.activeSlotKey) {
-		await takeSlotFromReservation(ctx, client, activeSlotKey, row.id, streampaySubscriptionId);
-	}
 	return updateReconciledSubscription(
 		ctx,
+		client,
 		row,
 		{
 			...projected,
@@ -584,6 +590,7 @@ async function linkReservedRow(
 
 async function updateReconciledSubscription(
 	ctx: SyncContext,
+	client: StreamPayClient,
 	existing: Subscription,
 	projected: Partial<Subscription>,
 	streampaySubscriptionId: string,
@@ -595,6 +602,15 @@ async function updateReconciledSubscription(
 	) {
 		throw new Error(
 			`StreamPay returned stale subscription state for sub=${streampaySubscriptionId}. Retry reconciliation.`,
+		);
+	}
+	if (projected.activeSlotKey && projected.activeSlotKey !== existing.activeSlotKey) {
+		await takeSlotFromReservation(
+			ctx,
+			client,
+			projected.activeSlotKey,
+			existing.id,
+			streampaySubscriptionId,
 		);
 	}
 	const updated = await ctx.context.adapter.update<Subscription>({
@@ -688,18 +704,12 @@ async function reconcileFromStreamPay(
 				projected.group === undefined ? existing.group : projected.group,
 			);
 			if (existing.activeSlotKey !== desiredSlotKey) {
-				await takeSlotFromReservation(
-					ctx,
-					client,
-					desiredSlotKey,
-					existing.id,
-					streampaySubscriptionId,
-				);
 				projected.activeSlotKey = desiredSlotKey;
 			}
 		}
 		const updated = await updateReconciledSubscription(
 			ctx,
+			client,
 			existing,
 			projected,
 			streampaySubscriptionId,

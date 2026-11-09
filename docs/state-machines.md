@@ -65,7 +65,7 @@ overlay: StreamPay keeps reporting `ACTIVE` while a renewal payment is outstandi
 | S1 | `activeSlotKey` is non-null exactly when the status is not terminal. | `projectSubscriptionFields` clears the slot for terminal statuses. Releases set `incomplete_expired` and a null slot together. Webhook reconciliation backfills a missing slot for live rows. |
 | S2 | At most one row holds a slot. | Database unique constraint on `activeSlotKey`. |
 | S3 | A provider subscription maps to at most one row. A payment link maps to at most one row. | Unique `streampaySubscriptionId` and `streampayPaymentLinkId`. |
-| S4 | A provider-confirmed subscription outranks an unpaid reservation for the same slot. Two live subscriptions in one slot are never written silently. | `takeSlotFromReservation` (`sync.ts`). |
+| S4 | A provider-confirmed subscription outranks an unpaid reservation (`incomplete` with no StreamPay subscription ID) for the same slot. Two live subscriptions in one slot are never written silently. | `updateReconciledSubscription` runs `takeSlotFromReservation` after its stale-state check (`sync.ts`). |
 | S5 | `billingStatus = past_due` and provider `ACTIVE` imply local `past_due`. | `reconcileProjectionAgainstExisting` (`reconcile.ts`), the renewal stale branch (`sync.ts`). |
 | S6 | `providerUpdatedAt` never moves backwards. | The webhook path throws and retries (`updateReconciledSubscription`). The endpoint path keeps the newer local row (`persistSubscriptionProjection`). |
 | S7 | Every lifecycle write is a CAS on `providerUpdatedAt`, `status`, `billingStatus`, and the correlation IDs. | `updateReconciledSubscription`, `persistSubscriptionProjection`, `handleRenewalEvidence`. |
@@ -74,7 +74,7 @@ overlay: StreamPay keeps reporting `ACTIVE` while a renewal payment is outstandi
 
 | # | Trigger | From | To | Guard and code |
 | --- | --- | --- | --- | --- |
-| L1 | Paid checkout confirmed (webhook or `/subscription/success`) | `incomplete`, `incomplete_expired`, or no row | provider status | Signed metadata row ID, then a payment-link match, then the newest matching reservation (`sync.ts`). The success fallback matches consumer, product, and link (`endpoints.ts` `isCheckoutSubscriptionCandidate`). Takes the slot from an unpaid holder (S4). |
+| L1 | Paid checkout confirmed by webhook | `incomplete`, `incomplete_expired`, or no row | provider status | Signed metadata row ID, then a payment-link match, then the newest matching reservation (`reconcileFromStreamPay`). Takes the slot from an unpaid holder (S4). The `/subscription/success` fallback also confirms, but only for an `incomplete` row that still holds its slot, matched by consumer, product, and link (`isCheckoutSubscriptionCandidate`). |
 | L2 | `SUBSCRIPTION_CYCLE_RENEWAL_FAILED`, not stale | `active` | `past_due`, billing `past_due` | `sync.ts` |
 | L3 | `INVOICE_COMPLETED` or `SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY`, not stale | `past_due` | `active`, billing `current` | `handleRenewalEvidence` (`sync.ts`) |
 | L4 | Any other projection while billing is `past_due` | `past_due` | `past_due` | S5 |
@@ -108,8 +108,8 @@ StreamPay's hosted checkout. The idempotency window is
 | ID | Invariant | Enforced by |
 | --- | --- | --- |
 | C1 | A request recovers a reservation only for the same plan and seat count. | `matchesCheckout` in `resumeOrReserveCheckoutSlot` |
-| C2 | A released reservation has no payable link. | `deactivatePaymentLink` (`lifecycle.ts`) runs before every release of a linked reservation. If deactivation fails, the reservation is kept and the request fails. StreamPay still completes a payment already in progress, which S4 covers. |
-| C3 | A checkout URL is returned only while its reservation is still live, or after the customer has already paid it. | `upgradeSubscription` checks the row returned by the link persistence update (`endpoints.ts`). |
+| C2 | A released reservation has no payable link. | `deactivatePaymentLink` (`lifecycle.ts`) runs before every release of a linked reservation. On upgrade, a deactivation failure keeps the reservation and fails the request. On the webhook takeover it is best effort and logged for manual action, so it never blocks the paid subscription. StreamPay still completes a payment already in progress, which S4 covers. |
+| C3 | A checkout URL is returned only while its reservation is still live, or after the customer has already paid it, unless the link persistence write itself fails. | `upgradeSubscription` checks the row returned by the link persistence update (`endpoints.ts`). The takeover's release also matches the holder's link ID, so a link persisted concurrently makes the webhook retry. |
 
 ### Transitions
 
@@ -126,7 +126,8 @@ StreamPay's hosted checkout. The idempotency window is
 | C-i | Reservation released while its link was being created | R1 (released) | R3, request gets `SUBSCRIPTION_CHECKOUT_IN_PROGRESS` | New link deactivated |
 | C-j | Paid subscription arrives for another row of the same slot | R1/R2 | R3 | `takeSlotFromReservation` |
 | C-k | A live row holds the slot when the reservation is created | R0 | R0, request gets `SUBSCRIPTION_ALREADY_ACTIVE` | Previously surfaced the raw unique-constraint error |
-| C-l | Webhook or success fallback | R1/R2/R3 | R4 | machine 1, L1 |
+| C-l | Webhook | R1/R2/R3 | R4 | machine 1, L1 |
+| C-m | `/subscription/success` fallback | R1/R2 | R4 | machine 1, L1 |
 
 ## 3. Cancellation schedule
 
@@ -139,7 +140,7 @@ StreamPay's hosted checkout. The idempotency window is
 | Trigger | From | To | Code |
 | --- | --- | --- | --- |
 | `/subscription/cancel` on an active subscription, or `SUBSCRIPTION_CANCEL_AT_PERIOD_END` | Renewing | Scheduled | `reconcileProjectionAgainstExisting` stamps `cancelScheduledAt` if it is still null |
-| Any other webhook that sees `cancel_at_period_end` first | Renewing | Scheduled without a stamp, until the cancel event arrives | The cancel event stamps when `cancelScheduledAt` is null (#28) |
+| Any other webhook that sees `cancel_at_period_end` first | Renewing | Scheduled without a stamp | Not fixed: the later cancel event usually counts as stale and does not stamp (F8, R7) |
 | `/subscription/uncancel` | Scheduled | Renewing | `projectSubscriptionFields` clears `cancelScheduledAt` |
 | Provider `CANCELED` | any | Canceled | `canceledAt` is stamped once |
 
@@ -264,8 +265,8 @@ written.
 
 Severity reflects customer and money impact. Each finding has unit tests and end-to-end tests that
 drive a real Better Auth instance through HTTP with signed webhooks. All of them fail on the code
-before the fix and pass after it, on SQLite and PostgreSQL 17. Run the end-to-end tests on
-PostgreSQL with `STREAMPAY_E2E_DB=postgres` and a database at
+before the fix and pass after it. CI runs them on SQLite; they were also run locally on
+PostgreSQL 17. Run the end-to-end tests on PostgreSQL with `STREAMPAY_E2E_DB=postgres` and a database at
 `postgres://user:password@localhost:5432/better_auth` (hardcoded by `better-auth/test`).
 
 | ID | Severity | Machine | Invalid state or transition | How it is reached | Before the fix | Fix |
@@ -277,7 +278,7 @@ PostgreSQL with `STREAMPAY_E2E_DB=postgres` and a database at
 | F5 | Medium | 7 | E2 → E4 on a transient admin replay failure. StreamPay redeliveries and the due-event processor skip the event. | An operator replays a pending subscription event during a StreamPay or database outage. | The redelivery returns 200, the event stays dead-lettered, and no subscription row is created. | #27 |
 | F6 | Medium | 7 | Same as F5 for generic handler events. | Replay of a pending `handlers:` event whose callback fails. | The callback never runs again on redelivery. | #27 |
 | F7 | Low | 7 | Replay ignored `retryOnCallbackError: false`. | Any admin replay or due-event retry with that option set. | The replay returns 500 and dead-letters, although the projection was written. | #27 |
-| F8 | Low | 3 | `cancelAtPeriodEnd = true` with `cancelScheduledAt = null`, permanently. | A webhook other than `SUBSCRIPTION_CANCEL_AT_PERIOD_END` (for example `SUBSCRIPTION_PLAN_UPDATED`) is processed first after a cancellation made in the StreamPay dashboard. | `cancelScheduledAt` stays `null`. | #28 |
+| F8 | Low | 3 | `cancelAtPeriodEnd = true` with `cancelScheduledAt = null`, permanently. | A webhook other than `SUBSCRIPTION_CANCEL_AT_PERIOD_END` (for example `SUBSCRIPTION_PLAN_UPDATED`) is processed first after a cancellation made in the StreamPay dashboard. That webhook stores a `providerUpdatedAt` later than the cancel event, so the cancel event is stale. | `cancelScheduledAt` stays `null`. | Not fixed (R7). Relaxing the stamp condition alone let endpoints stamp the time of an unrelated later call. |
 
 ### Live sandbox evidence for F1
 
@@ -304,8 +305,9 @@ duplicate as a permanent failure. Map a live slot holder to `SUBSCRIPTION_ALREAD
 **Issue 2, P2: Manual replay dead-letters events that StreamPay is still retrying (F5–F7).** Fixed
 by #27.
 
-**Issue 3, P3: The cancellation schedule time is lost when events arrive out of order (F8).** Fixed
-by #28.
+**Issue 3, P3: The cancellation schedule time is lost when events arrive out of order (F8).** Open.
+A correct fix must stamp from the cancel event even when it is stale against `providerUpdatedAt`,
+without letting endpoint projections stamp unrelated call times.
 
 ### Open risks (not confirmed, not changed)
 
@@ -317,3 +319,5 @@ by #28.
 | R4 | A dead-lettered renewal callback owner (machine 6) blocks renewal evidence for that subscription until it is replayed or discarded. | Intentional, to avoid a double callback. The operator needs to act. |
 | R5 | Generic handler deliveries always use 5 attempts and ignore `maxWebhookAttempts`. | That option belongs to `subscriptions()`. Changing it is an API decision. |
 | R6 | A callback that runs longer than the 2-minute lease can run concurrently with a redelivery. | Documented. Callbacks must be idempotent. |
+| R7 | F8: `cancelScheduledAt` stays `null` when another webhook records the scheduled cancellation before the cancel event. | See Issue 3. The column is informational; access and slots are unaffected. |
+| R8 | A pending inbox row that fails before it is claimed for replay (no stored payload, or a payload that is no longer valid) is never retried or dead-lettered. `processDueStreampayWebhookEvents` selects it oldest first on every run, so enough such rows fill every batch. | Pre-existing. Needs its own fix: dead-letter unreplayable rows when the processor finds them. |

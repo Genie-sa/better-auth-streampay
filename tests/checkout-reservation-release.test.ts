@@ -42,6 +42,10 @@ const PLAN = {
 const PLANS = { list: [PLAN], byName: new Map([[PLAN.name, PLAN]]) };
 const SLOT = subscriptionSlotKey("user", "user-123", null);
 
+type MockSyncContext = ReturnType<
+	typeof createMockSyncContext<ReturnType<typeof createMockAdapter>>
+>;
+
 function checkoutMetadata(rowId: string) {
 	return {
 		metadata: {
@@ -221,6 +225,155 @@ describe("subscription slot ownership", () => {
 		});
 		expect(client.updatePaymentLinkStatus).toHaveBeenCalledWith("pl_new", { status: "INACTIVE" });
 		expect(ctx.adapter.tables.streampayWebhookEvent?.[0]).toMatchObject({ status: "completed" });
+	});
+
+	async function seedReplacedCheckout(
+		ctx: MockSyncContext,
+		replacement: Parameters<typeof createMockSubscriptionRow>[0] = {},
+	) {
+		await ctx.adapter.create({
+			model: "subscription",
+			data: createMockSubscriptionRow({
+				id: "row_released",
+				status: "incomplete_expired",
+				activeSlotKey: null,
+				streampayPaymentLinkId: "pl_old",
+			}),
+		});
+		await ctx.adapter.create({
+			model: "subscription",
+			data: createMockSubscriptionRow({
+				id: "row_replacement",
+				status: "incomplete",
+				activeSlotKey: SLOT,
+				streampayPaymentLinkId: "pl_new",
+				...replacement,
+			}),
+		});
+		client.getSubscription.mockResolvedValue({
+			id: "sub_paid_old_link",
+			status: "ACTIVE",
+			organization_consumer_id: "cons_mocked",
+			items: [{ product_id: PLAN.productId, quantity: 1 }],
+			latest_invoice: { payment_link_id: "pl_old" },
+		} as never);
+	}
+
+	function deliverPaidOldLink(ctx: MockSyncContext) {
+		return syncWebhookPayload(
+			ctx,
+			createMockWebhookPayload({
+				event_type: "SUBSCRIPTION_ACTIVATED",
+				entity_id: "sub_paid_old_link",
+				data: checkoutMetadata("row_released"),
+			}),
+			client,
+			PLANS,
+			{},
+		);
+	}
+
+	function row(ctx: MockSyncContext, id: string) {
+		return ctx.adapter.tables.subscription?.find((candidate) => candidate.id === id);
+	}
+
+	it("activates the paid checkout even when the replacement link cannot be deactivated", async () => {
+		const ctx = createMockSyncContext();
+		await seedReplacedCheckout(ctx);
+		client.updatePaymentLinkStatus.mockRejectedValue(mockApiError(400, { message: "rejected" }));
+
+		await deliverPaidOldLink(ctx);
+
+		expect(row(ctx, "row_released")).toMatchObject({ status: "active", activeSlotKey: SLOT });
+		expect(row(ctx, "row_replacement")).toMatchObject({ status: "incomplete_expired" });
+		expect(ctx.adapter.tables.streampayWebhookEvent?.[0]).toMatchObject({ status: "completed" });
+		expect(ctx.logs.error).toContainEqual(expect.stringContaining("deactivate it manually"));
+	});
+
+	it("treats a reservation already linked to a StreamPay subscription as live", async () => {
+		const ctx = createMockSyncContext();
+		await seedReplacedCheckout(ctx, { streampaySubscriptionId: "sub_unknown_status" });
+
+		await expect(deliverPaidOldLink(ctx)).rejects.toMatchObject({
+			name: "SubscriptionCorrelationError",
+		});
+
+		expect(row(ctx, "row_replacement")).toMatchObject({
+			status: "incomplete",
+			activeSlotKey: SLOT,
+		});
+		expect(client.updatePaymentLinkStatus).not.toHaveBeenCalled();
+	});
+
+	it("retries instead of releasing a reservation whose link was persisted mid-takeover", async () => {
+		const ctx = createMockSyncContext();
+		await seedReplacedCheckout(ctx, { streampayPaymentLinkId: null });
+		const findOne = ctx.adapter.findOne.bind(ctx.adapter);
+		ctx.adapter.findOne = async <T>(args: Parameters<typeof findOne>[0]): Promise<T | null> => {
+			const found = await findOne<Record<string, unknown>>(args);
+			if (!found || !args.where.some((clause) => clause.field === "activeSlotKey")) {
+				return found as T | null;
+			}
+			const snapshot = { ...found };
+			found.streampayPaymentLinkId = "pl_persisted";
+			return snapshot as T;
+		};
+
+		await expect(deliverPaidOldLink(ctx)).rejects.toThrow(/changed while releasing/);
+
+		expect(row(ctx, "row_replacement")).toMatchObject({
+			status: "incomplete",
+			activeSlotKey: SLOT,
+			streampayPaymentLinkId: "pl_persisted",
+		});
+		expect(row(ctx, "row_released")).toMatchObject({ status: "incomplete_expired" });
+		expect(ctx.adapter.tables.streampayWebhookEvent?.[0]).toMatchObject({ status: "pending" });
+	});
+
+	it("leaves the replacement reservation alone when StreamPay returns stale state", async () => {
+		const ctx = createMockSyncContext();
+		await ctx.adapter.create({
+			model: "subscription",
+			data: createMockSubscriptionRow({
+				id: "row_canceled",
+				status: "canceled",
+				activeSlotKey: null,
+				streampaySubscriptionId: "sub_old",
+				providerUpdatedAt: new Date("2026-02-01T00:00:00Z"),
+			}),
+		});
+		await ctx.adapter.create({
+			model: "subscription",
+			data: createMockSubscriptionRow({
+				id: "row_replacement",
+				status: "incomplete",
+				activeSlotKey: SLOT,
+				streampayPaymentLinkId: "pl_new",
+			}),
+		});
+		client.getSubscription.mockResolvedValue({
+			id: "sub_old",
+			status: "ACTIVE",
+			updated_at: "2026-01-01T00:00:00Z",
+			organization_consumer_id: "cons_mocked",
+			items: [{ product_id: PLAN.productId, quantity: 1 }],
+		} as never);
+
+		await expect(
+			syncWebhookPayload(
+				ctx,
+				createMockWebhookPayload({ event_type: "SUBSCRIPTION_ACTIVATED", entity_id: "sub_old" }),
+				client,
+				PLANS,
+				{},
+			),
+		).rejects.toThrow(/stale subscription state/);
+
+		expect(row(ctx, "row_replacement")).toMatchObject({
+			status: "incomplete",
+			activeSlotKey: SLOT,
+		});
+		expect(client.updatePaymentLinkStatus).not.toHaveBeenCalled();
 	});
 
 	it("dead-letters a revived subscription when another live subscription owns its slot", async () => {
