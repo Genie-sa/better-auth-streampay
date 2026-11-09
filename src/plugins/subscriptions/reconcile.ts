@@ -27,7 +27,7 @@ export function reconcileProjectionAgainstExisting(
 	const lifecycleAt = options.lifecycleAt === undefined ? new Date() : options.lifecycleAt;
 	if (
 		options.stampCancelScheduled !== false &&
-		!existing?.cancelAtPeriodEnd &&
+		!existing?.cancelScheduledAt &&
 		projected.cancelAtPeriodEnd &&
 		lifecycleAt
 	) {
