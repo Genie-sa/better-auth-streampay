@@ -125,6 +125,11 @@ export class WebhookEventInProgressError extends Error {
 	}
 }
 
+export interface WebhookReplayOptions {
+	/** @deprecated No effect: a failed replay keeps a pending event retryable until its attempts are spent. */
+	retryUntilExhausted?: boolean;
+}
+
 /** Pending events whose retry time has passed, plus events whose processing lease was abandoned. */
 export async function findDueWebhookEvents(
 	ctx: { context: { adapter: PluginAdapter } },

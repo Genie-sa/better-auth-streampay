@@ -19,6 +19,7 @@ import {
 	syncWebhookPayload,
 	WEBHOOK_EVENT_MODEL,
 	type WebhookEventRow,
+	type WebhookReplayOptions,
 } from "./sync";
 import type { StreamPayPlanLike, SubscriptionsOptions } from "./types";
 
@@ -37,6 +38,7 @@ export {
 	type SyncContext,
 	syncWebhookPayload,
 	WebhookEventInProgressError,
+	type WebhookReplayOptions,
 	type WebhookSyncFailure,
 } from "./sync";
 export type {
@@ -74,6 +76,7 @@ export interface StreamPayPluginRegistry {
 	replayWebhookEvent?: (
 		ctx: GenericEndpointContext,
 		eventId: string,
+		options?: WebhookReplayOptions,
 	) => Promise<{ replayed: true; eventId: string }>;
 	replayWebhookHandler?: NonNullable<StreamPayPluginRegistry["replayWebhookEvent"]>;
 }
