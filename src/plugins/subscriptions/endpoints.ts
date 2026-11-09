@@ -19,9 +19,14 @@ import {
 	requireConfirmedOwnedSubscription,
 	requireUser,
 } from "./access";
-import { deleteReservedSubscription, resumeOrReserveCheckoutSlot } from "./checkout-reservation";
+import {
+	checkoutInProgressError,
+	deleteReservedSubscription,
+	resumeOrReserveCheckoutSlot,
+} from "./checkout-reservation";
 import {
 	configuredPlanForSubscription,
+	deactivatePaymentLink,
 	findSubscriptionFreeze,
 	isAlreadyCanceledFreezeError,
 	subscriptionCouponIds,
@@ -463,6 +468,24 @@ export function buildSubscriptionEndpoints(
 					getLogger(ctx).error(
 						`failed to persist payment link=${paymentLinkId} for row=${row.id}: ${message}. Protected checkout metadata will reconcile the row from the webhook.`,
 					);
+				}
+				if (updatedRow?.status === "incomplete_expired") {
+					getLogger(ctx).warn(
+						`checkout reservation row=${row.id} was released while payment link=${paymentLinkId} was created; deactivating the link.`,
+					);
+					try {
+						await deactivatePaymentLink(client, paymentLinkId, getLogger(ctx));
+					} catch (deactivationError) {
+						toAPIError(
+							{
+								logPrefix: `deactivate orphaned checkout link=${paymentLinkId} failed for row=${row.id}:`,
+								userMessage: "Failed to start subscription checkout.",
+							},
+							deactivationError,
+							getLogger(ctx),
+						);
+					}
+					throw checkoutInProgressError();
 				}
 
 				return ctx.json({

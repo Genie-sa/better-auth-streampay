@@ -11,6 +11,7 @@ interface StreamPayTestInstanceOptions {
 	use?: StreamPayPlugins;
 	disableTestUser?: boolean;
 	additionalPlugins?: BetterAuthPlugin[];
+	testWith?: "sqlite" | "postgres";
 }
 
 type AuthSuccessContext = {
@@ -67,6 +68,7 @@ export async function createStreamPayTestInstance({
 	use = [],
 	disableTestUser = true,
 	additionalPlugins = [],
+	testWith = "sqlite",
 }: StreamPayTestInstanceOptions = {}): Promise<StreamPayTestInstance> {
 	const instance = await getTestInstance(
 		{
@@ -81,6 +83,7 @@ export async function createStreamPayTestInstance({
 		},
 		{
 			disableTestUser,
+			testWith,
 			clientOptions: {
 				plugins: [createStreamPayClientPlugin()],
 			},

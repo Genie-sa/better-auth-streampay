@@ -4,6 +4,7 @@ import type { StreamPayOptions } from "../../types";
 import { readSdkErrorFields } from "../../utils/error-envelope";
 import { toAPIError } from "../../utils/errors";
 import type { PluginAdapter } from "./adapter";
+import { deactivatePaymentLink } from "./lifecycle";
 import { isUniqueConstraintError } from "./sync";
 import type { Subscription } from "./types";
 import { UPGRADE_IDEMPOTENCY_WINDOW_MS } from "./types";
@@ -48,6 +49,13 @@ export function checkoutInProgressError(): APIError {
 	return new APIError("CONFLICT", {
 		code: $ERROR_CODES.SUBSCRIPTION_CHECKOUT_IN_PROGRESS.code,
 		message: "A subscription checkout is already being created for this plan group.",
+	});
+}
+
+function subscriptionAlreadyActiveError(): APIError {
+	return new APIError("CONFLICT", {
+		code: $ERROR_CODES.SUBSCRIPTION_ALREADY_ACTIVE.code,
+		message: "An active subscription already exists for this plan group.",
 	});
 }
 
@@ -120,7 +128,8 @@ export async function resumeOrReserveCheckoutSlot(args: {
 			model: SUBSCRIPTION_MODEL,
 			where: [{ field: "activeSlotKey", value: activeSlotKey }],
 		});
-		if (reserved?.status !== "incomplete") throw err;
+		if (!reserved) throw err;
+		if (reserved.status !== "incomplete") throw subscriptionAlreadyActiveError();
 
 		if (matchesCheckout(reserved)) {
 			let recovery: Awaited<ReturnType<typeof recoverCheckoutUrl>>;
@@ -146,6 +155,20 @@ export async function resumeOrReserveCheckoutSlot(args: {
 			now - reserved.createdAt.getTime() >= UPGRADE_IDEMPOTENCY_WINDOW_MS;
 		if (!reservationIsStale) throw checkoutInProgressError();
 
+		if (reserved.streampayPaymentLinkId) {
+			try {
+				await deactivatePaymentLink(client, reserved.streampayPaymentLinkId, log);
+			} catch (deactivationError) {
+				toAPIError(
+					{
+						logPrefix: `deactivate stale checkout link=${reserved.streampayPaymentLinkId} failed for row=${reserved.id}:`,
+						userMessage: "Unable to replace the previous subscription checkout.",
+					},
+					deactivationError,
+					log,
+				);
+			}
+		}
 		const released = await adapter.update<Subscription>({
 			model: SUBSCRIPTION_MODEL,
 			update: { status: "incomplete_expired", activeSlotKey: null, updatedAt: new Date() },
