@@ -14,7 +14,7 @@ export interface PluginAdapter {
 	}) => Promise<T | null>;
 	findMany: <T = unknown>(args: {
 		model: string;
-		where?: Array<{ field: string; value: unknown }>;
+		where?: Array<{ field: string; value: unknown; operator?: "lt" | "lte" }>;
 		limit?: number;
 		offset?: number;
 		sortBy?: { field: string; direction: "asc" | "desc" };

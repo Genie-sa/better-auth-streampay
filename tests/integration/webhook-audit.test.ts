@@ -1,11 +1,12 @@
 import { createHmac } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, type Mock, vi } from "vitest";
 import { subscriptions, webhooks } from "../../src";
 import {
 	type SyncContext,
 	syncWebhookPayload,
 	type WebhookEventRow,
 } from "../../src/plugins/subscriptions/sync";
+import type { WebhookEnvelopeHandler } from "../../src/webhooks/dispatcher";
 import { createStreamPayTestInstance } from "../utils/auth-instance";
 import { createMockWebhookPayload } from "../utils/subscription-helpers";
 
@@ -431,5 +432,152 @@ describe("renewal callback recovery at the persistence boundary", () => {
 				where: [{ field: "eventId", value: eventId }],
 			}),
 		).toMatchObject({ status: "completed", rawPayload: null });
+	});
+});
+
+describe("scheduled processing of due webhook events", () => {
+	const secret = "webhook-due-test-secret";
+	const eventModel = "streampayWebhookEvent";
+
+	async function dueFixture(callback: Mock<WebhookEnvelopeHandler>, entityId: string) {
+		const { auth } = await createStreamPayTestInstance({
+			use: [webhooks({ secret, deduplicate: true, onPayload: callback })],
+		});
+		const payload = createMockWebhookPayload({
+			event_type: "PAYMENT_SUCCEEDED",
+			entity_type: "PAYMENT",
+			entity_id: entityId,
+		});
+		const rawBody = JSON.stringify(payload);
+		const eventId = `handlers:${payload.event_type}:${payload.entity_id}:${payload.timestamp}`;
+		const context = await auth.$context;
+		const deliver = () => {
+			const timestamp = Math.floor(Date.now() / 1000);
+			const signature = createHmac("sha256", secret)
+				.update(`${timestamp}.${rawBody}`)
+				.digest("hex");
+			return auth.handler(
+				new Request("http://localhost:3000/api/auth/streampay/webhooks", {
+					method: "POST",
+					headers: {
+						"content-type": "application/json",
+						"x-webhook-signature": `t=${timestamp},v1=${signature}`,
+					},
+					body: rawBody,
+				}),
+			);
+		};
+		const readRow = () =>
+			context.adapter.findOne<WebhookEventRow>({
+				model: eventModel,
+				where: [{ field: "eventId", value: eventId }],
+			});
+		const makeRetryDue = () =>
+			context.adapter.update({
+				model: eventModel,
+				update: { nextAttemptAt: new Date(Date.now() - 1000) },
+				where: [{ field: "eventId", value: eventId }],
+			});
+		const processDue = async (): Promise<{
+			succeeded: string[];
+			failed: Array<{ eventId: string; error: string }>;
+		}> => {
+			const endpoint = auth.api.processDueStreampayWebhookEvents;
+			if (typeof endpoint !== "function") throw new Error("process-due endpoint is not registered");
+			return endpoint({ body: {} });
+		};
+		return { auth, context, rawBody, eventId, deliver, readRow, makeRetryDue, processDue };
+	}
+
+	it("retries a failed callback only after its scheduled retry time", async () => {
+		const callback = vi
+			.fn<WebhookEnvelopeHandler>()
+			.mockRejectedValueOnce(new Error("Callback unavailable"))
+			.mockResolvedValue(undefined);
+		const { eventId, deliver, readRow, makeRetryDue, processDue } = await dueFixture(
+			callback,
+			"due-retry-payment",
+		);
+
+		expect((await deliver()).status).toBe(500);
+		expect(await readRow()).toMatchObject({ status: "pending", lockedBy: null });
+		expect((await readRow())?.nextAttemptAt?.getTime()).toBeGreaterThan(Date.now());
+
+		expect(await processDue()).toEqual({ succeeded: [], failed: [] });
+		expect(callback).toHaveBeenCalledTimes(1);
+
+		await makeRetryDue();
+		expect(await processDue()).toEqual({ succeeded: [eventId], failed: [] });
+		expect(callback).toHaveBeenCalledTimes(2);
+		expect(await readRow()).toMatchObject({
+			status: "completed",
+			attemptCount: 2,
+			nextAttemptAt: null,
+			rawPayload: null,
+		});
+	});
+
+	it("recovers an event whose processing lease was abandoned by a crashed worker", async () => {
+		const callback = vi.fn<WebhookEnvelopeHandler>().mockResolvedValue(undefined);
+		const { context, rawBody, eventId, readRow, processDue } = await dueFixture(
+			callback,
+			"abandoned-lease-payment",
+		);
+		const abandonedAt = new Date(Date.now() - 3 * 60 * 1000);
+		await context.adapter.create({
+			model: eventModel,
+			data: {
+				eventId,
+				eventType: "PAYMENT_SUCCEEDED",
+				status: "pending",
+				attemptCount: 1,
+				receivedAt: abandonedAt,
+				lastAttemptAt: abandonedAt,
+				lockedAt: abandonedAt,
+				lockedBy: "crashed-worker",
+				rawPayload: rawBody,
+			},
+		});
+
+		expect(await processDue()).toEqual({ succeeded: [eventId], failed: [] });
+		expect(callback).toHaveBeenCalledTimes(1);
+		expect(await readRow()).toMatchObject({ status: "completed", lockedBy: null });
+	});
+
+	it("keeps failed retries pending until the attempt budget is spent, then dead-letters", async () => {
+		const callback = vi
+			.fn<WebhookEnvelopeHandler>()
+			.mockRejectedValue(new Error("Callback unavailable"));
+		const { eventId, deliver, readRow, makeRetryDue, processDue } = await dueFixture(
+			callback,
+			"due-exhaustion-payment",
+		);
+
+		expect((await deliver()).status).toBe(500);
+		for (let attempt = 2; attempt <= 5; attempt++) {
+			await makeRetryDue();
+			const result = await processDue();
+			expect(result.succeeded).toEqual([]);
+			expect(result.failed).toEqual([{ eventId, error: "Callback unavailable" }]);
+			expect(await readRow()).toMatchObject({
+				attemptCount: attempt,
+				status: attempt < 5 ? "pending" : "dead_letter",
+			});
+		}
+		await makeRetryDue();
+		expect(await processDue()).toEqual({ succeeded: [], failed: [] });
+		expect(callback).toHaveBeenCalledTimes(5);
+	});
+
+	it("is callable only from the server", async () => {
+		const { auth } = await dueFixture(vi.fn<WebhookEnvelopeHandler>(), "server-only-payment");
+		const response = await auth.handler(
+			new Request("http://localhost:3000/api/auth/streampay/webhooks/process-due", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: "{}",
+			}),
+		);
+		expect(response.status).toBe(404);
 	});
 });

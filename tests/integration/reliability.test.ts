@@ -208,7 +208,7 @@ describe("production reliability boundaries", () => {
 		const first = send();
 		await started;
 		try {
-			expect((await send()).status).toBe(200);
+			expect((await send()).status).toBe(503);
 		} finally {
 			release();
 		}
