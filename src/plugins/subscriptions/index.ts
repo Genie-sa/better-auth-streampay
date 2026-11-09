@@ -76,6 +76,7 @@ export interface StreamPayPluginRegistry {
 	replayWebhookEvent?: (
 		ctx: GenericEndpointContext,
 		eventId: string,
+		/** @deprecated No effect. */
 		options?: WebhookReplayOptions,
 	) => Promise<{ replayed: true; eventId: string }>;
 	replayWebhookHandler?: NonNullable<StreamPayPluginRegistry["replayWebhookEvent"]>;

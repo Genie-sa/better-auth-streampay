@@ -15,9 +15,14 @@ const PLAN = {
 };
 
 describe("webhook inbox replay", () => {
-	async function replayAfterTransientFailure(status: WebhookEventRow["status"]) {
+	async function replayAfterTransientFailure(
+		status: WebhookEventRow["status"],
+		{ attemptCount = 1, httpStatus = 503 } = {},
+	) {
 		const client = createMockStreamPayClient();
-		client.getSubscription.mockRejectedValue(mockApiError(503, { message: "unavailable" }, "GET"));
+		client.getSubscription.mockRejectedValue(
+			mockApiError(httpStatus, { message: "replay failure" }, "GET"),
+		);
 		const registry: StreamPayPluginRegistry = {};
 		subscriptions({ plans: [PLAN] })(createTestStreamPayOptions({ client }), registry);
 		const ctx = createMockSyncContext();
@@ -29,7 +34,7 @@ describe("webhook inbox replay", () => {
 				eventId,
 				eventType: payload.event_type,
 				status,
-				attemptCount: 1,
+				attemptCount,
 				receivedAt: new Date(),
 				lockedAt: null,
 				lockedBy: null,
@@ -49,6 +54,20 @@ describe("webhook inbox replay", () => {
 			attemptCount: 2,
 			lockedBy: null,
 			deadLetteredAt: null,
+		});
+	});
+
+	it("dead-letters a pending event when its replay spends the last attempt", async () => {
+		expect(await replayAfterTransientFailure("pending", { attemptCount: 4 })).toMatchObject({
+			status: "dead_letter",
+			attemptCount: 5,
+		});
+	});
+
+	it("dead-letters a pending event when its replay fails permanently", async () => {
+		expect(await replayAfterTransientFailure("pending", { httpStatus: 400 })).toMatchObject({
+			status: "dead_letter",
+			attemptCount: 2,
 		});
 	});
 

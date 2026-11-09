@@ -1,5 +1,5 @@
 ---
-"better-auth-streampay": patch
+"better-auth-streampay": minor
 ---
 
 A failed admin webhook replay no longer dead-letters an event that was still pending. Before, the
