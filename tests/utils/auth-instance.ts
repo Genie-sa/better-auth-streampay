@@ -27,6 +27,7 @@ export interface StreamPayTestInstance {
 		options: { plugins?: Array<{ id: string; version?: string }> };
 		$context: Promise<{
 			adapter: {
+				create: <T>(input: { model: string; data: Record<string, unknown> }) => Promise<T>;
 				findOne: <T>(input: {
 					model: string;
 					where: Array<{ field: string; value: unknown }>;

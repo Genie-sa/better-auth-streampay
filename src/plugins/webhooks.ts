@@ -1,4 +1,5 @@
 import { APIError, createAuthEndpoint } from "better-auth/api";
+import { z } from "zod";
 import type { StreamPayOptions } from "../types";
 import { getLogger } from "../utils/logger";
 import { dispatchWebhook, type WebhookHandlers } from "../webhooks/dispatcher";
@@ -10,12 +11,26 @@ import {
 	claimOrAdvanceWebhookEvent,
 	claimWebhookEventForReplay,
 	DEFAULT_MAX_WEBHOOK_ATTEMPTS,
+	findDueWebhookEvents,
 	markWebhookEventCompleted,
 	recordWebhookEventFailure,
 	type SyncContext,
 	WEBHOOK_EVENT_MODEL,
+	WebhookEventInProgressError,
 	type WebhookEventRow,
 } from "./subscriptions/sync";
+
+const DEFAULT_DUE_WEBHOOK_BATCH = 25;
+
+const ProcessDueWebhookEventsBody = z
+	.object({ limit: z.number().int().min(1).max(100).optional() })
+	.optional();
+
+function inProgressError(): APIError {
+	return new APIError("SERVICE_UNAVAILABLE", {
+		message: "Webhook event is already being processed. Retry later.",
+	});
+}
 
 export interface WebhooksOptions extends WebhookHandlers {
 	secret: string | readonly string[];
@@ -46,7 +61,7 @@ export const webhooks = (webhooksOptions: WebhooksOptions) => {
 	return (_options: StreamPayOptions, registry?: StreamPayPluginRegistry) => {
 		const { secret, toleranceSeconds, deduplicate = false, ...handlers } = webhooksOptions;
 		if (deduplicate && registry) {
-			registry.replayWebhookHandler = async (ctx, eventId) => {
+			registry.replayWebhookHandler = async (ctx, eventId, replayOptions) => {
 				const syncContext = { context: ctx.context as SyncContext["context"] };
 				const row = await syncContext.context.adapter.findOne<WebhookEventRow>({
 					model: WEBHOOK_EVENT_MODEL,
@@ -84,7 +99,8 @@ export const webhooks = (webhooksOptions: WebhooksOptions) => {
 						row.signatureHeader,
 						err,
 						claimed.lockedBy,
-						true,
+						!replayOptions?.retryUntilExhausted ||
+							claimed.attemptCount >= DEFAULT_MAX_WEBHOOK_ATTEMPTS,
 					);
 					throw err;
 				}
@@ -152,6 +168,7 @@ export const webhooks = (webhooksOptions: WebhooksOptions) => {
 									signatureHeader,
 								});
 							} catch (err: unknown) {
+								if (err instanceof WebhookEventInProgressError) throw inProgressError();
 								const message = err instanceof Error ? err.message : String(err);
 								logger.error(`subscription sync failed: ${message}`);
 								throw new APIError("INTERNAL_SERVER_ERROR", {
@@ -171,6 +188,7 @@ export const webhooks = (webhooksOptions: WebhooksOptions) => {
 									"handlers",
 								)
 							: null;
+						if (claim?.action === "skip" && claim.reason === "in_progress") throw inProgressError();
 						if (claim && claim.action !== "process") return ctx.json({ received: true });
 						const row = claim?.action === "process" ? claim.row : null;
 						try {
@@ -196,6 +214,49 @@ export const webhooks = (webhooksOptions: WebhooksOptions) => {
 						}
 
 						return ctx.json({ received: true });
+					},
+				),
+				processDueStreampayWebhookEvents: createAuthEndpoint(
+					"/streampay/webhooks/process-due",
+					{
+						method: "POST",
+						body: ProcessDueWebhookEventsBody,
+						metadata: { SERVER_ONLY: true },
+					},
+					async (ctx) => {
+						const replay = registry?.replayWebhookEvent;
+						if (!replay) {
+							throw new APIError("BAD_REQUEST", {
+								message:
+									"Retry processing requires the webhook inbox: enable subscriptions or webhooks({ deduplicate: true }).",
+							});
+						}
+						const syncContext = { context: ctx.context as SyncContext["context"] };
+						const due = await findDueWebhookEvents(
+							syncContext,
+							new Date(),
+							ctx.body?.limit ?? DEFAULT_DUE_WEBHOOK_BATCH,
+						);
+						const succeeded: string[] = [];
+						const failed: Array<{ eventId: string; error: string }> = [];
+						for (const row of due) {
+							try {
+								await replay(ctx, row.eventId, { retryUntilExhausted: true });
+								succeeded.push(row.eventId);
+							} catch (err: unknown) {
+								if (err instanceof APIError && err.status === "CONFLICT") continue;
+								failed.push({
+									eventId: row.eventId,
+									error: err instanceof Error ? err.message : String(err),
+								});
+							}
+						}
+						if (failed.length > 0) {
+							getLogger(ctx).error(
+								`webhook retry: ${failed.length} of ${due.length} due events failed again`,
+							);
+						}
+						return ctx.json({ succeeded, failed });
 					},
 				),
 			},

@@ -114,6 +114,56 @@ export type ClaimAdvanceResult =
 export const WEBHOOK_PROCESSING_LEASE_MS = 2 * 60 * 1000;
 const WEBHOOK_RETRY_DELAYS_MS = [5, 30, 120, 360, 720].map((minutes) => minutes * 60 * 1000);
 
+/**
+ * A concurrent delivery holds the processing lease. Surfaced as a retryable HTTP failure so the
+ * provider redelivers instead of treating the event as handled while the lease holder may crash.
+ */
+export class WebhookEventInProgressError extends Error {
+	constructor(eventType: string) {
+		super(`Webhook ${eventType} is already being processed; retry later.`);
+		this.name = "WebhookEventInProgressError";
+	}
+}
+
+export interface WebhookReplayOptions {
+	/** Keep a failed replay retryable until the inbox attempt budget is spent instead of dead-lettering it. */
+	retryUntilExhausted?: boolean;
+}
+
+/** Pending events whose retry time has passed, plus events whose processing lease was abandoned. */
+export async function findDueWebhookEvents(
+	ctx: { context: { adapter: PluginAdapter } },
+	now: Date,
+	limit: number,
+): Promise<WebhookEventRow[]> {
+	const [retryDue, abandoned] = await Promise.all([
+		ctx.context.adapter.findMany<WebhookEventRow>({
+			model: WEBHOOK_EVENT_MODEL,
+			where: [
+				{ field: "status", value: "pending" },
+				{ field: "nextAttemptAt", operator: "lte", value: now },
+			],
+			limit,
+			sortBy: { field: "nextAttemptAt", direction: "asc" },
+		}),
+		ctx.context.adapter.findMany<WebhookEventRow>({
+			model: WEBHOOK_EVENT_MODEL,
+			where: [
+				{ field: "status", value: "pending" },
+				{
+					field: "lockedAt",
+					operator: "lt",
+					value: new Date(now.getTime() - WEBHOOK_PROCESSING_LEASE_MS),
+				},
+			],
+			limit,
+			sortBy: { field: "lockedAt", direction: "asc" },
+		}),
+	]);
+	const byId = new Map([...retryDue, ...abandoned].map((row) => [row.id, row]));
+	return [...byId.values()].slice(0, limit);
+}
+
 export async function claimOrAdvanceWebhookEvent(
 	ctx: SyncContext,
 	payload: StreamPayWebhookEnvelope,
@@ -740,6 +790,9 @@ export async function syncWebhookPayload(
 	let claim: ClaimAdvanceResult = { action: "process", row: null };
 	if (dedupe) {
 		claim = await claimOrAdvanceWebhookEvent(ctx, payload, rawBody, signatureHeader, maxAttempts);
+		if (claim.action === "skip" && claim.reason === "in_progress") {
+			throw new WebhookEventInProgressError(payload.event_type);
+		}
 		if (claim.action === "skip") return;
 		if (claim.action === "dead_letter") {
 			logger(ctx).warn(

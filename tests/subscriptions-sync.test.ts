@@ -7,6 +7,7 @@ import {
 	classifyWebhookFailure,
 	markWebhookEventCompleted,
 	syncWebhookPayload,
+	WebhookEventInProgressError,
 	type WebhookEventRow,
 } from "../src/plugins/subscriptions/sync";
 import {
@@ -262,7 +263,7 @@ describe("syncWebhookPayload", () => {
 			expect(ctx.logs.info.some((m) => m.includes("already completed"))).toBe(true);
 		});
 
-		it("skips a concurrent delivery while the first attempt holds the processing lease", async () => {
+		it("rejects a concurrent delivery as retryable while the first attempt holds the processing lease", async () => {
 			const ctx = createMockSyncContext();
 			const timestamp = "2026-01-01T00:00:00.000Z";
 			await ctx.adapter.create({
@@ -279,17 +280,19 @@ describe("syncWebhookPayload", () => {
 				},
 			});
 
-			await syncWebhookPayload(
-				ctx,
-				createMockWebhookPayload({
-					event_type: "SUBSCRIPTION_ACTIVATED",
-					entity_id: "sub_concurrent",
-					timestamp,
-				}),
-				client,
-				resolvedPlans(),
-				{},
-			);
+			await expect(
+				syncWebhookPayload(
+					ctx,
+					createMockWebhookPayload({
+						event_type: "SUBSCRIPTION_ACTIVATED",
+						entity_id: "sub_concurrent",
+						timestamp,
+					}),
+					client,
+					resolvedPlans(),
+					{},
+				),
+			).rejects.toBeInstanceOf(WebhookEventInProgressError);
 
 			expect(client.getSubscription).not.toHaveBeenCalled();
 			expect(ctx.logs.info.some((message) => message.includes("already being processed"))).toBe(

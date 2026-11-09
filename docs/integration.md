@@ -578,7 +578,22 @@ the `handlers:` event ID prefix and support the existing authenticated admin rep
 The default is `false` to preserve existing installations that have no inbox table.
 
 Verified payloads are persisted when processing is claimed, so an interrupted delivery can be
-recovered after its two-minute lease expires. A callback that outlives the lease can run again
+recovered after its two-minute lease expires. A delivery that arrives while another worker holds
+the lease gets `503`, so StreamPay redelivers it instead of treating it as handled.
+
+StreamPay redelivery is not a retry schedule you control. Run the server-only retry endpoint on a
+schedule (for example every minute) so failed events are retried at `nextAttemptAt` and abandoned
+leases are reclaimed:
+
+```ts
+const { succeeded, failed } = await auth.api.processDueStreampayWebhookEvents({
+  body: { limit: 25 },
+});
+```
+
+It processes pending events whose retry time has passed or whose lease expired, keeps failures
+pending with backoff until the attempt budget is spent, and then dead-letters them. The endpoint
+has no HTTP route. Dead-lettered events still need the admin replay endpoint. A callback that outlives the lease can run again
 when another delivery claims it. Callbacks must still be idempotent: a crash after an external
 side effect, or failure of a later callback, can repeat earlier work on retry. Inbox deduplication
 does not provide exactly-once execution of external side effects.

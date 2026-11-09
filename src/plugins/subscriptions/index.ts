@@ -12,12 +12,14 @@ import { SUBSCRIPTION_STATUSES } from "./status";
 import {
 	claimWebhookEventForReplay,
 	classifyWebhookFailure,
+	DEFAULT_MAX_WEBHOOK_ATTEMPTS,
 	markWebhookEventCompleted,
 	recordWebhookEventFailure,
 	type SyncContext,
 	syncWebhookPayload,
 	WEBHOOK_EVENT_MODEL,
 	type WebhookEventRow,
+	type WebhookReplayOptions,
 } from "./sync";
 import type { StreamPayPlanLike, SubscriptionsOptions } from "./types";
 
@@ -35,6 +37,8 @@ export {
 	type PluginAdapter,
 	type SyncContext,
 	syncWebhookPayload,
+	WebhookEventInProgressError,
+	type WebhookReplayOptions,
 	type WebhookSyncFailure,
 } from "./sync";
 export type {
@@ -72,6 +76,7 @@ export interface StreamPayPluginRegistry {
 	replayWebhookEvent?: (
 		ctx: GenericEndpointContext,
 		eventId: string,
+		options?: WebhookReplayOptions,
 	) => Promise<{ replayed: true; eventId: string }>;
 	replayWebhookHandler?: NonNullable<StreamPayPluginRegistry["replayWebhookEvent"]>;
 }
@@ -132,9 +137,9 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 			};
 
 			if (dedupeEnabled) {
-				registry.replayWebhookEvent = async (ctx, eventId) => {
+				registry.replayWebhookEvent = async (ctx, eventId, replayOptions) => {
 					if (eventId.startsWith("handlers:") && registry.replayWebhookHandler) {
-						return registry.replayWebhookHandler(ctx, eventId);
+						return registry.replayWebhookHandler(ctx, eventId, replayOptions);
 					}
 					const syncCtx: SyncContext = {
 						context: ctx.context as SyncContext["context"],
@@ -192,6 +197,7 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 						await markWebhookEventCompleted(syncCtx, claimed.id, claimed.lockedBy);
 						return { replayed: true, eventId };
 					} catch (err) {
+						const maxAttempts = subsOptions.maxWebhookAttempts ?? DEFAULT_MAX_WEBHOOK_ATTEMPTS;
 						await recordWebhookEventFailure(
 							syncCtx,
 							claimed.id,
@@ -199,7 +205,9 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 							null,
 							err,
 							claimed.lockedBy,
-							true,
+							!replayOptions?.retryUntilExhausted ||
+								classifyWebhookFailure(err) === "PERMANENT" ||
+								claimed.attemptCount >= maxAttempts,
 						);
 						throw err;
 					}

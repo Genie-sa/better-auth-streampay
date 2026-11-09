@@ -124,7 +124,7 @@ processing idempotent and observable.
 | `eventType` | string, required | StreamPay event such as `SUBSCRIPTION_PLAN_UPDATED`. Useful for routing, debugging, and operations. |
 | `receivedAt` | date, required, indexed | First receipt time. |
 | `lastAttemptAt` | nullable date, indexed | Most recent processing/replay attempt. |
-| `nextAttemptAt` | nullable date, indexed | Earliest automatic retry time after transient failure. |
+| `nextAttemptAt` | nullable date, indexed | Earliest time `processDueStreampayWebhookEvents` retries the event after a transient failure. |
 | `completedAt` | nullable date, indexed | Successful completion time. Completed events no longer retain replay payload/signature data. |
 | `deadLetteredAt` | nullable date, indexed | Time a permanent failure or exhausted retry budget moved the event to manual review. |
 | `lockedAt` | nullable date, indexed | Start time of the current processing lease. Stale leases can be safely reclaimed. |
