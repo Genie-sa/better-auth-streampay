@@ -19,7 +19,6 @@ import {
 	syncWebhookPayload,
 	WEBHOOK_EVENT_MODEL,
 	type WebhookEventRow,
-	type WebhookReplayOptions,
 } from "./sync";
 import type { StreamPayPlanLike, SubscriptionsOptions } from "./types";
 
@@ -38,7 +37,6 @@ export {
 	type SyncContext,
 	syncWebhookPayload,
 	WebhookEventInProgressError,
-	type WebhookReplayOptions,
 	type WebhookSyncFailure,
 } from "./sync";
 export type {
@@ -76,7 +74,6 @@ export interface StreamPayPluginRegistry {
 	replayWebhookEvent?: (
 		ctx: GenericEndpointContext,
 		eventId: string,
-		options?: WebhookReplayOptions,
 	) => Promise<{ replayed: true; eventId: string }>;
 	replayWebhookHandler?: NonNullable<StreamPayPluginRegistry["replayWebhookEvent"]>;
 }
@@ -137,9 +134,9 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 			};
 
 			if (dedupeEnabled) {
-				registry.replayWebhookEvent = async (ctx, eventId, replayOptions) => {
+				registry.replayWebhookEvent = async (ctx, eventId) => {
 					if (eventId.startsWith("handlers:") && registry.replayWebhookHandler) {
-						return registry.replayWebhookHandler(ctx, eventId, replayOptions);
+						return registry.replayWebhookHandler(ctx, eventId);
 					}
 					const syncCtx: SyncContext = {
 						context: ctx.context as SyncContext["context"],
@@ -178,6 +175,7 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 					}
 					const payload = parsedPayload;
 					const plans = await plansRef();
+					const previousStatus = row.status;
 					const claimed = await claimWebhookEventForReplay(syncCtx, row);
 					if (!claimed?.lockedBy) {
 						throw new APIError("CONFLICT", {
@@ -189,6 +187,7 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 					try {
 						await syncWebhookPayload(syncCtx, payload, options.client, plans, subsOptions, {
 							dedupe: false,
+							retryOnCallbackError: subsOptions.retryOnCallbackError !== false,
 							retryingRenewalCallback:
 								claimed.lastError?.startsWith(
 									"Subscription callback onSubscriptionRenewed failed:",
@@ -205,7 +204,7 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 							null,
 							err,
 							claimed.lockedBy,
-							!replayOptions?.retryUntilExhausted ||
+							previousStatus === "dead_letter" ||
 								classifyWebhookFailure(err) === "PERMANENT" ||
 								claimed.attemptCount >= maxAttempts,
 						);

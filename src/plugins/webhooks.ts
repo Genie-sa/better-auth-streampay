@@ -61,7 +61,7 @@ export const webhooks = (webhooksOptions: WebhooksOptions) => {
 	return (_options: StreamPayOptions, registry?: StreamPayPluginRegistry) => {
 		const { secret, toleranceSeconds, deduplicate = false, ...handlers } = webhooksOptions;
 		if (deduplicate && registry) {
-			registry.replayWebhookHandler = async (ctx, eventId, replayOptions) => {
+			registry.replayWebhookHandler = async (ctx, eventId) => {
 				const syncContext = { context: ctx.context as SyncContext["context"] };
 				const row = await syncContext.context.adapter.findOne<WebhookEventRow>({
 					model: WEBHOOK_EVENT_MODEL,
@@ -83,6 +83,7 @@ export const webhooks = (webhooksOptions: WebhooksOptions) => {
 					throw new APIError("BAD_REQUEST", {
 						message: "Stored webhook payload is not a valid event envelope.",
 					});
+				const previousStatus = row.status;
 				const claimed = await claimWebhookEventForReplay(syncContext, row);
 				if (!claimed?.lockedBy)
 					throw new APIError("CONFLICT", {
@@ -99,7 +100,7 @@ export const webhooks = (webhooksOptions: WebhooksOptions) => {
 						row.signatureHeader,
 						err,
 						claimed.lockedBy,
-						!replayOptions?.retryUntilExhausted ||
+						previousStatus === "dead_letter" ||
 							claimed.attemptCount >= DEFAULT_MAX_WEBHOOK_ATTEMPTS,
 					);
 					throw err;
@@ -241,7 +242,7 @@ export const webhooks = (webhooksOptions: WebhooksOptions) => {
 						const failed: Array<{ eventId: string; error: string }> = [];
 						for (const row of due) {
 							try {
-								await replay(ctx, row.eventId, { retryUntilExhausted: true });
+								await replay(ctx, row.eventId);
 								succeeded.push(row.eventId);
 							} catch (err: unknown) {
 								if (err instanceof APIError && err.status === "CONFLICT") continue;

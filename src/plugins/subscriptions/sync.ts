@@ -125,11 +125,6 @@ export class WebhookEventInProgressError extends Error {
 	}
 }
 
-export interface WebhookReplayOptions {
-	/** Keep a failed replay retryable until the inbox attempt budget is spent instead of dead-lettering it. */
-	retryUntilExhausted?: boolean;
-}
-
 /** Pending events whose retry time has passed, plus events whose processing lease was abandoned. */
 export async function findDueWebhookEvents(
 	ctx: { context: { adapter: PluginAdapter } },
