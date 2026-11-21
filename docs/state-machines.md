@@ -66,7 +66,7 @@ overlay: StreamPay keeps reporting `ACTIVE` while a renewal payment is outstandi
 
 | ID | Invariant | Enforced by |
 | --- | --- | --- |
-| S1 | `activeSlotKey` is non-null exactly when the status is not terminal. | `projectSubscriptionFields` clears the slot for terminal statuses. Releases set `incomplete_expired` and a null slot together. Webhook reconciliation and renewal evidence backfill a missing slot for live rows through `liveSlotKey` and the S4 takeover (`sync.ts`). Endpoint projections only clear it; the next webhook backfills. |
+| S1 | `activeSlotKey` is non-null exactly when the status is not terminal. | `projectSubscriptionFields` clears the slot for terminal statuses. Releases set `incomplete_expired` and a null slot together. Webhook reconciliation and renewal evidence backfill a missing slot for live rows through `liveSlotKey` and the S4 takeover (`sync.ts`). Endpoint projections take a free slot when they observe a revival, and skip the write when another row holds it, leaving the conflict to the webhook path (`persistSubscriptionProjection`, F17). |
 | S2 | At most one row holds a slot. | Database unique constraint on `activeSlotKey`. |
 | S3 | A provider subscription maps to at most one row. A payment link maps to at most one row. | Unique `streampaySubscriptionId` and `streampayPaymentLinkId`. |
 | S4 | A provider-confirmed subscription outranks an unpaid reservation (`incomplete` with no StreamPay subscription ID) for the same slot. Two live subscriptions in one slot are never written silently. | `updateReconciledSubscription` and `handleRenewalEvidence` run `takeSlotFromReservation` after their stale-state checks (`sync.ts`). |
@@ -199,9 +199,11 @@ retries without firing for two events of the same cycle.
 
 Invariants: while the lock is set, its cycle's callback has not been delivered, and other renewal
 evidence for that subscription waits until the lock clears. Only renewal evidence advances
-`renewedCycleNumber`. Every other projection keeps it, or pins it to the row's current cycle when
-it is still null on a legacy row, so a webhook or endpoint that writes the new cycle first cannot
-absorb the renewal (F13). StreamPay's cycle counter is the renewal identity because period
+`renewedCycleNumber`. Every other projection leaves it untouched, or initializes it to the row's
+current cycle when it is still null on a legacy row, so a webhook or endpoint that writes the new
+cycle first cannot absorb the renewal (F13). Every lifecycle CAS includes the marker, so a
+projection prepared before a renewal callback cannot roll it back and let a second renewal event
+deliver the callback again (F14). StreamPay's cycle counter is the renewal identity because period
 boundaries drift: live sandbox subscriptions started in July read cycle 5 in November, and their
 periods start up to 9 minutes after `started_at`.
 
@@ -242,14 +244,15 @@ the same ID with a `handlers:` prefix.
 | W-e | Processing succeeds | E1 | E3 | `markWebhookEventCompleted(lockedBy)` |
 | W-f | Transient failure, attempts left | E1 | E2 (`nextAttemptAt` set) | `recordWebhookEventFailure` |
 | W-g | Permanent failure (`SubscriptionCorrelationError`, including two live subscriptions in one slot, or a provider 4xx other than 404 and 429), or attempts exhausted | E1 | E4 | same |
-| W-h | Admin replay, or `processDueStreampayWebhookEvents` for E2 events whose `nextAttemptAt` passed or whose lease expired | E2 or E4 | E1 | `claimWebhookEventForReplay`, `findDueWebhookEvents` |
+| W-h | Admin replay, or `processDueStreampayWebhookEvents` for E2 events whose `nextAttemptAt` passed or whose lease expired | E2 or E4 (admin), E2 still at the selected attempt and still due (processor) | E1 | `claimWebhookEventForReplay` (CAS on `status`, `lockedAt`, and `attemptCount`), `findDueWebhookEvents`, `isStillDueWebhookEvent` (F15) |
 | W-i | Replay fails | E1 | E2 if it came from E2 with attempts left and a transient error, else E4 | #27. Before it, every admin replay failure dead-lettered. |
 | W-j | Admin discard | any | E3 | `adminDiscardWebhookEvent`. Ignores a live lease by design. |
-| W-k | Replay or due-event processing finds no replayable payload | E2 | E2p (request gets 400) | `parkUnreplayableWebhookEvent`. Before it, the row stayed due and filled every batch (F12). |
+| W-k | Replay or due-event processing finds no replayable payload | E2 | E2p (request gets 400) | `parkUnreplayableWebhookEvent`, a CAS on `status`, `lockedAt`, and `attemptCount`, so a redelivery that repaired the row in between wins (F16). Before it, the row stayed due and filled every batch (F12). |
 
 E2 events move on a StreamPay redelivery, an admin replay, or a scheduled call to
 `processDueStreampayWebhookEvents`, which selects them by `nextAttemptAt` and expired leases. E2p
-events wait for a StreamPay redelivery or an admin discard. Only rows written without a raw body
+events wait for a StreamPay redelivery or an admin discard. StreamPay stops after its fifth retry
+(about 20 hours), so an E2p row that outlives that window needs an admin discard. Only rows written without a raw body
 reach E2p: callers of the exported `syncWebhookPayload` that omit `rawBody`, or rows from older
 versions.
 
@@ -314,6 +317,10 @@ PostgreSQL 17. Run the end-to-end tests on PostgreSQL with `STREAMPAY_E2E_DB=pos
 | F10 | Medium | 1 | `past_due` (and billing `past_due`) after StreamPay recorded the payment. | A renewal fails. The customer pays the outstanding invoice, then some other write reaches the row before `INVOICE_COMPLETED` is processed (a retry after a failed first delivery, or a customer action). The invoice event is stale and the stale branch keeps `past_due`. This is R1. | `past_due` until the next successful cycle. Apps whose `accessStatuses` exclude `past_due` lock out a paying customer, and `onSubscriptionRenewed` is skipped for that evidence. | S8: stale evidence still clears `past_due` when its invoice is the provider's `latest_invoice` and that invoice is `COMPLETED` (Issue 4) |
 | F11 | Low | 1 | S1 broken: a live status with `activeSlotKey = null`, and a revival that skips S4's duplicate check. | StreamPay revives a terminal subscription and `INVOICE_COMPLETED` (or `SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY`) is processed before any other subscription event. `handleRenewalEvidence` wrote the projection without the slot logic of the reconcile path. | The row is `active` without a slot until another webhook backfills it. If a replacement subscription holds the slot, two live subscriptions exist, and the renewal path never raises the correlation error, so the customer can be billed twice unnoticed. | `liveSlotKey` plus `takeSlotFromReservation` in `handleRenewalEvidence` (Issue 5) |
 | F13 | Medium | 6 | A renewed cycle whose `onSubscriptionRenewed` never runs. | Another writer stores the new cycle before the renewal evidence is processed: `SUBSCRIPTION_PLAN_CHANGED` when a scheduled change applies at renewal, any other subscription event, or a customer action, including during a retry backoff of `INVOICE_COMPLETED`. The evidence then compares against the already advanced row and sees no renewal. This is R9. | No renewal callback for that cycle, so apps that grant per-cycle credits or send receipts skip it silently. | `renewedCycleNumber` (Issue 7). Needs the migration in the integration guide. |
+| F14 | High | 6 | `renewedCycleNumber` rolled back after its callback ran, so a second renewal event delivers `onSubscriptionRenewed` again. | Found in review of the F13 fix. A customer endpoint (or webhook) reads the row, `INVOICE_COMPLETED` then advances the marker and runs the callback, and the endpoint write restores the old marker. Its CAS matched because the provider timestamp was unchanged. `SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY` then counted as a new renewal. | Duplicate per-cycle side effects. | Projections only initialize the marker, and every CAS includes it |
+| F15 | Medium | 7 | A due-queue retry before its backoff, or an automatic retry of a dead letter. | Pre-existing. Two overlapping `processDueStreampayWebhookEvents` runs select the same row. The first claims it and fails. The second replayed by event ID, re-read the updated row, and claimed it again at once, even after it was dead-lettered. | Extra provider calls and callback runs, and dead letters leaving manual review. | The processor passes the selected attempt (`dueAttemptCount`); replay requires the row to still be that pending attempt and due, and the claim CAS includes `attemptCount` |
+| F16 | Medium | 7 | A repaired event parked as unreplayable. | Found in review of F12. Replay reads a pending row without payload; a redelivery then claims it, stores its payload, fails, and schedules a retry; the stale parking write still matched `pending` and `lockedAt = null`. | The retry time is erased, so the due processor never retries the event. | Parking CAS includes `attemptCount` |
+| F17 | Medium | 1 | Two live subscriptions in one slot, written silently by a customer endpoint. | StreamPay revives subscription A after replacement B took its slot. A customer action on A (for example `/subscription/uncancel`) projects A live with a null slot. This was R10. | Both rows grant access; nothing flags the duplicate billing until a later webhook dead-letters. | Endpoints take the slot when it is free and otherwise skip the write and log; only webhooks resolve slot conflicts |
 | F12 | Low | 7 | A pending inbox row that can never be replayed stays due forever. | A row without a replayable payload (see E2p) gets a `nextAttemptAt`. Replay rejects it before claiming, so nothing changes, and `processDueStreampayWebhookEvents` selects it first on every run. This is R8. | Enough such rows fill every batch, and other due events are never retried. A redelivery that reclaimed the row also did not store its payload. | W-k and W-c (Issue 6) |
 
 ### Live sandbox evidence for F9 and StreamPay timing
@@ -397,12 +404,15 @@ the due queue, keep them open to StreamPay redelivery, and store the payload a r
 **Issue 7, P2: Renewal callbacks are absorbed by other writers (F13).** Track the last handled
 cycle in its own column, advanced only by renewal evidence.
 
-Issues 4 to 7 are fixed on `ali/fix-stale-lifecycle-effects`. Regression tests:
+**Issue 8, P1: Review findings on the fixes (F14 to F17).** GPT-6.2 Astra reviewed the branch.
+F14 and F16 were regressions in the new code; F15 and F17 were pre-existing.
+
+Issues 4 to 8 are fixed on `ali/fix-stale-lifecycle-effects`. Regression tests:
 `tests/integration/stale-lifecycle.test.ts` (F8 to F11, plus two guards: a contradicted stale
 cancellation stays suppressed, and a late invoice that is not the latest keeps `past_due`) and
 `tests/integration/due-queue.test.ts` (F12). The `renewal callbacks` tests in the first file cover
-F13, including a legacy row without the marker. All nine bug tests fail on `main` and pass with the
-fix.
+F13 and F14, including a legacy row without the marker; the revival tests cover F17; the due-queue
+file covers F15 and F16. Every bug test fails on the code before its fix and passes after it.
 
 ### Open risks (not confirmed, not changed)
 
@@ -417,4 +427,5 @@ fix.
 | R7 | Fixed with F8 (Issue 4). | |
 | R8 | Confirmed as F12 and fixed. Parked rather than dead-lettered, so StreamPay retries still count (W4). | |
 | R9 | Confirmed as F13 and fixed. | |
-| R10 | Endpoint projections (`persistSubscriptionProjection`) clear the slot for terminal statuses but never reacquire it. A customer action that observes a revival writes a live status without a slot until the next webhook. | Upgrade checks live statuses, not only the slot, so no second checkout can start. The next webhook backfills (S1). |
+| R10 | Confirmed as F17 and fixed. | |
+| R11 | Renewal evidence for a subscription that is not yet linked to a local row is completed and dropped (`handleRenewalEvidence` finds no row). If the creation events fail past StreamPay's retry window and are replayed after a renewal, that cycle's `onSubscriptionRenewed` never runs. | Needs creation events to fail for about 20 hours across a billing boundary. Invoice events carry no plugin metadata, so the fix is to hold uncorrelated evidence for retry; left for a separate change. |

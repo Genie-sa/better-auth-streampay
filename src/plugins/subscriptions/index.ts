@@ -13,6 +13,7 @@ import {
 	claimWebhookEventForReplay,
 	classifyWebhookFailure,
 	DEFAULT_MAX_WEBHOOK_ATTEMPTS,
+	isStillDueWebhookEvent,
 	markWebhookEventCompleted,
 	parkUnreplayableWebhookEvent,
 	recordWebhookEventFailure,
@@ -139,9 +140,9 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 			};
 
 			if (dedupeEnabled) {
-				registry.replayWebhookEvent = async (ctx, eventId) => {
+				registry.replayWebhookEvent = async (ctx, eventId, replayOptions) => {
 					if (eventId.startsWith("handlers:") && registry.replayWebhookHandler) {
-						return registry.replayWebhookHandler(ctx, eventId);
+						return registry.replayWebhookHandler(ctx, eventId, replayOptions);
 					}
 					const syncCtx: SyncContext = {
 						context: ctx.context as SyncContext["context"],
@@ -154,6 +155,15 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 						throw new APIError("NOT_FOUND", {
 							code: $ERROR_CODES.NOT_FOUND.code,
 							message: `Webhook event ${eventId} not found.`,
+						});
+					}
+					if (
+						replayOptions?.dueAttemptCount !== undefined &&
+						!isStillDueWebhookEvent(row, replayOptions.dueAttemptCount, new Date())
+					) {
+						throw new APIError("CONFLICT", {
+							code: $ERROR_CODES.WEBHOOK_REPLAY_IN_PROGRESS.code,
+							message: `Webhook event ${eventId} is no longer due.`,
 						});
 					}
 					const unreplayable = async (message: string): Promise<never> => {

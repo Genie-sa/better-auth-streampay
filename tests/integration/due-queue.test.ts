@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { subscriptions, webhooks } from "../../src";
+import {
+	parkUnreplayableWebhookEvent,
+	type WebhookEventRow,
+} from "../../src/plugins/subscriptions/sync";
 import {
 	type Harness,
 	harness,
@@ -90,5 +94,64 @@ describe(`due webhook queue end-to-end (${TEST_WITH})`, () => {
 		expect((await h.deliver(parkedEventRedelivery(h))).status).toBe(500);
 
 		expect((await inboxRow(h, PARKED_EVENT_ID))?.lastError).toContain("payload=string");
+	});
+
+	it("does not let a stale parking read strand an event that a redelivery repaired", async () => {
+		const h = await harness([subscriptions({ plans: [TEAM] }), webhooks({ secret: SECRET })]);
+		await insertPendingRowWithoutPayload(h, null);
+		const staleRead = (await inboxRow(h, PARKED_EVENT_ID)) as unknown as WebhookEventRow;
+		h.stream.getSubscription.mockRejectedValue(
+			Object.assign(new Error("unavailable"), { status: 503, body: {} }),
+		);
+		await h.deliver(parkedEventRedelivery(h));
+
+		await parkUnreplayableWebhookEvent(
+			{ context: { adapter: (await h.auth.$context).adapter as never } },
+			staleRead,
+			"no payload",
+		);
+
+		expect(await inboxRow(h, PARKED_EVENT_ID)).toMatchObject({
+			status: "pending",
+			attemptCount: 2,
+			nextAttemptAt: expect.anything(),
+			rawPayload: expect.any(String),
+		});
+	});
+
+	it("does not let an overlapping due-queue run retry an event before its backoff", async () => {
+		const h = await harness([subscriptions({ plans: [TEAM] }), webhooks({ secret: SECRET })]);
+		h.stream.getSubscription.mockRejectedValue(
+			Object.assign(new Error("unavailable"), { status: 503, body: {} }),
+		);
+		await h.deliver(
+			subscriptionEvent(h, "SUBSCRIPTION_ACTIVATED", "sub_due", "2026-01-02T00:00:00.000Z"),
+		);
+		await h.setRow("streampayWebhookEvent", String((await inboxRow(h, DUE_EVENT_ID))?.id), {
+			nextAttemptAt: PAST,
+		});
+		h.stream.getSubscription.mockClear();
+		const adapter = (await h.auth.$context).adapter as unknown as {
+			findMany: (input: { model: string }) => Promise<unknown[]>;
+		};
+		const findMany = adapter.findMany.bind(adapter);
+		let releaseStaleRun = () => {};
+		const firstRunFinished = new Promise<void>((resolve) => {
+			releaseStaleRun = resolve;
+		});
+		let inboxQueries = 0;
+		vi.spyOn(adapter, "findMany").mockImplementation(async (input) => {
+			const rows = await findMany(input);
+			if (input.model === "streampayWebhookEvent" && ++inboxQueries <= 2) await firstRunFinished;
+			return rows;
+		});
+
+		const staleRun = processDue(h, 1);
+		await processDue(h, 1);
+		releaseStaleRun();
+		await staleRun;
+
+		expect(h.stream.getSubscription).toHaveBeenCalledTimes(1);
+		expect(await inboxRow(h, DUE_EVENT_ID)).toMatchObject({ status: "pending", attemptCount: 2 });
 	});
 });

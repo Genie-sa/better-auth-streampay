@@ -14,6 +14,7 @@ import { deactivatePaymentLink } from "./lifecycle";
 import type { ResolvedPlans } from "./plans";
 import {
 	inferPlanFromItems,
+	liveSlotKey,
 	parseDate,
 	projectPlanFields,
 	projectSubscriptionFields,
@@ -136,6 +137,11 @@ export class WebhookEventInProgressError extends Error {
 export interface WebhookReplayOptions {
 	/** @deprecated No effect: a failed replay keeps a pending event retryable until its attempts are spent. */
 	retryUntilExhausted?: boolean;
+	/**
+	 * Set by `processDueStreampayWebhookEvents`: replay only if the event is still pending at this
+	 * attempt and due. Otherwise the replay fails with `CONFLICT`.
+	 */
+	dueAttemptCount?: number;
 }
 
 /** Pending events whose retry time has passed, plus events whose processing lease was abandoned. */
@@ -309,8 +315,24 @@ export async function claimWebhookEventForReplay(
 			{ field: "id", value: row.id },
 			{ field: "status", value: row.status },
 			{ field: "lockedAt", value: row.lockedAt ?? null },
+			{ field: "attemptCount", value: row.attemptCount ?? null },
 		],
 	});
+}
+
+/** The due queue may retry a row only while it is still the pending attempt it selected and is due. */
+export function isStillDueWebhookEvent(
+	row: WebhookEventRow,
+	selectedAttemptCount: number,
+	now: Date,
+): boolean {
+	const retryDue = row.nextAttemptAt instanceof Date && row.nextAttemptAt <= now;
+	const leaseAbandoned = row.lockedAt instanceof Date && !hasLiveLease(row, now);
+	return (
+		row.status === "pending" &&
+		row.attemptCount === selectedAttemptCount &&
+		(retryDue || leaseAbandoned)
+	);
 }
 
 /**
@@ -336,6 +358,7 @@ export async function parkUnreplayableWebhookEvent(
 			{ field: "id", value: row.id },
 			{ field: "status", value: "pending" },
 			{ field: "lockedAt", value: row.lockedAt ?? null },
+			{ field: "attemptCount", value: row.attemptCount ?? null },
 		],
 	});
 }
@@ -572,16 +595,6 @@ function providerStateConfirmsEvent(eventType: string, stream: SubscriptionDetai
 	}
 }
 
-/** The slot a row must hold after the projection, or null when the projected status is terminal. */
-function liveSlotKey(existing: Subscription, projected: Partial<Subscription>): string | null {
-	if (isTerminalSubscriptionStatus(projected.status ?? existing.status)) return null;
-	return subscriptionSlotKey(
-		existing.referenceType ?? "user",
-		existing.referenceId,
-		projected.group === undefined ? existing.group : projected.group,
-	);
-}
-
 /**
  * A provider-confirmed subscription outranks an unpaid checkout reservation for the same slot.
  * Deactivating the reservation's link is best effort: it must never block the paid subscription.
@@ -696,6 +709,7 @@ async function updateReconciledSubscription(
 			{ field: "streampayConsumerId", value: existing.streampayConsumerId ?? null },
 			{ field: "status", value: existing.status },
 			{ field: "billingStatus", value: existing.billingStatus },
+			{ field: "renewedCycleNumber", value: existing.renewedCycleNumber ?? null },
 		],
 	});
 	if (!updated) {

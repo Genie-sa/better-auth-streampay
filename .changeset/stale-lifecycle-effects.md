@@ -20,3 +20,8 @@ the integration guide). Existing rows need no backfill.
   back, and dead-letters for review when another live subscription holds it.
 - A pending inbox event without a replayable payload no longer blocks
   `processDueStreampayWebhookEvents`, and a redelivery stores the payload it carries.
+- Overlapping `processDueStreampayWebhookEvents` runs no longer retry an event before its backoff or
+  automatically replay a dead letter. `WebhookReplayOptions.dueAttemptCount` carries the selected
+  attempt.
+- A customer action that observes a revived subscription takes its free billing slot, and no longer
+  writes it live while another subscription holds that slot.

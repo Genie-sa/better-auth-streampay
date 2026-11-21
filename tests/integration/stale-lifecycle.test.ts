@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { subscriptions, webhooks } from "../../src";
 import { subscriptionSlotKey } from "../../src/plugins/subscriptions/types";
+import { callAuthEndpoint } from "../utils/auth-instance";
 import {
+	type Harness,
 	harness,
 	providerSubscription,
 	SECRET,
@@ -232,8 +234,46 @@ describe(`stale lifecycle events end-to-end (${TEST_WITH})`, () => {
 				),
 			).toMatchObject({ status: "dead_letter", lastErrorCode: "SubscriptionCorrelationError" });
 		});
+
+		it("does not let a customer action revive a subscription into a slot another one holds", async () => {
+			const h = await inactiveSubscription();
+			h.stream.getSubscription.mockResolvedValue(
+				providerSubscription("sub_new", "ACTIVE", { updated_at: CANCEL_WRITE }),
+			);
+			await h.deliver(subscriptionEvent(h, "SUBSCRIPTION_ACTIVATED", "sub_new", CANCEL_EVENT));
+			h.stream.getSubscription.mockResolvedValue(
+				providerSubscription("sub_old", "ACTIVE", { updated_at: PLAN_WRITE }),
+			);
+
+			expect((await uncancel(h, "sub_old")).status).toBe(200);
+
+			expect(
+				(await h.rows("subscription")).find((row) => row.streampaySubscriptionId === "sub_old"),
+			).toMatchObject({ status: "inactive", activeSlotKey: null });
+		});
+
+		it("takes the free slot when a customer action observes a revival", async () => {
+			const h = await inactiveSubscription();
+			h.stream.getSubscription.mockResolvedValue(
+				providerSubscription("sub_old", "ACTIVE", { updated_at: PLAN_WRITE }),
+			);
+
+			expect((await uncancel(h, "sub_old")).status).toBe(200);
+
+			expect(await h.rows("subscription")).toMatchObject([
+				{ status: "active", activeSlotKey: subscriptionSlotKey("user", h.userId, null) },
+			]);
+		});
 	});
 });
+
+function uncancel(h: Harness, subscriptionId: string): Promise<Response> {
+	return callAuthEndpoint(h.auth, "/subscription/uncancel", {
+		method: "POST",
+		body: { subscriptionId },
+		headers: h.headers,
+	});
+}
 
 describe(`renewal callbacks end-to-end (${TEST_WITH})`, () => {
 	const CYCLE_1 = { current_cycle_number: 1, current_period_end: "2026-02-01T00:00:00.000Z" };
@@ -281,6 +321,21 @@ describe(`renewal callbacks end-to-end (${TEST_WITH})`, () => {
 		expect(await h.rows("subscription")).toMatchObject([
 			{ currentCycleNumber: 2, renewedCycleNumber: 2, renewalCallbackEventId: null },
 		]);
+	});
+
+	it("does not let a concurrent customer action roll back the renewal baseline", async () => {
+		const { h, onSubscriptionRenewed } = await renewedBeforeItsInvoiceEvent(false);
+		h.stream.uncancelSubscription.mockImplementation(async () => {
+			await h.deliver(invoiceEvent("inv_renewal", CANCEL_EVENT));
+		});
+
+		expect((await uncancel(h, "sub_r")).status).toBe(200);
+		await h.deliver(
+			subscriptionEvent(h, "SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY", "sub_r", PLAN_EVENT),
+		);
+
+		expect(onSubscriptionRenewed).toHaveBeenCalledTimes(1);
+		expect(await h.rows("subscription")).toMatchObject([{ renewedCycleNumber: 2 }]);
 	});
 
 	it("keeps the renewal baseline of a row written before the marker existed", async () => {

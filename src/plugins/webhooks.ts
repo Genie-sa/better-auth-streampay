@@ -12,6 +12,7 @@ import {
 	claimWebhookEventForReplay,
 	DEFAULT_MAX_WEBHOOK_ATTEMPTS,
 	findDueWebhookEvents,
+	isStillDueWebhookEvent,
 	markWebhookEventCompleted,
 	parkUnreplayableWebhookEvent,
 	recordWebhookEventFailure,
@@ -62,7 +63,7 @@ export const webhooks = (webhooksOptions: WebhooksOptions) => {
 	return (_options: StreamPayOptions, registry?: StreamPayPluginRegistry) => {
 		const { secret, toleranceSeconds, deduplicate = false, ...handlers } = webhooksOptions;
 		if (deduplicate && registry) {
-			registry.replayWebhookHandler = async (ctx, eventId) => {
+			registry.replayWebhookHandler = async (ctx, eventId, replayOptions) => {
 				const syncContext = { context: ctx.context as SyncContext["context"] };
 				const row = await syncContext.context.adapter.findOne<WebhookEventRow>({
 					model: WEBHOOK_EVENT_MODEL,
@@ -70,6 +71,11 @@ export const webhooks = (webhooksOptions: WebhooksOptions) => {
 				});
 				if (!eventId.startsWith("handlers:") || !row)
 					throw new APIError("NOT_FOUND", { message: "Webhook callback event not found." });
+				if (
+					replayOptions?.dueAttemptCount !== undefined &&
+					!isStillDueWebhookEvent(row, replayOptions.dueAttemptCount, new Date())
+				)
+					throw new APIError("CONFLICT", { message: "Webhook callback is no longer due." });
 				const unreplayable = async (message: string): Promise<never> => {
 					await parkUnreplayableWebhookEvent(syncContext, row, message);
 					throw new APIError("BAD_REQUEST", { message });
@@ -242,7 +248,7 @@ export const webhooks = (webhooksOptions: WebhooksOptions) => {
 						const failed: Array<{ eventId: string; error: string }> = [];
 						for (const row of due) {
 							try {
-								await replay(ctx, row.eventId);
+								await replay(ctx, row.eventId, { dueAttemptCount: row.attemptCount });
 								succeeded.push(row.eventId);
 							} catch (err: unknown) {
 								if (err instanceof APIError && err.status === "CONFLICT") continue;
