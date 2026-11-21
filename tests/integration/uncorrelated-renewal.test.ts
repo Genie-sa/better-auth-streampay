@@ -109,4 +109,41 @@ describe(`renewal evidence for an unlinked subscription (${TEST_WITH})`, () => {
 		expect(h.stream.getPaymentLink).not.toHaveBeenCalled();
 		expect(onSubscriptionRenewed).not.toHaveBeenCalled();
 	});
+
+	it("still reports the renewal when a creation webhook links the checkout concurrently", async () => {
+		const onSubscriptionRenewed = vi.fn();
+		const h = await harness([
+			subscriptions({ plans: [TEAM], onSubscriptionRenewed }),
+			webhooks({ secret: SECRET }),
+		]);
+		await paidCheckoutWithoutCreationEvents(h, 3, "inv_3");
+		const [reservation] = await h.rows("subscription");
+		h.stream.getSubscription.mockResolvedValue(
+			providerSubscription("sub_late", "ACTIVE", {
+				current_cycle_number: 3,
+				updated_at: "2026-04-01T00:05:00.000Z",
+				latest_invoice: { id: "inv_3", status: "COMPLETED", payment_link_id: "pl_1" },
+			}),
+		);
+		const link = await h.stream.getPaymentLink("pl_1");
+		h.stream.getPaymentLink.mockImplementationOnce(async () => {
+			await h.deliver(
+				subscriptionEvent(
+					h,
+					"SUBSCRIPTION_CREATED",
+					"sub_late",
+					"2026-04-01T00:05:01.000Z",
+					String(reservation?.id),
+				),
+			);
+			return link;
+		});
+
+		expect((await h.deliver(invoiceCompleted("inv_3"))).status).toBe(200);
+
+		expect(onSubscriptionRenewed).toHaveBeenCalledTimes(1);
+		expect(await h.rows("subscription")).toMatchObject([
+			{ streampaySubscriptionId: "sub_late", renewedCycleNumber: 3 },
+		]);
+	});
 });

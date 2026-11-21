@@ -1111,8 +1111,10 @@ async function linkCheckoutFromRenewalEvidence(
 		logger(ctx).warn(
 			`webhook ${payload.event_type}: linked checkout row=${row.id} to StreamPay sub=${stream.id} from renewal evidence.`,
 		);
+		return row;
 	}
-	return row;
+	// A creation webhook linked it first; the renewal checks below still apply to that row.
+	return findSubscriptionByStreampayId(ctx, stream.id);
 }
 
 async function handleRenewalEvidence(
