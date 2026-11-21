@@ -84,12 +84,8 @@ export async function persistSubscriptionProjection(
 				where: [{ field: "activeSlotKey", value: slotKey }],
 			})
 		: null;
-	if (slotHolder) {
-		log.warn(
-			`${source}: StreamPay reports row=${existing.id} live, but row=${slotHolder.id} holds its billing slot. The next webhook reconciles it.`,
-		);
-	} else {
-		const updated = stale
+	const updated =
+		stale || slotHolder
 			? null
 			: await adapter.update<Subscription>({
 					model: SUBSCRIPTION_MODEL,
@@ -104,11 +100,12 @@ export async function persistSubscriptionProjection(
 						{ field: "renewedCycleNumber", value: existing.renewedCycleNumber ?? null },
 					],
 				});
-		if (updated) return updated;
-		log.warn(
-			`${source}: retained newer local subscription state for row=${existing.id}. The provider action is not rolled back.`,
-		);
-	}
+	if (updated) return updated;
+	log.warn(
+		slotHolder
+			? `${source}: StreamPay reports row=${existing.id} live, but row=${slotHolder.id} holds its billing slot. The next webhook reconciles it.`
+			: `${source}: retained newer local subscription state for row=${existing.id}. The provider action is not rolled back.`,
+	);
 	return adapter.findOne<Subscription>({
 		model: SUBSCRIPTION_MODEL,
 		where: [{ field: "id", value: existing.id }],
