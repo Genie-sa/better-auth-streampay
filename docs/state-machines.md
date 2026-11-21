@@ -66,7 +66,7 @@ overlay: StreamPay keeps reporting `ACTIVE` while a renewal payment is outstandi
 
 | ID | Invariant | Enforced by |
 | --- | --- | --- |
-| S1 | `activeSlotKey` is non-null exactly when the status is not terminal. | `projectSubscriptionFields` clears the slot for terminal statuses. Releases set `incomplete_expired` and a null slot together. Webhook reconciliation and renewal evidence backfill a missing slot for live rows through `liveSlotKey` and the S4 takeover (`sync.ts`). Endpoint projections take a free slot when they observe a revival, and skip the write when another row holds it, leaving the conflict to the webhook path (`persistSubscriptionProjection`, F17). |
+| S1 | `activeSlotKey` is non-null exactly when the status is not terminal. | `projectSubscriptionFields` clears the slot for terminal statuses. Releases set `incomplete_expired` and a null slot together. Webhook reconciliation and renewal evidence backfill a missing slot for live rows through `liveSlotKey` and the S4 takeover (`sync.ts`). Endpoint projections take a free slot when they observe a revival or a move to another plan group, and skip the write when another row holds it, leaving the conflict to the webhook path (`persistSubscriptionProjection`, F17, F25). |
 | S2 | At most one row holds a slot. | Database unique constraint on `activeSlotKey`. |
 | S3 | A provider subscription maps to at most one row. A payment link maps to at most one row. | Unique `streampaySubscriptionId` and `streampayPaymentLinkId`. |
 | S4 | A provider-confirmed subscription outranks an unpaid reservation (`incomplete` with no StreamPay subscription ID) for the same slot. Two live subscriptions in one slot are never written silently. | `updateReconciledSubscription` and `handleRenewalEvidence` run `takeSlotFromReservation` after their stale-state checks (`sync.ts`). |
@@ -142,7 +142,7 @@ StreamPay's hosted checkout. The idempotency window is
 | C-e | Same plan and seats within the window, link not `INACTIVE` and URL recoverable | R2 | R2 (`reused: true`) | `recoverCheckoutUrl` |
 | C-f | Same plan and seats, link gone (404, `INACTIVE`, or no URL) | R2 | R3, then C-a | CAS on `status = incomplete` |
 | C-g | Different plan or seats within the window | R1/R2 | R1/R2, request gets `SUBSCRIPTION_CHECKOUT_IN_PROGRESS` | by design |
-| C-h | Any request after the window, including the same plan and seats | R1/R2 | R3, then C-a | Deactivate the link, then CAS on `id`, `status`, slot. The same-plan conflict path skipped this before F20. |
+| C-h | Any request after the window, including the same plan and seats | R1/R2 | R3, then C-a | Deactivate the link, then CAS on `id`, `status`, slot, and the link ID that was read, so a link saved concurrently keeps its reservation (F26). The same-plan conflict path skipped this before F20. |
 | C-i | Reservation released while its link was being created | R1 (released) | R3, request gets `SUBSCRIPTION_CHECKOUT_IN_PROGRESS` | New link deactivated |
 | C-j | Paid subscription arrives for another row of the same slot | R1/R2 | R3 | `takeSlotFromReservation` |
 | C-k | A live row holds the slot when the reservation is created | R0 | R0, request gets `SUBSCRIPTION_ALREADY_ACTIVE` | Previously surfaced the raw unique-constraint error |
@@ -324,6 +324,8 @@ PostgreSQL 17. Run the end-to-end tests on PostgreSQL with `STREAMPAY_E2E_DB=pos
 | F22 | Low | 7 | A dead-lettered event with its stored payload erased. | Found by Gemini 4 Neon. The exhausted-attempts branch of `claimOrAdvanceWebhookEvent` wrote the delivery body even when a direct `syncWebhookPayload` caller passed none. | The dead letter cannot be replayed. | Keep the stored payload when the delivery has no body |
 | F23 | Medium | 7 | One attempt run twice, past the attempt budget. | Found by GPT-6.2 Astra on re-review; pre-existing. Two redeliveries read pending attempt N. The first claims N+1, fails, and releases the lease; the second's claim still matched `pending` and `lockedAt = null`. | Extra provider calls and callback runs. | Delivery claims compare `attemptCount` |
 | F24 | Low | 2 | A same-plan upgrade refused with `SUBSCRIPTION_CHECKOUT_IN_PROGRESS` while the slot is held by a reservation whose link is gone. | Found by GPT-6.2 Astra on re-review; pre-existing. The request misses the reservation in its first read, loses the insert race, and finds the link `INACTIVE` or 404. | The customer cannot start a checkout until the 15-minute window passes. | The conflict path releases a reservation with an expired link and reserves again (C-f) |
+| F25 | Low | 1 | A row in plan group B still holding group A's slot. | Found by Gemini 4 Neon on re-review. StreamPay moves a subscription to a product in another configured group outside the plugin, and a customer endpoint observes it before any webhook. The endpoint wrote the new group but only moved the slot on a revival. | Upgrades in group A are refused as already active, and group B can hold two live rows. | Endpoints move the slot whenever the desired slot differs |
+| F26 | Low | 2 | A released reservation whose link stays payable (breaks C2). | Found by Gemini 4 Neon on re-review. A stale-replacement release read the reservation without a link; its own request saved the link before the release write landed. | A payable link without a live reservation, next to the replacement's link. | The release CAS compares the link ID it read |
 | F14 | High | 6 | `renewedCycleNumber` rolled back after its callback ran, so a second renewal event delivers `onSubscriptionRenewed` again. | Found in review of the F13 fix. A customer endpoint (or webhook) reads the row, `INVOICE_COMPLETED` then advances the marker and runs the callback, and the endpoint write restores the old marker. Its CAS matched because the provider timestamp was unchanged. `SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY` then counted as a new renewal. | Duplicate per-cycle side effects. | Projections only initialize the marker, and every CAS includes it |
 | F15 | Medium | 7 | A due-queue retry before its backoff, or an automatic retry of a dead letter. | Pre-existing. Two overlapping `processDueStreampayWebhookEvents` runs select the same row. The first claims it and fails. The second replayed by event ID, re-read the updated row, and claimed it again at once, even after it was dead-lettered. | Extra provider calls and callback runs, and dead letters leaving manual review. | The processor passes the selected attempt (`dueAttemptCount`); replay requires the row to still be that pending attempt and due, and the claim CAS includes `attemptCount` |
 | F16 | Medium | 7 | A repaired event parked as unreplayable. | Found in review of F12. Replay reads a pending row without payload; a redelivery then claims it, stores its payload, fails, and schedules a retry; the stale parking write still matched `pending` and `lockedAt = null`. | The retry time is erased, so the due processor never retries the event. | Parking CAS includes `attemptCount` |
@@ -434,8 +436,8 @@ the due queue, keep them open to StreamPay redelivery, and store the payload a r
 cycle in its own column, advanced only by renewal evidence.
 
 **Issue 8, P1: Review findings (F14 to F24).** GPT-6.2 Astra and Gemini 4 Neon (high) reviewed
-the branch independently, then re-reviewed the fixes. Both found F14. The re-review found F21's
-first fix incomplete, plus F23 and F24. F14, F16, and F19 were gaps in the new code; the rest
+the branch independently, then re-reviewed the fixes. Both found F14. The re-reviews found F21's
+first fix incomplete, plus F23 to F26. F14, F16, and F19 were gaps in the new code; the rest
 were pre-existing.
 
 Issues 4 to 8 are fixed on `ali/fix-stale-lifecycle-effects`. Regression tests:
@@ -443,7 +445,7 @@ Issues 4 to 8 are fixed on `ali/fix-stale-lifecycle-effects`. Regression tests:
 cancellation stays suppressed, and a late invoice that is not the latest keeps `past_due`) and
 `tests/integration/due-queue.test.ts` (F12). The `renewal callbacks` tests in the first file cover
 F13 and F14, including a legacy row without the marker; the revival tests cover F17; the due-queue
-file covers F15 and F16; `tests/integration/review-findings.test.ts` covers F18 to F24. Every bug test fails on the code before its fix and passes after it.
+file covers F15 and F16; `tests/integration/review-findings.test.ts` covers F18 to F26. Every bug test fails on the code before its fix and passes after it.
 
 ### Open risks (not confirmed, not changed)
 

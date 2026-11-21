@@ -180,6 +180,7 @@ export async function resumeOrReserveCheckoutSlot(args: {
 				{ field: "id", value: reserved.id },
 				{ field: "status", value: "incomplete" },
 				{ field: "activeSlotKey", value: activeSlotKey },
+				{ field: "streampayPaymentLinkId", value: reserved.streampayPaymentLinkId ?? null },
 			],
 		});
 		if (!released) throw checkoutInProgressError();

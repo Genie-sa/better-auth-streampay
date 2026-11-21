@@ -36,3 +36,5 @@ the integration guide). Existing rows need no backfill.
 - Two concurrent redeliveries of the same attempt no longer both run it.
 - A same-plan upgrade replaces a concurrent reservation whose checkout link is already gone instead
   of returning `SUBSCRIPTION_CHECKOUT_IN_PROGRESS`.
+- A customer action that observes a subscription moved to another plan group moves its billing slot.
+- Replacing a stale reservation no longer releases it after its checkout link was saved concurrently.

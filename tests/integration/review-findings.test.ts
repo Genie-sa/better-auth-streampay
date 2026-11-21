@@ -4,6 +4,7 @@ import {
 	claimOrAdvanceWebhookEvent,
 	DEFAULT_MAX_WEBHOOK_ATTEMPTS,
 } from "../../src/plugins/subscriptions/sync";
+import { subscriptionSlotKey } from "../../src/plugins/subscriptions/types";
 import { callAuthEndpoint } from "../utils/auth-instance";
 import {
 	harness,
@@ -310,5 +311,87 @@ describe(`review findings end-to-end (${TEST_WITH})`, () => {
 			reused: false,
 			url: "https://pay.example.test/pl_2",
 		});
+	});
+
+	it("moves the billing slot when a customer action observes a plan in another group", async () => {
+		const alpha = { ...TEAM, name: "alpha", productId: "prod_alpha", group: "alpha" };
+		const beta = { ...TEAM, name: "beta", productId: "prod_beta", group: "beta" };
+		const h = await harness([
+			subscriptions({ plans: [alpha, beta] }),
+			webhooks({ secret: SECRET }),
+		]);
+		h.stream.getSubscription.mockResolvedValue(
+			providerSubscription("sub_moved", "ACTIVE", {
+				items: [{ product_id: alpha.productId, quantity: 1 }],
+			}),
+		);
+		await h.deliver({
+			...subscriptionEvent(h, "SUBSCRIPTION_ACTIVATED", "sub_moved", FIRST_EVENT),
+			data: {
+				metadata: {
+					streampay_plugin_plan_name: alpha.name,
+					streampay_plugin_reference_id: h.userId,
+					streampay_plugin_reference_type: "user",
+				},
+			},
+		});
+		h.stream.getSubscription.mockResolvedValue(
+			providerSubscription("sub_moved", "ACTIVE", {
+				items: [{ product_id: beta.productId, quantity: 1 }],
+			}),
+		);
+
+		const response = await callAuthEndpoint(h.auth, "/subscription/pending-change/cancel", {
+			method: "POST",
+			body: { subscriptionId: "sub_moved" },
+			headers: h.headers,
+		});
+
+		expect(response.status).toBe(200);
+		expect(await h.rows("subscription")).toMatchObject([
+			{ group: "beta", activeSlotKey: subscriptionSlotKey("user", h.userId, "beta") },
+		]);
+	});
+
+	it("keeps a stale reservation whose checkout link was saved while it was being replaced", async () => {
+		const h = await harness([subscriptions({ plans: [TEAM] }), webhooks({ secret: SECRET })]);
+		const context = await h.auth.$context;
+		await context.adapter.create({
+			model: "subscription",
+			data: {
+				referenceId: h.userId,
+				referenceType: "user",
+				activeSlotKey: subscriptionSlotKey("user", h.userId, null),
+				plan: TEAM.name,
+				productId: TEAM.productId,
+				group: null,
+				seats: 1,
+				status: "incomplete",
+				billingStatus: "current",
+				streampayPaymentLinkId: null,
+				createdAt: new Date(Date.now() - 16 * 60 * 1000),
+				updatedAt: new Date(),
+			},
+		});
+		const [reservation] = await h.rows("subscription");
+		const adapter = context.adapter as unknown as {
+			update: (input: { model: string; update: Record<string, unknown> }) => Promise<unknown>;
+		};
+		const update = adapter.update.bind(adapter);
+		vi.spyOn(adapter, "update").mockImplementation(async (input) => {
+			if (input.model === "subscription" && input.update.status === "incomplete_expired") {
+				await h.setRow("subscription", String(reservation?.id), {
+					streampayPaymentLinkId: "pl_saved",
+				});
+			}
+			return update(input);
+		});
+
+		const response = await h.upgrade({ plan: TEAM.name, seats: 2 });
+
+		expect(response.status).toBe(409);
+		expect(await h.rows("subscription")).toMatchObject([
+			{ status: "incomplete", streampayPaymentLinkId: "pl_saved" },
+		]);
 	});
 });

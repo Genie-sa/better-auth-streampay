@@ -76,9 +76,9 @@ export async function persistSubscriptionProjection(
 		projection.providerUpdatedAt instanceof Date &&
 		projection.providerUpdatedAt.getTime() < existing.providerUpdatedAt.getTime();
 	const slotKey = liveSlotKey(existing, projection);
-	const revival = slotKey !== null && existing.activeSlotKey === null;
-	// Only webhooks take a slot from another row or flag a live holder, so endpoints revive into a free slot.
-	const slotHolder = revival
+	const movesSlot = slotKey !== null && existing.activeSlotKey !== slotKey;
+	// Only webhooks take a slot from another row or flag a live holder, so endpoints move into a free slot.
+	const slotHolder = movesSlot
 		? await adapter.findOne<Subscription>({
 				model: SUBSCRIPTION_MODEL,
 				where: [{ field: "activeSlotKey", value: slotKey }],
@@ -89,7 +89,7 @@ export async function persistSubscriptionProjection(
 			? null
 			: await adapter.update<Subscription>({
 					model: SUBSCRIPTION_MODEL,
-					update: revival ? { ...projection, activeSlotKey: slotKey } : projection,
+					update: movesSlot ? { ...projection, activeSlotKey: slotKey } : projection,
 					where: [
 						{ field: "id", value: existing.id },
 						{ field: "providerUpdatedAt", value: existing.providerUpdatedAt ?? null },
