@@ -17,7 +17,9 @@ export async function recoverCheckoutUrl(
 ): Promise<{ kind: "recovered"; url: string } | { kind: "expired" }> {
 	if (!row.streampayPaymentLinkId) return { kind: "expired" };
 	try {
-		const url = client.getPaymentUrl(await client.getPaymentLink(row.streampayPaymentLinkId));
+		const link = await client.getPaymentLink(row.streampayPaymentLinkId);
+		// The SDK returns a URL for inactive links too; their hosted page refuses payment.
+		const url = link.status === "INACTIVE" ? null : client.getPaymentUrl(link);
 		return url ? { kind: "recovered", url } : { kind: "expired" };
 	} catch (err) {
 		if (readSdkErrorFields(err).status === 404) return { kind: "expired" };
@@ -131,7 +133,11 @@ export async function resumeOrReserveCheckoutSlot(args: {
 		if (!reserved) throw err;
 		if (reserved.status !== "incomplete") throw subscriptionAlreadyActiveError();
 
-		if (matchesCheckout(reserved)) {
+		const reservationIsStale =
+			!(reserved.createdAt instanceof Date) ||
+			now - reserved.createdAt.getTime() >= UPGRADE_IDEMPOTENCY_WINDOW_MS;
+		let linkExpired = false;
+		if (!reservationIsStale && matchesCheckout(reserved)) {
 			let recovery: Awaited<ReturnType<typeof recoverCheckoutUrl>>;
 			try {
 				recovery = await recoverCheckoutUrl(client, reserved);
@@ -148,14 +154,12 @@ export async function resumeOrReserveCheckoutSlot(args: {
 			if (recovery.kind === "recovered") {
 				return { kind: "recovered", row: reserved, url: recovery.url };
 			}
+			linkExpired = Boolean(reserved.streampayPaymentLinkId);
 		}
 
-		const reservationIsStale =
-			!(reserved.createdAt instanceof Date) ||
-			now - reserved.createdAt.getTime() >= UPGRADE_IDEMPOTENCY_WINDOW_MS;
-		if (!reservationIsStale) throw checkoutInProgressError();
+		if (!reservationIsStale && !linkExpired) throw checkoutInProgressError();
 
-		if (reserved.streampayPaymentLinkId) {
+		if (reservationIsStale && reserved.streampayPaymentLinkId) {
 			try {
 				await deactivatePaymentLink(client, reserved.streampayPaymentLinkId, log);
 			} catch (deactivationError) {
@@ -176,6 +180,7 @@ export async function resumeOrReserveCheckoutSlot(args: {
 				{ field: "id", value: reserved.id },
 				{ field: "status", value: "incomplete" },
 				{ field: "activeSlotKey", value: activeSlotKey },
+				{ field: "streampayPaymentLinkId", value: reserved.streampayPaymentLinkId ?? null },
 			],
 		});
 		if (!released) throw checkoutInProgressError();

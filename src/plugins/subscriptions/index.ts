@@ -13,7 +13,9 @@ import {
 	claimWebhookEventForReplay,
 	classifyWebhookFailure,
 	DEFAULT_MAX_WEBHOOK_ATTEMPTS,
+	isStillDueWebhookEvent,
 	markWebhookEventCompleted,
+	parkUnreplayableWebhookEvent,
 	recordWebhookEventFailure,
 	type SyncContext,
 	syncWebhookPayload,
@@ -138,9 +140,9 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 			};
 
 			if (dedupeEnabled) {
-				registry.replayWebhookEvent = async (ctx, eventId) => {
+				registry.replayWebhookEvent = async (ctx, eventId, replayOptions) => {
 					if (eventId.startsWith("handlers:") && registry.replayWebhookHandler) {
-						return registry.replayWebhookHandler(ctx, eventId);
+						return registry.replayWebhookHandler(ctx, eventId, replayOptions);
 					}
 					const syncCtx: SyncContext = {
 						context: ctx.context as SyncContext["context"],
@@ -155,27 +157,36 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 							message: `Webhook event ${eventId} not found.`,
 						});
 					}
-					if (!row.rawPayload) {
-						throw new APIError("BAD_REQUEST", {
-							message: `Webhook event ${eventId} has no rawPayload — nothing to replay (already completed cleanly?).`,
+					if (
+						replayOptions?.dueAttemptCount !== undefined &&
+						!isStillDueWebhookEvent(row, replayOptions.dueAttemptCount, new Date())
+					) {
+						throw new APIError("CONFLICT", {
+							code: $ERROR_CODES.WEBHOOK_REPLAY_IN_PROGRESS.code,
+							message: `Webhook event ${eventId} is no longer due.`,
 						});
+					}
+					const unreplayable = async (message: string): Promise<never> => {
+						await parkUnreplayableWebhookEvent(syncCtx, row, message);
+						throw new APIError("BAD_REQUEST", { message });
+					};
+					if (!row.rawPayload) {
+						return unreplayable(
+							`Webhook event ${eventId} has no rawPayload — nothing to replay (already completed cleanly?).`,
+						);
 					}
 
 					let parsedPayload: unknown;
 					try {
 						parsedPayload = JSON.parse(row.rawPayload);
 					} catch {
-						throw new APIError("BAD_REQUEST", {
-							message: `Webhook event ${eventId} has malformed stored JSON.`,
-						});
+						return unreplayable(`Webhook event ${eventId} has malformed stored JSON.`);
 					}
 					if (
 						!isStreamPayWebhookEnvelope(parsedPayload) ||
 						!isKnownStreamPayWebhookPayload(parsedPayload)
 					) {
-						throw new APIError("BAD_REQUEST", {
-							message: `Webhook event ${eventId} has an invalid stored payload.`,
-						});
+						return unreplayable(`Webhook event ${eventId} has an invalid stored payload.`);
 					}
 					const payload = parsedPayload;
 					const plans = await plansRef();
@@ -191,6 +202,7 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 					try {
 						await syncWebhookPayload(syncCtx, payload, options.client, plans, subsOptions, {
 							dedupe: false,
+							inboxEnabled: true,
 							retryOnCallbackError: subsOptions.retryOnCallbackError !== false,
 							retryingRenewalCallback:
 								claimed.lastError?.startsWith(

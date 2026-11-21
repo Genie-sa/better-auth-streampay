@@ -81,6 +81,8 @@ export interface Subscription {
 	periodStart: Date | null;
 	periodEnd: Date | null;
 	currentCycleNumber: number | null;
+	/** Latest provider cycle whose renewal was handled; the baseline for detecting the next renewal. */
+	renewedCycleNumber?: number | null;
 	/** Event that owns a projected cycle's pending renewal callback. */
 	renewalCallbackEventId?: string | null;
 	trialStart: Date | null;

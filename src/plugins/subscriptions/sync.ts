@@ -14,6 +14,7 @@ import { deactivatePaymentLink } from "./lifecycle";
 import type { ResolvedPlans } from "./plans";
 import {
 	inferPlanFromItems,
+	liveSlotKey,
 	parseDate,
 	projectPlanFields,
 	projectSubscriptionFields,
@@ -115,6 +116,13 @@ export type ClaimAdvanceResult =
 export const WEBHOOK_PROCESSING_LEASE_MS = 2 * 60 * 1000;
 const WEBHOOK_RETRY_DELAYS_MS = [5, 30, 120, 360, 720].map((minutes) => minutes * 60 * 1000);
 
+export function hasLiveLease(row: Pick<WebhookEventRow, "lockedAt">, now: Date): boolean {
+	return (
+		row.lockedAt instanceof Date &&
+		now.getTime() - row.lockedAt.getTime() < WEBHOOK_PROCESSING_LEASE_MS
+	);
+}
+
 /**
  * A concurrent delivery holds the processing lease. Surfaced as a retryable HTTP failure so the
  * provider redelivers instead of treating the event as handled while the lease holder may crash.
@@ -129,6 +137,11 @@ export class WebhookEventInProgressError extends Error {
 export interface WebhookReplayOptions {
 	/** @deprecated No effect: a failed replay keeps a pending event retryable until its attempts are spent. */
 	retryUntilExhausted?: boolean;
+	/**
+	 * Set by `processDueStreampayWebhookEvents`: replay only if the event is still pending at this
+	 * attempt and due. Otherwise the replay fails with `CONFLICT`.
+	 */
+	dueAttemptCount?: number;
 }
 
 /** Pending events whose retry time has passed, plus events whose processing lease was abandoned. */
@@ -226,10 +239,7 @@ export async function claimOrAdvanceWebhookEvent(
 		);
 		return { action: "skip", reason: "dead_letter" };
 	}
-	if (
-		existing.lockedAt instanceof Date &&
-		now.getTime() - existing.lockedAt.getTime() < WEBHOOK_PROCESSING_LEASE_MS
-	) {
+	if (hasLiveLease(existing, now)) {
 		logger(ctx).info(
 			`webhook ${payload.event_type} (${eventId}) is already being processed — skipping concurrent delivery.`,
 		);
@@ -246,8 +256,7 @@ export async function claimOrAdvanceWebhookEvent(
 				lastAttemptAt: now,
 				deadLetteredAt: now,
 				nextAttemptAt: null,
-				rawPayload: rawBody,
-				signatureHeader,
+				...(rawBody !== null ? { rawPayload: rawBody, signatureHeader } : {}),
 				lockedAt: null,
 				lockedBy: null,
 			},
@@ -255,6 +264,7 @@ export async function claimOrAdvanceWebhookEvent(
 				{ field: "id", value: existing.id },
 				{ field: "status", value: "pending" },
 				{ field: "lockedAt", value: existing.lockedAt ?? null },
+				{ field: "attemptCount", value: existing.attemptCount ?? null },
 			],
 		});
 		return updated
@@ -270,11 +280,13 @@ export async function claimOrAdvanceWebhookEvent(
 			nextAttemptAt: null,
 			lockedAt: now,
 			lockedBy: lockId,
+			...(rawBody !== null ? { rawPayload: rawBody, signatureHeader } : {}),
 		},
 		where: [
 			{ field: "id", value: existing.id },
 			{ field: "status", value: "pending" },
 			{ field: "lockedAt", value: existing.lockedAt ?? null },
+			{ field: "attemptCount", value: existing.attemptCount ?? null },
 		],
 	});
 	return updated ? { action: "process", row: updated } : { action: "skip", reason: "in_progress" };
@@ -285,10 +297,7 @@ export async function claimWebhookEventForReplay(
 	row: WebhookEventRow,
 ): Promise<WebhookEventRow | null> {
 	const now = new Date();
-	if (
-		row.lockedAt instanceof Date &&
-		now.getTime() - row.lockedAt.getTime() < WEBHOOK_PROCESSING_LEASE_MS
-	) {
+	if (hasLiveLease(row, now)) {
 		return null;
 	}
 	return ctx.context.adapter.update<WebhookEventRow>({
@@ -307,8 +316,66 @@ export async function claimWebhookEventForReplay(
 			{ field: "id", value: row.id },
 			{ field: "status", value: row.status },
 			{ field: "lockedAt", value: row.lockedAt ?? null },
+			{ field: "attemptCount", value: row.attemptCount ?? null },
 		],
 	});
+}
+
+/** The due queue may retry a row only while it is still the pending attempt it selected and is due. */
+export function isStillDueWebhookEvent(
+	row: WebhookEventRow,
+	selectedAttemptCount: number,
+	now: Date,
+): boolean {
+	const retryDue = row.nextAttemptAt instanceof Date && row.nextAttemptAt <= now;
+	const leaseAbandoned = row.lockedAt instanceof Date && !hasLiveLease(row, now);
+	return (
+		row.status === "pending" &&
+		row.attemptCount === selectedAttemptCount &&
+		(retryDue || leaseAbandoned)
+	);
+}
+
+/**
+ * Takes a pending event whose stored payload cannot be replayed out of the due queue, so it stops
+ * filling every batch. It stays pending: a StreamPay redelivery carries the payload and processes it.
+ */
+export async function parkUnreplayableWebhookEvent(
+	ctx: { context: { adapter: PluginAdapter } },
+	row: WebhookEventRow,
+	reason: string,
+): Promise<void> {
+	if (row.status !== "pending" || hasLiveLease(row, new Date())) return;
+	await ctx.context.adapter.update({
+		model: WEBHOOK_EVENT_MODEL,
+		update: {
+			nextAttemptAt: null,
+			lockedAt: null,
+			lockedBy: null,
+			lastError: reason,
+			lastErrorCode: "UNREPLAYABLE_PAYLOAD",
+		},
+		where: [
+			{ field: "id", value: row.id },
+			{ field: "status", value: "pending" },
+			{ field: "lockedAt", value: row.lockedAt ?? null },
+			{ field: "attemptCount", value: row.attemptCount ?? null },
+		],
+	});
+}
+
+function completedWebhookEventFields() {
+	return {
+		status: "completed",
+		completedAt: new Date(),
+		nextAttemptAt: null,
+		lockedAt: null,
+		lockedBy: null,
+		rawPayload: null,
+		signatureHeader: null,
+		lastError: null,
+		lastErrorCode: null,
+	} as const;
 }
 
 export async function markWebhookEventCompleted(
@@ -318,22 +385,30 @@ export async function markWebhookEventCompleted(
 ): Promise<void> {
 	await ctx.context.adapter.update({
 		model: WEBHOOK_EVENT_MODEL,
-		update: {
-			status: "completed",
-			completedAt: new Date(),
-			nextAttemptAt: null,
-			lockedAt: null,
-			lockedBy: null,
-			rawPayload: null,
-			signatureHeader: null,
-			lastError: null,
-			lastErrorCode: null,
-		},
+		update: completedWebhookEventFields(),
 		where: [
 			{ field: "id", value: rowId },
 			...(lockId ? [{ field: "lockedBy", value: lockId }] : []),
 		],
 	});
+}
+
+/** Completes an event only if no worker claimed or advanced it since `row` was read. */
+export async function completeUnchangedWebhookEvent(
+	ctx: { context: { adapter: PluginAdapter } },
+	row: WebhookEventRow,
+): Promise<boolean> {
+	const updated = await ctx.context.adapter.update<WebhookEventRow>({
+		model: WEBHOOK_EVENT_MODEL,
+		update: completedWebhookEventFields(),
+		where: [
+			{ field: "id", value: row.id },
+			{ field: "status", value: row.status },
+			{ field: "lockedAt", value: row.lockedAt ?? null },
+			{ field: "attemptCount", value: row.attemptCount ?? null },
+		],
+	});
+	return updated !== null;
 }
 
 export async function recordWebhookEventFailure(
@@ -510,6 +585,40 @@ class SubscriptionCorrelationError extends Error {
 }
 
 /**
+ * A stale event (older than the stored provider state) keeps its lifecycle effects when the fresh
+ * provider snapshot still shows what the event announced. StreamPay keeps writing to a subscription
+ * after emitting an event, so a retried or reordered delivery is routinely older than the stored
+ * state without being contradicted by it. Events with no checkable state stay suppressed.
+ */
+function providerStateConfirmsEvent(eventType: string, stream: SubscriptionDetailed): boolean {
+	switch (eventType) {
+		case "SUBSCRIPTION_CREATED":
+			return true;
+		case "SUBSCRIPTION_ACTIVATED":
+		case "SUBSCRIPTION_UNFREEZE_NOW":
+			return stream.status === "ACTIVE" || stream.status === "TRIALING";
+		case "SUBSCRIPTION_CANCELED":
+			return stream.status === "CANCELED";
+		case "SUBSCRIPTION_INACTIVATED":
+			return stream.status === "INACTIVE";
+		case "SUBSCRIPTION_CANCEL_AT_PERIOD_END":
+			return (
+				Boolean(stream.cancel_at_period_end) &&
+				!isTerminalSubscriptionStatus(toLocalStatus(stream.status))
+			);
+		case "SUBSCRIPTION_FROZEN":
+		case "SUBSCRIPTION_FREEZE_NOW":
+			return stream.status === "FROZEN";
+		case "SUBSCRIPTION_PLAN_CHANGE_SCHEDULED":
+			return Boolean(stream.pending_change);
+		case "SUBSCRIPTION_PLAN_CHANGE_CANCELED":
+			return !stream.pending_change;
+		default:
+			return false;
+	}
+}
+
+/**
  * A provider-confirmed subscription outranks an unpaid checkout reservation for the same slot.
  * Deactivating the reservation's link is best effort: it must never block the paid subscription.
  */
@@ -525,6 +634,11 @@ async function takeSlotFromReservation(
 		where: [{ field: "activeSlotKey", value: slotKey }],
 	});
 	if (!holder || holder.id === ownerRowId) return;
+	if (holder.streampaySubscriptionId === streampaySubscriptionId) {
+		throw new Error(
+			`StreamPay sub=${streampaySubscriptionId} was linked to row=${holder.id} concurrently. Retry delivery.`,
+		);
+	}
 	if (holder.status !== "incomplete" || holder.streampaySubscriptionId) {
 		throw new SubscriptionCorrelationError(
 			`StreamPay sub=${streampaySubscriptionId} needs the billing slot held by live row=${holder.id} (${holder.status}). Resolve the duplicate subscription, then replay.`,
@@ -623,6 +737,7 @@ async function updateReconciledSubscription(
 			{ field: "streampayConsumerId", value: existing.streampayConsumerId ?? null },
 			{ field: "status", value: existing.status },
 			{ field: "billingStatus", value: existing.billingStatus },
+			{ field: "renewedCycleNumber", value: existing.renewedCycleNumber ?? null },
 		],
 	});
 	if (!updated) {
@@ -667,8 +782,9 @@ async function reconcileFromStreamPay(
 			existing?.providerUpdatedAt instanceof Date &&
 			eventAt.getTime() < existing.providerUpdatedAt.getTime(),
 	);
+	const eventApplies = !eventIsStale || providerStateConfirmsEvent(payload.event_type, stream);
 	if (
-		!eventIsStale &&
+		eventApplies &&
 		payload.event_type === "SUBSCRIPTION_CYCLE_RENEWAL_FAILED" &&
 		projected.status === "active"
 	) {
@@ -676,14 +792,14 @@ async function reconcileFromStreamPay(
 		projected.billingStatus = "past_due";
 	}
 	const schedulesCancellation =
-		!eventIsStale &&
+		eventApplies &&
 		payload.event_type === "SUBSCRIPTION_CANCEL_AT_PERIOD_END" &&
 		Boolean(stream.cancel_at_period_end);
 	if (schedulesCancellation) {
 		projected.cancelAt = parseDate(stream.current_period_end);
 	}
 	const confirmsCancellation =
-		!eventIsStale &&
+		eventApplies &&
 		payload.event_type === "SUBSCRIPTION_CANCELED" &&
 		projected.status === "canceled";
 	if (confirmsCancellation) {
@@ -694,18 +810,20 @@ async function reconcileFromStreamPay(
 		stampCancelScheduled: schedulesCancellation,
 		stampCanceled: confirmsCancellation,
 	});
+	// The cancel event dates the schedule, even when an earlier-processed event already saw the flag.
+	if (
+		schedulesCancellation &&
+		eventAt &&
+		existing?.cancelAtPeriodEnd &&
+		!existing.cancelScheduledAt
+	) {
+		projected.cancelScheduledAt = eventAt;
+	}
 
 	if (existing) {
-		const projectedStatus = projected.status ?? existing.status;
-		if (!isTerminalSubscriptionStatus(projectedStatus)) {
-			const desiredSlotKey = subscriptionSlotKey(
-				existing.referenceType ?? "user",
-				existing.referenceId,
-				projected.group === undefined ? existing.group : projected.group,
-			);
-			if (existing.activeSlotKey !== desiredSlotKey) {
-				projected.activeSlotKey = desiredSlotKey;
-			}
+		const slotKey = liveSlotKey(existing, projected);
+		if (slotKey && existing.activeSlotKey !== slotKey) {
+			projected.activeSlotKey = slotKey;
 		}
 		const updated = await updateReconciledSubscription(
 			ctx,
@@ -714,7 +832,7 @@ async function reconcileFromStreamPay(
 			projected,
 			streampaySubscriptionId,
 		);
-		if (eventIsStale) {
+		if (!eventApplies) {
 			logger(ctx).info(
 				`webhook ${payload.event_type}: ignored stale lifecycle callback for sub=${streampaySubscriptionId}.`,
 			);
@@ -841,6 +959,8 @@ export async function syncWebhookPayload(
 		maxAttempts?: number;
 		retryOnCallbackError?: boolean;
 		retryingRenewalCallback?: boolean;
+		/** The inbox table exists. Defaults to `dedupe`; replay processes without dedupe but has an inbox. */
+		inboxEnabled?: boolean;
 	} = {},
 ): Promise<void> {
 	if (payload.entity_type !== "SUBSCRIPTION" && payload.event_type !== "INVOICE_COMPLETED") {
@@ -886,6 +1006,7 @@ export async function syncWebhookPayload(
 					claim.row?.lastError?.startsWith(
 						"Subscription callback onSubscriptionRenewed failed:",
 					) === true,
+				options.inboxEnabled ?? dedupe,
 			);
 		} else {
 			const { row, stream } = await reconcileFromStreamPay(ctx, payload, client, plans);
@@ -921,6 +1042,36 @@ export async function syncWebhookPayload(
 	}
 }
 
+/**
+ * A lock whose event is already completed can never deliver its callback (for example after an admin
+ * discard that stopped before clearing it), so it is released for the next renewal evidence.
+ */
+async function releaseLockOfCompletedRenewal(
+	ctx: SyncContext,
+	subscriptionRowId: string,
+	lockEventId: string,
+): Promise<boolean> {
+	const owner = await ctx.context.adapter.findOne<WebhookEventRow>({
+		model: WEBHOOK_EVENT_MODEL,
+		where: [{ field: "eventId", value: lockEventId }],
+	});
+	if (owner?.status !== "completed") return false;
+	const released = await ctx.context.adapter.update<Subscription>({
+		model: SUBSCRIPTION_MODEL,
+		update: { renewalCallbackEventId: null },
+		where: [
+			{ field: "id", value: subscriptionRowId },
+			{ field: "renewalCallbackEventId", value: lockEventId },
+		],
+	});
+	if (released) {
+		logger(ctx).warn(
+			`released renewal callback lock of completed event ${lockEventId} for row=${subscriptionRowId}.`,
+		);
+	}
+	return released !== null;
+}
+
 async function handleRenewalEvidence(
 	ctx: SyncContext,
 	payload: StreamPayWebhookPayload,
@@ -929,6 +1080,7 @@ async function handleRenewalEvidence(
 	callbacks: SubscriptionCallbacks,
 	retryOnCallbackError: boolean,
 	retryingRenewalCallback: boolean,
+	inboxEnabled: boolean,
 ): Promise<void> {
 	const invoiceId = payload.data?.invoice?.id ?? payload.entity_id;
 	if (!invoiceId) return;
@@ -968,29 +1120,49 @@ async function handleRenewalEvidence(
 			existing.providerUpdatedAt instanceof Date &&
 			eventAt.getTime() < existing.providerUpdatedAt.getTime(),
 	);
+	const evidenceInvoiceId =
+		payload.data?.invoice?.id ?? (payload.entity_type === "INVOICE" ? payload.entity_id : null);
+	// A renewal-success event names no invoice, so the paid latest invoice is its evidence.
+	const settlesLatestInvoice =
+		stream.latest_invoice?.status === "COMPLETED" &&
+		(evidenceInvoiceId === null || stream.latest_invoice.id === evidenceInvoiceId);
+	const evidenceApplies = !eventIsStale || settlesLatestInvoice;
 	const projected: Partial<Subscription> = {
 		...projectSubscriptionFields(stream, existing),
 		...projectPlanFields(stream, plans),
-		...(eventIsStale
-			? existing.billingStatus === "past_due" && toLocalStatus(stream.status) === "active"
+		...(evidenceApplies
+			? { billingStatus: "current" }
+			: existing.billingStatus === "past_due" && toLocalStatus(stream.status) === "active"
 				? { status: "past_due", billingStatus: "past_due" }
-				: {}
-			: { billingStatus: "current" }),
+				: {}),
 	};
+	const slotKey = liveSlotKey(existing, projected);
+	if (slotKey && existing.activeSlotKey !== slotKey) {
+		projected.activeSlotKey = slotKey;
+	}
 	const previousPeriodEnd = existing.periodEnd?.getTime() ?? null;
 	const projectedPeriodEnd = projected.periodEnd?.getTime() ?? null;
 	const periodAdvanced =
 		previousPeriodEnd !== null &&
 		projectedPeriodEnd !== null &&
 		projectedPeriodEnd > previousPeriodEnd;
-	const cycleAdvanced =
-		existing.currentCycleNumber !== null &&
-		existing.currentCycleNumber !== undefined &&
-		projected.currentCycleNumber !== null &&
-		projected.currentCycleNumber !== undefined &&
-		projected.currentCycleNumber > existing.currentCycleNumber;
+	const renewedCycle = existing.renewedCycleNumber ?? existing.currentCycleNumber ?? null;
+	const projectedCycle = projected.currentCycleNumber ?? null;
+	// Period boundaries drift between cycles, so the provider's cycle counter identifies a renewal.
+	const tracksCycles = renewedCycle !== null && projectedCycle !== null;
+	const renewalAdvanced = tracksCycles ? projectedCycle > renewedCycle : periodAdvanced;
 	const eventId = extractEventId(payload);
-	const pendingCallback = existing.renewalCallbackEventId ?? null;
+	let pendingCallback = existing.renewalCallbackEventId ?? null;
+	if (pendingCallback && pendingCallback !== eventId) {
+		const released =
+			inboxEnabled && (await releaseLockOfCompletedRenewal(ctx, existing.id, pendingCallback));
+		if (!released) {
+			throw new Error(
+				`Subscription renewal callback ${pendingCallback} is pending; retry delivery.`,
+			);
+		}
+		pendingCallback = null;
+	}
 	if (
 		!pendingCallback &&
 		existing.providerUpdatedAt instanceof Date &&
@@ -1001,13 +1173,26 @@ async function handleRenewalEvidence(
 			`StreamPay returned stale subscription state for sub=${subscriptionId}; retry delivery.`,
 		);
 	}
-	if (pendingCallback && pendingCallback !== eventId) {
-		throw new Error(`Subscription renewal callback ${pendingCallback} is pending; retry delivery.`);
+	if (
+		!pendingCallback &&
+		projected.activeSlotKey &&
+		projected.activeSlotKey !== existing.activeSlotKey
+	) {
+		await takeSlotFromReservation(
+			ctx,
+			client,
+			projected.activeSlotKey,
+			existing.id,
+			subscriptionId,
+		);
 	}
 	const deliverCallback =
 		(pendingCallback === eventId && pendingCallback !== null) ||
-		(!eventIsStale && (periodAdvanced || cycleAdvanced || retryingRenewalCallback));
+		(evidenceApplies && (renewalAdvanced || retryingRenewalCallback));
 	const callbackOwner = deliverCallback && callbacks.onSubscriptionRenewed ? eventId : null;
+	if (deliverCallback && renewalAdvanced && projectedCycle !== null) {
+		projected.renewedCycleNumber = projectedCycle;
+	}
 	const updated = await ctx.context.adapter.update<Subscription>({
 		model: SUBSCRIPTION_MODEL,
 		// Recovery must retain the pending cycle, even if Stream has already advanced again.
@@ -1018,6 +1203,7 @@ async function handleRenewalEvidence(
 			{ field: "id", value: existing.id },
 			{ field: "periodEnd", value: existing.periodEnd ?? null },
 			{ field: "currentCycleNumber", value: existing.currentCycleNumber ?? null },
+			{ field: "renewedCycleNumber", value: existing.renewedCycleNumber ?? null },
 			{ field: "renewalCallbackEventId", value: pendingCallback },
 			{ field: "providerUpdatedAt", value: existing.providerUpdatedAt ?? null },
 			{ field: "status", value: existing.status },
@@ -1030,11 +1216,12 @@ async function handleRenewalEvidence(
 		}
 		const latest = await findSubscriptionByStreampayId(ctx, subscriptionId);
 		const anotherCallbackOwner = latest?.renewalCallbackEventId;
-		const desiredCycleAdvanced =
-			(periodAdvanced || cycleAdvanced) &&
-			(!periodAdvanced || (latest?.periodEnd?.getTime() ?? 0) >= (projectedPeriodEnd ?? 0)) &&
-			(!cycleAdvanced || (latest?.currentCycleNumber ?? 0) >= (projected.currentCycleNumber ?? 0));
-		if (anotherCallbackOwner && anotherCallbackOwner !== eventId && desiredCycleAdvanced) return;
+		const renewalClaimedElsewhere =
+			renewalAdvanced &&
+			(tracksCycles
+				? (latest?.renewedCycleNumber ?? 0) >= projectedCycle
+				: (latest?.periodEnd?.getTime() ?? 0) >= (projectedPeriodEnd ?? 0));
+		if (anotherCallbackOwner && anotherCallbackOwner !== eventId && renewalClaimedElsewhere) return;
 		throw new Error(`Subscription changed during renewal reconciliation; retry delivery.`);
 	}
 	const row = updated;

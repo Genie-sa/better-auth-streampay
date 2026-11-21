@@ -25,7 +25,8 @@ import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
 import type { StreamPayPluginRegistry } from "./subscriptions";
 import {
 	applySubscriptionProjection,
-	markWebhookEventCompleted,
+	completeUnchangedWebhookEvent,
+	hasLiveLease,
 	type PluginAdapter,
 	syncSubscriptionFromUpstream,
 	WEBHOOK_EVENT_MODEL,
@@ -1033,6 +1034,13 @@ function buildWebhookEventsEndpoints(
 						message: `Webhook event ${ctx.params.eventId} not found.`,
 					});
 				}
+				const inProgress = new APIError("CONFLICT", {
+					code: $ERROR_CODES.WEBHOOK_REPLAY_IN_PROGRESS.code,
+					message: `Webhook event ${ctx.params.eventId} is being processed. Retry after its lease expires.`,
+				});
+				if (row.status === "pending" && hasLiveLease(row, new Date())) throw inProgress;
+				// Complete first: once no worker can claim the event, its renewal callback lock is safe to clear.
+				if (!(await completeUnchangedWebhookEvent({ context: { adapter } }, row))) throw inProgress;
 				if (
 					registry?.subscriptionWebhookSync &&
 					!eventId.startsWith("handlers:") &&
@@ -1054,7 +1062,6 @@ function buildWebhookEventsEndpoints(
 						});
 					}
 				}
-				await markWebhookEventCompleted({ context: { adapter } }, row.id);
 				return ctx.json({ discarded: true, eventId });
 			},
 		),

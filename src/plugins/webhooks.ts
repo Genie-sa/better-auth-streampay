@@ -12,7 +12,9 @@ import {
 	claimWebhookEventForReplay,
 	DEFAULT_MAX_WEBHOOK_ATTEMPTS,
 	findDueWebhookEvents,
+	isStillDueWebhookEvent,
 	markWebhookEventCompleted,
+	parkUnreplayableWebhookEvent,
 	recordWebhookEventFailure,
 	type SyncContext,
 	WEBHOOK_EVENT_MODEL,
@@ -61,7 +63,7 @@ export const webhooks = (webhooksOptions: WebhooksOptions) => {
 	return (_options: StreamPayOptions, registry?: StreamPayPluginRegistry) => {
 		const { secret, toleranceSeconds, deduplicate = false, ...handlers } = webhooksOptions;
 		if (deduplicate && registry) {
-			registry.replayWebhookHandler = async (ctx, eventId) => {
+			registry.replayWebhookHandler = async (ctx, eventId, replayOptions) => {
 				const syncContext = { context: ctx.context as SyncContext["context"] };
 				const row = await syncContext.context.adapter.findOne<WebhookEventRow>({
 					model: WEBHOOK_EVENT_MODEL,
@@ -69,20 +71,24 @@ export const webhooks = (webhooksOptions: WebhooksOptions) => {
 				});
 				if (!eventId.startsWith("handlers:") || !row)
 					throw new APIError("NOT_FOUND", { message: "Webhook callback event not found." });
-				if (!row.rawPayload)
-					throw new APIError("BAD_REQUEST", { message: "Webhook callback has no stored payload." });
+				if (
+					replayOptions?.dueAttemptCount !== undefined &&
+					!isStillDueWebhookEvent(row, replayOptions.dueAttemptCount, new Date())
+				)
+					throw new APIError("CONFLICT", { message: "Webhook callback is no longer due." });
+				const unreplayable = async (message: string): Promise<never> => {
+					await parkUnreplayableWebhookEvent(syncContext, row, message);
+					throw new APIError("BAD_REQUEST", { message });
+				};
+				if (!row.rawPayload) return unreplayable("Webhook callback has no stored payload.");
 				let payload: unknown;
 				try {
 					payload = JSON.parse(row.rawPayload);
 				} catch {
-					throw new APIError("BAD_REQUEST", {
-						message: "Stored webhook payload is not valid JSON.",
-					});
+					return unreplayable("Stored webhook payload is not valid JSON.");
 				}
 				if (!isStreamPayWebhookEnvelope(payload))
-					throw new APIError("BAD_REQUEST", {
-						message: "Stored webhook payload is not a valid event envelope.",
-					});
+					return unreplayable("Stored webhook payload is not a valid event envelope.");
 				const previousStatus = row.status;
 				const claimed = await claimWebhookEventForReplay(syncContext, row);
 				if (!claimed?.lockedBy)
@@ -242,7 +248,7 @@ export const webhooks = (webhooksOptions: WebhooksOptions) => {
 						const failed: Array<{ eventId: string; error: string }> = [];
 						for (const row of due) {
 							try {
-								await replay(ctx, row.eventId);
+								await replay(ctx, row.eventId, { dueAttemptCount: row.attemptCount });
 								succeeded.push(row.eventId);
 							} catch (err: unknown) {
 								if (err instanceof APIError && err.status === "CONFLICT") continue;

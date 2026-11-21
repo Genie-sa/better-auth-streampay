@@ -116,6 +116,11 @@ export const subscriptionTable = {
 				type: "number",
 				required: false,
 			},
+			renewedCycleNumber: {
+				type: "number",
+				required: false,
+				input: false,
+			},
 			renewalCallbackEventId: {
 				type: "string",
 				required: false,

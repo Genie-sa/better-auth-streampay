@@ -5,7 +5,7 @@ import { $ERROR_CODES } from "../../error-codes";
 import type { PluginAdapter } from "./adapter";
 import type { ResolvedPlans } from "./plans";
 import { isTerminalSubscriptionStatus, toLocalStatus } from "./status";
-import type { Subscription } from "./types";
+import { type Subscription, subscriptionSlotKey } from "./types";
 
 const SUBSCRIPTION_MODEL = "subscription";
 
@@ -51,6 +51,19 @@ export function projectSubscriptionAgainstExisting(
 	return reconcileProjectionAgainstExisting(existing, projectSubscriptionFields(stream, existing));
 }
 
+/** The slot a row must hold after the projection, or null when the projected status is terminal. */
+export function liveSlotKey(
+	existing: Subscription,
+	projected: Partial<Subscription>,
+): string | null {
+	if (isTerminalSubscriptionStatus(projected.status ?? existing.status)) return null;
+	return subscriptionSlotKey(
+		existing.referenceType ?? "user",
+		existing.referenceId,
+		projected.group === undefined ? existing.group : projected.group,
+	);
+}
+
 export async function persistSubscriptionProjection(
 	adapter: PluginAdapter,
 	existing: Subscription,
@@ -62,23 +75,36 @@ export async function persistSubscriptionProjection(
 		existing.providerUpdatedAt instanceof Date &&
 		projection.providerUpdatedAt instanceof Date &&
 		projection.providerUpdatedAt.getTime() < existing.providerUpdatedAt.getTime();
-	if (!stale) {
-		const updated = await adapter.update<Subscription>({
-			model: SUBSCRIPTION_MODEL,
-			update: projection,
-			where: [
-				{ field: "id", value: existing.id },
-				{ field: "providerUpdatedAt", value: existing.providerUpdatedAt ?? null },
-				{ field: "streampaySubscriptionId", value: existing.streampaySubscriptionId ?? null },
-				{ field: "streampayConsumerId", value: existing.streampayConsumerId ?? null },
-				{ field: "status", value: existing.status },
-				{ field: "billingStatus", value: existing.billingStatus },
-			],
-		});
-		if (updated) return updated;
-	}
+	const slotKey = liveSlotKey(existing, projection);
+	const movesSlot = slotKey !== null && existing.activeSlotKey !== slotKey;
+	// Only webhooks take a slot from another row or flag a live holder, so endpoints move into a free slot.
+	const slotHolder = movesSlot
+		? await adapter.findOne<Subscription>({
+				model: SUBSCRIPTION_MODEL,
+				where: [{ field: "activeSlotKey", value: slotKey }],
+			})
+		: null;
+	const updated =
+		stale || slotHolder
+			? null
+			: await adapter.update<Subscription>({
+					model: SUBSCRIPTION_MODEL,
+					update: movesSlot ? { ...projection, activeSlotKey: slotKey } : projection,
+					where: [
+						{ field: "id", value: existing.id },
+						{ field: "providerUpdatedAt", value: existing.providerUpdatedAt ?? null },
+						{ field: "streampaySubscriptionId", value: existing.streampaySubscriptionId ?? null },
+						{ field: "streampayConsumerId", value: existing.streampayConsumerId ?? null },
+						{ field: "status", value: existing.status },
+						{ field: "billingStatus", value: existing.billingStatus },
+						{ field: "renewedCycleNumber", value: existing.renewedCycleNumber ?? null },
+					],
+				});
+	if (updated) return updated;
 	log.warn(
-		`${source}: retained newer local subscription state for row=${existing.id}. The provider action is not rolled back.`,
+		slotHolder
+			? `${source}: StreamPay reports row=${existing.id} live, but row=${slotHolder.id} holds its billing slot. The next webhook reconciles it.`
+			: `${source}: retained newer local subscription state for row=${existing.id}. The provider action is not rolled back.`,
 	);
 	return adapter.findOne<Subscription>({
 		model: SUBSCRIPTION_MODEL,
@@ -140,7 +166,7 @@ export async function syncSubscriptionFromUpstream(
 
 export function projectSubscriptionFields(
 	sub: SubscriptionDetailed,
-	existing?: Pick<Subscription, "trialStart"> | null,
+	existing?: Pick<Subscription, "trialStart" | "currentCycleNumber" | "renewedCycleNumber"> | null,
 ): Partial<Subscription> {
 	const status = toLocalStatus(sub.status);
 	const terminal = isTerminalSubscriptionStatus(status);
@@ -165,6 +191,11 @@ export function projectSubscriptionFields(
 		periodStart,
 		periodEnd,
 		currentCycleNumber: sub.current_cycle_number ?? null,
+		// Only renewal evidence advances the baseline. Other writers only initialize it, so they can
+		// neither absorb a renewal nor roll back one that was just delivered.
+		...(existing?.renewedCycleNumber == null
+			? { renewedCycleNumber: existing?.currentCycleNumber ?? sub.current_cycle_number ?? null }
+			: {}),
 		trialStart:
 			(sub.trial_end ? (parseDate(sub.started_at) ?? periodStart) : null) ??
 			existing?.trialStart ??

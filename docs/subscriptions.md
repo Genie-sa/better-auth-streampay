@@ -79,6 +79,7 @@ applicable, or has not yet been confirmed upstream.
 | `periodStart` | nullable date | Start of the current provider billing period. |
 | `periodEnd` | nullable date | End of the current provider billing period and usual effective time for a deferred change. |
 | `currentCycleNumber` | nullable number | Provider cycle counter; helps identify genuine renewals and avoid duplicate renewal callbacks. |
+| `renewedCycleNumber` | nullable number, server-managed | Last provider cycle whose renewal was handled. Only renewal evidence advances it, so other writers cannot absorb a renewal callback. Null on legacy rows, which fall back to `currentCycleNumber`. |
 | `renewalCallbackEventId` | nullable string, server-managed | Event that owns a pending renewal callback. Saved atomically with cycle advancement and cleared after delivery so replay can recover interrupted callbacks. |
 | `trialStart` | nullable date | Start of a known trial. Also records trial history for one-trial-per-group eligibility. |
 | `trialEnd` | nullable date | Provider trial end. |
