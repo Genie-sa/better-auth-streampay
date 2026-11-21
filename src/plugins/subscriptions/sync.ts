@@ -264,6 +264,7 @@ export async function claimOrAdvanceWebhookEvent(
 				{ field: "id", value: existing.id },
 				{ field: "status", value: "pending" },
 				{ field: "lockedAt", value: existing.lockedAt ?? null },
+				{ field: "attemptCount", value: existing.attemptCount ?? null },
 			],
 		});
 		return updated
@@ -285,6 +286,7 @@ export async function claimOrAdvanceWebhookEvent(
 			{ field: "id", value: existing.id },
 			{ field: "status", value: "pending" },
 			{ field: "lockedAt", value: existing.lockedAt ?? null },
+			{ field: "attemptCount", value: existing.attemptCount ?? null },
 		],
 	});
 	return updated ? { action: "process", row: updated } : { action: "skip", reason: "in_progress" };
@@ -362,6 +364,20 @@ export async function parkUnreplayableWebhookEvent(
 	});
 }
 
+function completedWebhookEventFields() {
+	return {
+		status: "completed",
+		completedAt: new Date(),
+		nextAttemptAt: null,
+		lockedAt: null,
+		lockedBy: null,
+		rawPayload: null,
+		signatureHeader: null,
+		lastError: null,
+		lastErrorCode: null,
+	} as const;
+}
+
 export async function markWebhookEventCompleted(
 	ctx: { context: { adapter: PluginAdapter } },
 	rowId: string,
@@ -369,22 +385,30 @@ export async function markWebhookEventCompleted(
 ): Promise<void> {
 	await ctx.context.adapter.update({
 		model: WEBHOOK_EVENT_MODEL,
-		update: {
-			status: "completed",
-			completedAt: new Date(),
-			nextAttemptAt: null,
-			lockedAt: null,
-			lockedBy: null,
-			rawPayload: null,
-			signatureHeader: null,
-			lastError: null,
-			lastErrorCode: null,
-		},
+		update: completedWebhookEventFields(),
 		where: [
 			{ field: "id", value: rowId },
 			...(lockId ? [{ field: "lockedBy", value: lockId }] : []),
 		],
 	});
+}
+
+/** Completes an event only if no worker claimed or advanced it since `row` was read. */
+export async function completeUnchangedWebhookEvent(
+	ctx: { context: { adapter: PluginAdapter } },
+	row: WebhookEventRow,
+): Promise<boolean> {
+	const updated = await ctx.context.adapter.update<WebhookEventRow>({
+		model: WEBHOOK_EVENT_MODEL,
+		update: completedWebhookEventFields(),
+		where: [
+			{ field: "id", value: row.id },
+			{ field: "status", value: row.status },
+			{ field: "lockedAt", value: row.lockedAt ?? null },
+			{ field: "attemptCount", value: row.attemptCount ?? null },
+		],
+	});
+	return updated !== null;
 }
 
 export async function recordWebhookEventFailure(

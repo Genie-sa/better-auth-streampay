@@ -136,6 +136,7 @@ export async function resumeOrReserveCheckoutSlot(args: {
 		const reservationIsStale =
 			!(reserved.createdAt instanceof Date) ||
 			now - reserved.createdAt.getTime() >= UPGRADE_IDEMPOTENCY_WINDOW_MS;
+		let linkExpired = false;
 		if (!reservationIsStale && matchesCheckout(reserved)) {
 			let recovery: Awaited<ReturnType<typeof recoverCheckoutUrl>>;
 			try {
@@ -153,11 +154,12 @@ export async function resumeOrReserveCheckoutSlot(args: {
 			if (recovery.kind === "recovered") {
 				return { kind: "recovered", row: reserved, url: recovery.url };
 			}
+			linkExpired = Boolean(reserved.streampayPaymentLinkId);
 		}
 
-		if (!reservationIsStale) throw checkoutInProgressError();
+		if (!reservationIsStale && !linkExpired) throw checkoutInProgressError();
 
-		if (reserved.streampayPaymentLinkId) {
+		if (reservationIsStale && reserved.streampayPaymentLinkId) {
 			try {
 				await deactivatePaymentLink(client, reserved.streampayPaymentLinkId, log);
 			} catch (deactivationError) {

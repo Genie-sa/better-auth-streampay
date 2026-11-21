@@ -31,5 +31,8 @@ the integration guide). Existing rows need no backfill.
   the latest invoice is completed.
 - A same-plan upgrade after the 15-minute window starts a new checkout instead of resuming the old
   link, and a link that is `INACTIVE` at StreamPay is never resumed.
-- Admin discard returns 409 while a worker holds the event's processing lease.
+- Admin discard returns 409 while a worker holds or acquires the event's processing lease.
 - A dead-lettered event keeps its stored payload when the final delivery has no body.
+- Two concurrent redeliveries of the same attempt no longer both run it.
+- A same-plan upgrade replaces a concurrent reservation whose checkout link is already gone instead
+  of returning `SUBSCRIPTION_CHECKOUT_IN_PROGRESS`.

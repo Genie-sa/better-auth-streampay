@@ -198,4 +198,117 @@ describe(`review findings end-to-end (${TEST_WITH})`, () => {
 			{ status: "dead_letter", rawPayload: '{"stored":true}', signatureHeader: "t=1,v1=stored" },
 		]);
 	});
+
+	it("refuses a discard when a worker claims the event after the admin read it", async () => {
+		const h = await harness([
+			subscriptions({ plans: [TEAM] }),
+			webhooks({ secret: SECRET }),
+			admin({ isAdmin: () => true }),
+		]);
+		const context = await h.auth.$context;
+		const event = subscriptionEvent(h, "SUBSCRIPTION_ACTIVATED", "sub_raced", FIRST_EVENT);
+		const eventId = `SUBSCRIPTION_ACTIVATED:sub_raced:${FIRST_EVENT}`;
+		await context.adapter.create({
+			model: "streampayWebhookEvent",
+			data: {
+				eventId,
+				eventType: "SUBSCRIPTION_ACTIVATED",
+				status: "pending",
+				attemptCount: 1,
+				receivedAt: new Date(FIRST_WRITE),
+				rawPayload: JSON.stringify(event),
+			},
+		});
+		const adapter = context.adapter as unknown as {
+			findOne: (input: { model: string }) => Promise<unknown>;
+		};
+		const findOne = adapter.findOne.bind(adapter);
+		let workerClaimed = false;
+		vi.spyOn(adapter, "findOne").mockImplementation(async (input) => {
+			const row = await findOne(input);
+			if (input.model === "streampayWebhookEvent" && !workerClaimed) {
+				workerClaimed = true;
+				await claimOrAdvanceWebhookEvent(
+					{ context: context as never },
+					event as never,
+					null,
+					null,
+					DEFAULT_MAX_WEBHOOK_ATTEMPTS,
+				);
+			}
+			return row;
+		});
+
+		const response = await callAuthEndpoint(
+			h.auth,
+			`/admin/streampay/webhook-events/${encodeURIComponent(eventId)}`,
+			{ method: "DELETE", headers: h.headers },
+		);
+
+		expect(response.status).toBe(409);
+		expect(await h.rows("streampayWebhookEvent")).toMatchObject([
+			{ status: "pending", attemptCount: 2, lockedBy: expect.any(String) },
+		]);
+	});
+
+	it("does not let two redeliveries of one attempt both run it", async () => {
+		const h = await harness([subscriptions({ plans: [TEAM] }), webhooks({ secret: SECRET })]);
+		h.stream.getSubscription.mockRejectedValue(
+			Object.assign(new Error("unavailable"), { status: 503, body: {} }),
+		);
+		const event = subscriptionEvent(h, "SUBSCRIPTION_ACTIVATED", "sub_twice", FIRST_EVENT);
+		expect((await h.deliver(event)).status).toBe(500);
+		const adapter = (await h.auth.$context).adapter as unknown as {
+			findOne: (input: { model: string }) => Promise<unknown>;
+		};
+		const findOne = adapter.findOne.bind(adapter);
+		let releaseStaleDelivery = () => {};
+		const firstRedeliveryFinished = new Promise<void>((resolve) => {
+			releaseStaleDelivery = resolve;
+		});
+		let inboxReads = 0;
+		vi.spyOn(adapter, "findOne").mockImplementation(async (input) => {
+			const row = await findOne(input);
+			if (input.model === "streampayWebhookEvent" && ++inboxReads === 1)
+				await firstRedeliveryFinished;
+			return row;
+		});
+
+		const staleDelivery = h.deliver(event);
+		expect((await h.deliver(event)).status).toBe(500);
+		releaseStaleDelivery();
+
+		expect((await staleDelivery).status).toBe(503);
+		expect(h.stream.getSubscription).toHaveBeenCalledTimes(2);
+		expect(await h.rows("streampayWebhookEvent")).toMatchObject([{ attemptCount: 2 }]);
+	});
+
+	it("replaces a fresh concurrent reservation whose checkout link is already gone", async () => {
+		const h = await harness([subscriptions({ plans: [TEAM] }), webhooks({ secret: SECRET })]);
+		expect((await h.upgrade({ plan: TEAM.name, seats: 1 })).status).toBe(200);
+		h.stream.getPaymentLink.mockRejectedValue(
+			Object.assign(new Error("not found"), { status: 404, body: {} }),
+		);
+		const adapter = (await h.auth.$context).adapter as unknown as {
+			findMany: (input: { model: string }) => Promise<unknown[]>;
+		};
+		const findMany = adapter.findMany.bind(adapter);
+		let missedConcurrentReservation = false;
+		vi.spyOn(adapter, "findMany").mockImplementation(async (input) => {
+			const rows = await findMany(input);
+			if (input.model === "subscription" && !missedConcurrentReservation) {
+				missedConcurrentReservation = true;
+				return [];
+			}
+			return rows;
+		});
+
+		const response = await h.upgrade({ plan: TEAM.name, seats: 1 });
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({
+			reused: false,
+			url: "https://pay.example.test/pl_2",
+		});
+	});
 });
