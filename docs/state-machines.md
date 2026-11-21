@@ -195,7 +195,8 @@ retries without firing for two events of the same cycle.
 | event E | Callback throws with `retryOnCallbackError` | E (event recorded as failed) | same |
 | event E | Redelivery or replay of E | E, then null after success | `pendingCallback === eventId` branch |
 | event E | Renewal evidence for another event | E (other event fails and retries) | `pendingCallback !== eventId` |
-| event E | Admin discards E | null | `adminDiscardWebhookEvent` |
+| event E | Admin discards E | null | `adminDiscardWebhookEvent`, after the event is completed |
+| event E, E already `completed` | Renewal evidence for another event | null, and that event retries | `releaseLockOfCompletedRenewal`: a completed owner can never deliver, for example after a discard that stopped before clearing the lock (F27) |
 
 Invariants: while the lock is set, its cycle's callback has not been delivered, and other renewal
 evidence for that subscription waits until the lock clears. Only renewal evidence advances
@@ -326,6 +327,7 @@ PostgreSQL 17. Run the end-to-end tests on PostgreSQL with `STREAMPAY_E2E_DB=pos
 | F24 | Low | 2 | A same-plan upgrade refused with `SUBSCRIPTION_CHECKOUT_IN_PROGRESS` while the slot is held by a reservation whose link is gone. | Found by GPT-6.2 Astra on re-review; pre-existing. The request misses the reservation in its first read, loses the insert race, and finds the link `INACTIVE` or 404. | The customer cannot start a checkout until the 15-minute window passes. | The conflict path releases a reservation with an expired link and reserves again (C-f) |
 | F25 | Low | 1 | A row in plan group B still holding group A's slot. | Found by Gemini 4 Neon on re-review. StreamPay moves a subscription to a product in another configured group outside the plugin, and a customer endpoint observes it before any webhook. The endpoint wrote the new group but only moved the slot on a revival. | Upgrades in group A are refused as already active, and group B can hold two live rows. | Endpoints move the slot whenever the desired slot differs |
 | F26 | Low | 2 | A released reservation whose link stays payable (breaks C2). | Found by Gemini 4 Neon on re-review. A stale-replacement release read the reservation without a link; its own request saved the link before the release write landed. | A payable link without a live reservation, next to the replacement's link. | The release CAS compares the link ID it read |
+| F27 | Medium | 6 | A renewal callback lock owned by a `completed` event. | Found by GPT-6.2 Astra in the final check of F21's fix. The discard completes the event, then the process stops before it clears the lock. | Every later renewal for that subscription retries until it dead-letters. | Renewal evidence releases a lock whose owning event is completed |
 | F14 | High | 6 | `renewedCycleNumber` rolled back after its callback ran, so a second renewal event delivers `onSubscriptionRenewed` again. | Found in review of the F13 fix. A customer endpoint (or webhook) reads the row, `INVOICE_COMPLETED` then advances the marker and runs the callback, and the endpoint write restores the old marker. Its CAS matched because the provider timestamp was unchanged. `SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY` then counted as a new renewal. | Duplicate per-cycle side effects. | Projections only initialize the marker, and every CAS includes it |
 | F15 | Medium | 7 | A due-queue retry before its backoff, or an automatic retry of a dead letter. | Pre-existing. Two overlapping `processDueStreampayWebhookEvents` runs select the same row. The first claims it and fails. The second replayed by event ID, re-read the updated row, and claimed it again at once, even after it was dead-lettered. | Extra provider calls and callback runs, and dead letters leaving manual review. | The processor passes the selected attempt (`dueAttemptCount`); replay requires the row to still be that pending attempt and due, and the claim CAS includes `attemptCount` |
 | F16 | Medium | 7 | A repaired event parked as unreplayable. | Found in review of F12. Replay reads a pending row without payload; a redelivery then claims it, stores its payload, fails, and schedules a retry; the stale parking write still matched `pending` and `lockedAt = null`. | The retry time is erased, so the due processor never retries the event. | Parking CAS includes `attemptCount` |
@@ -437,7 +439,7 @@ cycle in its own column, advanced only by renewal evidence.
 
 **Issue 8, P1: Review findings (F14 to F24).** GPT-6.2 Astra and Gemini 4 Neon (high) reviewed
 the branch independently, then re-reviewed the fixes. Both found F14. The re-reviews found F21's
-first fix incomplete, plus F23 to F26. F14, F16, and F19 were gaps in the new code; the rest
+first fix incomplete, plus F23 to F27. F14, F16, and F19 were gaps in the new code; the rest
 were pre-existing.
 
 Issues 4 to 8 are fixed on `ali/fix-stale-lifecycle-effects`. Regression tests:
@@ -445,7 +447,7 @@ Issues 4 to 8 are fixed on `ali/fix-stale-lifecycle-effects`. Regression tests:
 cancellation stays suppressed, and a late invoice that is not the latest keeps `past_due`) and
 `tests/integration/due-queue.test.ts` (F12). The `renewal callbacks` tests in the first file cover
 F13 and F14, including a legacy row without the marker; the revival tests cover F17; the due-queue
-file covers F15 and F16; `tests/integration/review-findings.test.ts` covers F18 to F26. Every bug test fails on the code before its fix and passes after it.
+file covers F15 and F16; `tests/integration/review-findings.test.ts` covers F18 to F27. Every bug test fails on the code before its fix and passes after it.
 
 ### Open risks (not confirmed, not changed)
 

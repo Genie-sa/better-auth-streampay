@@ -38,3 +38,5 @@ the integration guide). Existing rows need no backfill.
   of returning `SUBSCRIPTION_CHECKOUT_IN_PROGRESS`.
 - A customer action that observes a subscription moved to another plan group moves its billing slot.
 - Replacing a stale reservation no longer releases it after its checkout link was saved concurrently.
+- A renewal callback lock left behind by a completed (for example discarded) event is released by
+  the next renewal event instead of blocking renewals.

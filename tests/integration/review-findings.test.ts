@@ -394,4 +394,55 @@ describe(`review findings end-to-end (${TEST_WITH})`, () => {
 			{ status: "incomplete", streampayPaymentLinkId: "pl_saved" },
 		]);
 	});
+
+	it("releases a renewal lock whose event was completed before the lock was cleared", async () => {
+		const onSubscriptionRenewed = vi.fn();
+		const h = await harness([
+			subscriptions({ plans: [TEAM], onSubscriptionRenewed }),
+			webhooks({ secret: SECRET }),
+		]);
+		const context = await h.auth.$context;
+		h.stream.getSubscription.mockResolvedValue(
+			providerSubscription("sub_locked", "ACTIVE", { current_cycle_number: 1 }),
+		);
+		await h.deliver(subscriptionEvent(h, "SUBSCRIPTION_ACTIVATED", "sub_locked", FIRST_EVENT));
+		const discardedEventId = `INVOICE_COMPLETED:inv_discarded:${FIRST_EVENT}`;
+		await context.adapter.create({
+			model: "streampayWebhookEvent",
+			data: {
+				eventId: discardedEventId,
+				eventType: "INVOICE_COMPLETED",
+				status: "completed",
+				attemptCount: 1,
+				receivedAt: new Date(FIRST_WRITE),
+			},
+		});
+		const [row] = await h.rows("subscription");
+		await h.setRow("subscription", String(row?.id), { renewalCallbackEventId: discardedEventId });
+		h.stream.getSubscription.mockResolvedValue(
+			providerSubscription("sub_locked", "ACTIVE", {
+				current_cycle_number: 2,
+				latest_invoice: { id: "inv_next", status: "COMPLETED" },
+			}),
+		);
+		h.stream.getInvoice.mockResolvedValue({
+			id: "inv_next",
+			subscription_id: "sub_locked",
+		} as never);
+		const renewal = {
+			event_type: "INVOICE_COMPLETED",
+			entity_type: "INVOICE",
+			entity_id: "inv_next",
+			timestamp: LATER_EVENT,
+			data: { invoice: { id: "inv_next", url: "" } },
+		};
+
+		expect((await h.deliver(renewal)).status).toBe(500);
+		expect((await h.deliver(renewal)).status).toBe(200);
+
+		expect(onSubscriptionRenewed).toHaveBeenCalledTimes(1);
+		expect(await h.rows("subscription")).toMatchObject([
+			{ renewalCallbackEventId: null, renewedCycleNumber: 2 },
+		]);
+	});
 });

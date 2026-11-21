@@ -1039,6 +1039,33 @@ export async function syncWebhookPayload(
 	}
 }
 
+/**
+ * A lock whose event is already completed can never deliver its callback (for example after an admin
+ * discard that stopped before clearing it), so it is released for the next renewal evidence.
+ */
+async function releaseLockOfCompletedRenewal(
+	ctx: SyncContext,
+	subscriptionRowId: string,
+	lockEventId: string,
+): Promise<void> {
+	const owner = await ctx.context.adapter.findOne<WebhookEventRow>({
+		model: WEBHOOK_EVENT_MODEL,
+		where: [{ field: "eventId", value: lockEventId }],
+	});
+	if (owner?.status !== "completed") return;
+	await ctx.context.adapter.update({
+		model: SUBSCRIPTION_MODEL,
+		update: { renewalCallbackEventId: null },
+		where: [
+			{ field: "id", value: subscriptionRowId },
+			{ field: "renewalCallbackEventId", value: lockEventId },
+		],
+	});
+	logger(ctx).warn(
+		`released renewal callback lock of completed event ${lockEventId} for row=${subscriptionRowId}.`,
+	);
+}
+
 async function handleRenewalEvidence(
 	ctx: SyncContext,
 	payload: StreamPayWebhookPayload,
@@ -1130,6 +1157,7 @@ async function handleRenewalEvidence(
 		);
 	}
 	if (pendingCallback && pendingCallback !== eventId) {
+		await releaseLockOfCompletedRenewal(ctx, existing.id, pendingCallback);
 		throw new Error(`Subscription renewal callback ${pendingCallback} is pending; retry delivery.`);
 	}
 	if (
