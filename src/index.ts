@@ -18,6 +18,7 @@ export {
 } from "./plugins/checkout";
 export { type PortalOptions, portal } from "./plugins/portal";
 export {
+	APP_ID_METADATA_KEY,
 	type AuthorizeReferenceContext,
 	checkLimit,
 	classifyWebhookFailure,
@@ -41,6 +42,7 @@ export {
 	type SubscriptionCallback,
 	type SubscriptionCallbackData,
 	type SubscriptionCallbacks,
+	type SubscriptionReferenceContext,
 	type SubscriptionReferenceType,
 	type SubscriptionSchema,
 	type SubscriptionStatus,
@@ -51,6 +53,8 @@ export {
 	subscriptions,
 	syncWebhookPayload,
 	type TrialEligibilityContext,
+	type UnlinkedSubscriptionContext,
+	type UnlinkedSubscriptionResolution,
 	type WebhookSyncFailure,
 } from "./plugins/subscriptions";
 export { type WebhooksOptions, webhooks } from "./plugins/webhooks";

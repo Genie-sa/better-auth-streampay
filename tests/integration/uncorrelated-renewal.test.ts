@@ -86,7 +86,7 @@ describe(`renewal evidence for an unlinked subscription (${TEST_WITH})`, () => {
 		]);
 	});
 
-	it("ignores renewal evidence for a subscription the plugin did not check out", async () => {
+	it("ignores renewal evidence for a product this app does not sell, without a link lookup", async () => {
 		const onSubscriptionRenewed = vi.fn();
 		const h = await harness([
 			subscriptions({ plans: [TEAM], onSubscriptionRenewed }),
@@ -95,6 +95,7 @@ describe(`renewal evidence for an unlinked subscription (${TEST_WITH})`, () => {
 		h.stream.getSubscription.mockResolvedValue(
 			providerSubscription("sub_foreign", "ACTIVE", {
 				current_cycle_number: 4,
+				items: [{ product_id: "prod_other_app", quantity: 1 }],
 				latest_invoice: { id: "inv_foreign", status: "COMPLETED", payment_link_id: "pl_foreign" },
 			}),
 		);

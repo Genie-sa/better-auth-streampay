@@ -161,6 +161,32 @@ export interface TrialEligibilityContext {
 	defaultEligible: boolean;
 }
 
+/** Organization or custom reference recovered from checkout metadata without a local reservation. */
+export interface SubscriptionReferenceContext {
+	referenceType: "organization" | "custom";
+	referenceId: string;
+	plan: StreamPayPlanLike;
+	subscription: SubscriptionDetailed;
+}
+
+/** A StreamPay subscription with no plugin checkout metadata, for example one created in the dashboard. */
+export interface UnlinkedSubscriptionContext {
+	subscription: SubscriptionDetailed;
+	/** Local user whose StreamPay consumer matches. A lookup hint, not proof that this app sold it. */
+	consumerUser: StreamPaySessionUser | null;
+	/** Custom metadata of the subscription's checkout link, when it has one. */
+	linkMetadata: Record<string, unknown> | null;
+	/** Configured plan whose product StreamPay bills, or null when no configured product matches. */
+	inferredPlan: StreamPayPlanLike | null;
+}
+
+export interface UnlinkedSubscriptionResolution {
+	referenceType: SubscriptionReferenceType;
+	referenceId: string;
+	/** Defaults to the inferred plan. Must match the product StreamPay bills. */
+	plan?: string;
+}
+
 export function subscriptionSlotKey(
 	referenceType: SubscriptionReferenceType,
 	referenceId: string,
@@ -200,13 +226,37 @@ interface SubscriptionsOptionsBase extends SubscriptionCallbacks {
 
 	/** Disabling this removes persisted webhook deduplication and replay. */
 	enableWebhookEventTable?: boolean;
+
+	/**
+	 * Identifies this deployment on checkout links. Give each deployment its own value when several
+	 * apps or environments share one StreamPay organization: recovery never adopts a checkout link
+	 * stamped with another value.
+	 */
+	appId?: string;
+
+	/**
+	 * Confirms that an organization or custom reference recovered from checkout metadata, without a
+	 * local reservation, belongs to this app. Without it, renewal recovery skips those references.
+	 */
+	resolveSubscriptionReference?: (data: SubscriptionReferenceContext) => boolean | Promise<boolean>;
+
+	/**
+	 * Maps a subscription without plugin checkout metadata to a local reference, or returns null to
+	 * leave it unlinked. Called for each such creation and renewal event, so it must be idempotent.
+	 * A thrown error is retried.
+	 */
+	resolveUnlinkedSubscription?: (
+		data: UnlinkedSubscriptionContext,
+	) => UnlinkedSubscriptionResolution | null | Promise<UnlinkedSubscriptionResolution | null>;
 }
 
 export type SubscriptionsOptions = SubscriptionsOptionsBase;
 
 export const UPGRADE_IDEMPOTENCY_WINDOW_MS = 15 * 60 * 1000;
 
+export const PLUGIN_METADATA_PREFIX = "streampay_plugin_";
 export const PLAN_NAME_METADATA_KEY = "streampay_plugin_plan_name";
 export const REFERENCE_ID_METADATA_KEY = "streampay_plugin_reference_id";
 export const REFERENCE_TYPE_METADATA_KEY = "streampay_plugin_reference_type";
 export const SUBSCRIPTION_ROW_ID_METADATA_KEY = "streampay_plugin_subscription_row_id";
+export const APP_ID_METADATA_KEY = "streampay_plugin_app_id";

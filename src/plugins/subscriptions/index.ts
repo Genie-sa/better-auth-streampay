@@ -17,11 +17,13 @@ import { subscriptionTable, webhookEventTable } from "./schema";
 import { SUBSCRIPTION_STATUSES } from "./status";
 import {
 	classifyWebhookFailure,
+	linkSubscriptionToReference,
+	type SubscriptionLinkRequest,
 	subscriptionInboxScope,
 	syncWebhookPayload,
 	type WebhookReplayOptions,
 } from "./sync";
-import type { StreamPayPlanLike, SubscriptionsOptions } from "./types";
+import type { StreamPayPlanLike, Subscription, SubscriptionsOptions } from "./types";
 
 export {
 	checkLimit,
@@ -51,12 +53,16 @@ export type {
 	SubscriptionCallback,
 	SubscriptionCallbackData,
 	SubscriptionCallbacks,
+	SubscriptionReferenceContext,
 	SubscriptionReferenceType,
 	SubscriptionStatus,
 	SubscriptionsOptions,
 	TrialEligibilityContext,
+	UnlinkedSubscriptionContext,
+	UnlinkedSubscriptionResolution,
 } from "./types";
 export {
+	APP_ID_METADATA_KEY,
 	DEFAULT_ACCESS_STATUSES,
 	PLAN_NAME_METADATA_KEY,
 	REFERENCE_ID_METADATA_KEY,
@@ -94,6 +100,11 @@ export interface StreamPayPluginRegistry {
 	) => Promise<{ replayed: true; eventId: string }>;
 	/** @deprecated Use `replayWebhookEvent`; both replay any inbox event. */
 	replayWebhookHandler?: NonNullable<StreamPayPluginRegistry["replayWebhookEvent"]>;
+
+	linkSubscription?: (
+		ctx: GenericEndpointContext,
+		request: SubscriptionLinkRequest,
+	) => Promise<{ row: Subscription; reused: boolean }>;
 }
 
 export function subscriptions(subsOptions: SubscriptionsOptions) {
@@ -190,6 +201,15 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 					throw err;
 				}
 			};
+
+			registry.linkSubscription = async (ctx, request) =>
+				linkSubscriptionToReference(
+					toSyncContext(ctx),
+					options.client,
+					await plansRef(),
+					subsOptions,
+					request,
+				);
 		}
 
 		const schema = {

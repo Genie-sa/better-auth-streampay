@@ -1,8 +1,11 @@
 import type { SubscriptionDetailed } from "@streamsdk/typescript";
+import { APIError } from "better-auth/api";
+import { $ERROR_CODES } from "../../error-codes";
 import type { StreamPayClient } from "../../types";
 import { readSdkErrorFields } from "../../utils/error-envelope";
 import { type ScopedLogger, scopedLogger } from "../../utils/logger";
 import { asSessionUser, type StreamPaySessionUser } from "../../utils/session";
+import { isUniqueConstraintError } from "../../utils/unique-constraint";
 import type {
 	StreamPayWebhookData,
 	StreamPayWebhookEnvelope,
@@ -23,6 +26,7 @@ import { yieldReservationToPaidSubscription } from "./checkout-reservation";
 import { SubscriptionCorrelationError } from "./correlation-error";
 import type { ResolvedPlans } from "./plans";
 import {
+	applySubscriptionProjection,
 	inferPlanFromItems,
 	isOlderProviderState,
 	lifecycleWriteGuard,
@@ -32,18 +36,21 @@ import {
 	projectPlanFields,
 	projectSubscriptionFields,
 	reconcileProjectionAgainstExisting,
-	subscriptionItemProductId,
 } from "./reconcile";
 import { isTerminalSubscriptionStatus, toLocalStatus } from "./status";
 import {
+	APP_ID_METADATA_KEY,
 	PLAN_NAME_METADATA_KEY,
+	PLUGIN_METADATA_PREFIX,
 	REFERENCE_ID_METADATA_KEY,
 	REFERENCE_TYPE_METADATA_KEY,
+	type StreamPayPlanLike,
 	SUBSCRIPTION_ROW_ID_METADATA_KEY,
 	type Subscription,
 	type SubscriptionCallbackData,
 	type SubscriptionCallbacks,
 	type SubscriptionReferenceType,
+	type SubscriptionsOptions,
 	subscriptionSlotKey,
 } from "./types";
 
@@ -227,6 +234,7 @@ async function takeSlotFromReservation(
 	slotKey: string,
 	ownerRowId: string | null,
 	streampaySubscriptionId: string,
+	displaceUnpaid = true,
 ): Promise<void> {
 	await yieldReservationToPaidSubscription({
 		client,
@@ -234,6 +242,7 @@ async function takeSlotFromReservation(
 		slotKey,
 		ownerRowId,
 		streampaySubscriptionId,
+		displaceUnpaid,
 		log: logger(ctx),
 	});
 }
@@ -245,6 +254,7 @@ async function linkReservedRow(
 	projected: Partial<Subscription>,
 	metadataReferenceType: SubscriptionReferenceType | null,
 	streampaySubscriptionId: string,
+	displaceUnpaid = true,
 ): Promise<Subscription> {
 	const activeSlotKey =
 		projected.activeSlotKey === null
@@ -265,6 +275,7 @@ async function linkReservedRow(
 			...(activeSlotKey === null ? {} : { activeSlotKey }),
 		},
 		streampaySubscriptionId,
+		displaceUnpaid,
 	);
 }
 
@@ -274,12 +285,196 @@ function updateReconciledSubscription(
 	existing: Subscription,
 	projected: Partial<Subscription>,
 	streampaySubscriptionId: string,
+	displaceUnpaid = true,
 ): Promise<Subscription> {
 	return persistReconciledProjection(ctx.context.adapter, existing, projected, {
 		streampaySubscriptionId,
 		takeSlot: (slotKey) =>
-			takeSlotFromReservation(ctx, client, slotKey, existing.id, streampaySubscriptionId),
+			takeSlotFromReservation(
+				ctx,
+				client,
+				slotKey,
+				existing.id,
+				streampaySubscriptionId,
+				displaceUnpaid,
+			),
 	});
+}
+
+export type LinkOptions = Pick<
+	SubscriptionsOptions,
+	"appId" | "resolveSubscriptionReference" | "resolveUnlinkedSubscription"
+>;
+
+function linkPolicy(options: LinkOptions, source: LinkPolicy["source"]): LinkPolicy {
+	return { ...options, source };
+}
+
+/** Only these keep 3.x linking of unverified organization and custom references. */
+const CREATION_EVENT_TYPES = new Set(["SUBSCRIPTION_CREATED", "SUBSCRIPTION_ACTIVATED"]);
+
+/** A callback's own failure is retried, whatever status its error carries. */
+class LinkCallbackError extends Error {
+	constructor(callbackName: string, cause: unknown) {
+		super(`${callbackName} failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+		this.name = "LinkCallbackError";
+	}
+}
+
+async function runLinkCallback<T>(callbackName: string, run: () => T | Promise<T>): Promise<T> {
+	try {
+		return await run();
+	} catch (err) {
+		throw new LinkCallbackError(callbackName, err);
+	}
+}
+
+/** How a subscription without a linked local row may be linked. */
+export interface LinkPolicy extends LinkOptions {
+	/** Admin links are explicit; creation events keep 3.x behaviour; every other event is strict. */
+	source: "creation" | "recovery" | "admin";
+}
+
+interface UnlinkedCorrelation {
+	referenceId: string;
+	referenceType: SubscriptionReferenceType | null;
+	planName: string;
+	localRowId: string | null;
+	appId: string | null;
+	/** The app's resolver chose the reference, so metadata ownership checks do not apply. */
+	resolved: boolean;
+}
+
+async function findUserRow(
+	ctx: SyncContext,
+	where: Array<{ field: string; value: string }>,
+): Promise<(Record<string, unknown> & { id: string; streampayConsumerId?: string | null }) | null> {
+	return ctx.context.adapter.findOne({ model: "user", where });
+}
+
+/**
+ * Plugin checkout metadata names the reference. Without it, the app's resolver may name one, for
+ * example for a subscription created in the StreamPay dashboard.
+ */
+async function resolveUnlinkedCorrelation(
+	ctx: SyncContext,
+	payload: StreamPayWebhookPayload,
+	stream: SubscriptionDetailed,
+	plans: ResolvedPlans,
+	policy: LinkPolicy,
+): Promise<UnlinkedCorrelation | null> {
+	const referenceId = readMetadataString(payload.data, REFERENCE_ID_METADATA_KEY);
+	const planName =
+		readMetadataString(payload.data, PLAN_NAME_METADATA_KEY) ?? inferPlanFromItems(stream, plans);
+	if (referenceId && planName) {
+		return {
+			referenceId,
+			referenceType: readReferenceType(payload.data),
+			planName,
+			localRowId: readMetadataString(payload.data, SUBSCRIPTION_ROW_ID_METADATA_KEY),
+			appId: readMetadataString(payload.data, APP_ID_METADATA_KEY),
+			resolved: false,
+		};
+	}
+	const metadata = payload.data?.metadata;
+	const hasPluginMetadata = Object.keys(metadata ?? {}).some((key) =>
+		key.startsWith(PLUGIN_METADATA_PREFIX),
+	);
+	const resolve = policy.resolveUnlinkedSubscription;
+	if (!resolve || hasPluginMetadata) {
+		logger(ctx).warn(
+			`webhook ${payload.event_type}: cannot link sub=${stream.id} — missing plan_name (${planName}) or reference_id (${referenceId}) metadata.`,
+		);
+		return null;
+	}
+	const inferredName = inferPlanFromItems(stream, plans);
+	const consumerUser = stream.organization_consumer_id
+		? await findUserRow(ctx, [
+				{ field: "streampayConsumerId", value: stream.organization_consumer_id },
+			])
+		: null;
+	const resolution = await runLinkCallback("resolveUnlinkedSubscription", () =>
+		resolve({
+			subscription: stream,
+			consumerUser: asSessionUser(consumerUser),
+			linkMetadata: metadata && Object.keys(metadata).length > 0 ? metadata : null,
+			inferredPlan: inferredName ? (plans.byName.get(inferredName) ?? null) : null,
+		}),
+	);
+	if (!resolution) {
+		logger(ctx).info(
+			`webhook ${payload.event_type}: resolveUnlinkedSubscription left sub=${stream.id} unlinked.`,
+		);
+		return null;
+	}
+	const resolvedPlan = resolution.plan ?? inferredName;
+	if (!inferredName || resolvedPlan !== inferredName) {
+		throw new SubscriptionCorrelationError(
+			`resolveUnlinkedSubscription chose plan "${resolution.plan}" for sub=${stream.id}, but StreamPay bills ${inferredName ? `plan "${inferredName}"` : "no configured plan"}.`,
+		);
+	}
+	return {
+		referenceId: resolution.referenceId,
+		referenceType: resolution.referenceType,
+		planName: resolvedPlan,
+		localRowId: null,
+		appId: null,
+		resolved: true,
+	};
+}
+
+/**
+ * Ownership proof for linking without a local reservation. A StreamPay organization can be shared by
+ * several apps or environments, so metadata alone does not prove this app sold the subscription.
+ */
+async function verifyUnlinkedOwnership(
+	ctx: SyncContext,
+	stream: SubscriptionDetailed,
+	plans: ResolvedPlans,
+	policy: LinkPolicy,
+	correlation: UnlinkedCorrelation,
+): Promise<
+	{ plan: StreamPayPlanLike; referenceType: SubscriptionReferenceType } | { refusal: string }
+> {
+	const inferredName = inferPlanFromItems(stream, plans);
+	const plan = inferredName ? plans.byName.get(inferredName) : undefined;
+	if (!plan) return { refusal: "StreamPay bills no configured plan product" };
+	const { referenceId } = correlation;
+	if (correlation.referenceType === null || correlation.referenceType === "user") {
+		const user = await findUserRow(ctx, [{ field: "id", value: referenceId }]);
+		const consumerMatches =
+			correlation.resolved ||
+			policy.source === "admin" ||
+			!user?.streampayConsumerId ||
+			!stream.organization_consumer_id ||
+			user.streampayConsumerId === stream.organization_consumer_id;
+		if (user && consumerMatches) return { plan, referenceType: "user" };
+		if (correlation.referenceType === "user") {
+			return {
+				refusal: user ? "user belongs to another StreamPay consumer" : "user does not exist",
+			};
+		}
+	}
+	const referenceType = correlation.referenceType ?? "custom";
+	if (correlation.resolved || policy.source === "admin") {
+		return { plan, referenceType };
+	}
+	if (policy.resolveSubscriptionReference) {
+		const resolveReference = policy.resolveSubscriptionReference;
+		const accepted = await runLinkCallback("resolveSubscriptionReference", () =>
+			resolveReference({ referenceType, referenceId, plan, subscription: stream }),
+		);
+		return accepted
+			? { plan, referenceType }
+			: { refusal: `resolveSubscriptionReference rejected ${referenceType} reference` };
+	}
+	if (policy.source === "recovery") {
+		return { refusal: `${referenceType} references need resolveSubscriptionReference` };
+	}
+	logger(ctx).warn(
+		`linking StreamPay sub=${stream.id} to unverified ${referenceType} reference=${referenceId}; configure resolveSubscriptionReference to verify it.`,
+	);
+	return { plan, referenceType };
 }
 
 async function reconcileFromStreamPay(
@@ -287,6 +482,7 @@ async function reconcileFromStreamPay(
 	payload: StreamPayWebhookPayload,
 	client: StreamPayClient,
 	plans: ResolvedPlans,
+	policy: LinkPolicy,
 	prefetched?: SubscriptionDetailed,
 ): Promise<{ row: Subscription | null; stream: SubscriptionDetailed | null }> {
 	const streampaySubscriptionId = payload.entity_id;
@@ -366,6 +562,7 @@ async function reconcileFromStreamPay(
 			existing,
 			projected,
 			streampaySubscriptionId,
+			policy.source !== "admin",
 		);
 		if (!eventApplies) {
 			logger(ctx).info(
@@ -376,21 +573,33 @@ async function reconcileFromStreamPay(
 		return { row: updated, stream };
 	}
 
-	const planName =
-		readMetadataString(payload.data, PLAN_NAME_METADATA_KEY) ?? inferPlanFromItems(stream, plans);
-	const referenceId = readMetadataString(payload.data, REFERENCE_ID_METADATA_KEY);
-	const metadataReferenceType = readReferenceType(payload.data);
-
-	if (!planName || !referenceId) {
+	const correlation = await resolveUnlinkedCorrelation(ctx, payload, stream, plans, policy);
+	if (!correlation) return { row: null, stream };
+	const { referenceId, referenceType: metadataReferenceType, planName } = correlation;
+	const refuse = (reason: string) => {
 		logger(ctx).warn(
-			`webhook ${payload.event_type}: cannot link sub=${streampaySubscriptionId} — missing plan_name (${planName}) or reference_id (${referenceId}) metadata.`,
+			`webhook ${payload.event_type}: did not link StreamPay sub=${streampaySubscriptionId}: ${reason}.`,
 		);
 		return { row: null, stream };
+	};
+	// Checked before any correlation: a cloned database can hold another app's reservation rows.
+	if (correlation.appId && correlation.appId !== policy.appId) {
+		return refuse(`checkout link belongs to app "${correlation.appId}"`);
 	}
+	const displaceUnpaid = policy.source !== "admin";
 
 	const paymentLinkId =
 		stream.latest_invoice?.payment_link_id ?? payload.data?.payment_link?.id ?? null;
-	const localRowId = readMetadataString(payload.data, SUBSCRIPTION_ROW_ID_METADATA_KEY);
+	const rowMatches = (row: Subscription) =>
+		row.referenceId === referenceId &&
+		(!metadataReferenceType || (row.referenceType ?? "user") === metadataReferenceType) &&
+		row.plan === planName &&
+		(!row.streampayConsumerId ||
+			!stream.organization_consumer_id ||
+			row.streampayConsumerId === stream.organization_consumer_id) &&
+		(!row.streampaySubscriptionId || row.streampaySubscriptionId === streampaySubscriptionId) &&
+		(!row.streampayPaymentLinkId || !paymentLinkId || row.streampayPaymentLinkId === paymentLinkId);
+	const localRowId = correlation.localRowId;
 	if (localRowId) {
 		const metadataRow = await ctx.context.adapter.findOne<Subscription>({
 			model: SUBSCRIPTION_MODEL,
@@ -400,19 +609,7 @@ async function reconcileFromStreamPay(
 			logger(ctx).warn(
 				`webhook ${payload.event_type}: referenced subscription row=${localRowId} is missing; rebuilding from signed metadata.`,
 			);
-		} else if (
-			metadataRow.referenceId === referenceId &&
-			(!metadataReferenceType || (metadataRow.referenceType ?? "user") === metadataReferenceType) &&
-			metadataRow.plan === planName &&
-			(!metadataRow.streampayConsumerId ||
-				!stream.organization_consumer_id ||
-				metadataRow.streampayConsumerId === stream.organization_consumer_id) &&
-			(!metadataRow.streampaySubscriptionId ||
-				metadataRow.streampaySubscriptionId === streampaySubscriptionId) &&
-			(!metadataRow.streampayPaymentLinkId ||
-				!paymentLinkId ||
-				metadataRow.streampayPaymentLinkId === paymentLinkId)
-		) {
+		} else if (rowMatches(metadataRow)) {
 			const updated = await linkReservedRow(
 				ctx,
 				client,
@@ -420,10 +617,10 @@ async function reconcileFromStreamPay(
 				projected,
 				metadataReferenceType,
 				streampaySubscriptionId,
+				displaceUnpaid,
 			);
 			return { row: updated, stream };
-		}
-		if (metadataRow) {
+		} else {
 			logger(ctx).warn(
 				`webhook ${payload.event_type}: ignored unsafe subscription row correlation for row=${localRowId}.`,
 			);
@@ -432,14 +629,42 @@ async function reconcileFromStreamPay(
 			);
 		}
 	}
-	const incomplete = await findIncompleteRow(
-		ctx,
-		referenceId,
-		metadataReferenceType,
-		planName,
-		paymentLinkId,
-		stream.organization_consumer_id ?? null,
-	);
+	// The row that owns the checkout link, in any status, is the strongest local correlation left.
+	const linkOwner = paymentLinkId
+		? await ctx.context.adapter.findOne<Subscription>({
+				model: SUBSCRIPTION_MODEL,
+				where: [{ field: "streampayPaymentLinkId", value: paymentLinkId }],
+			})
+		: null;
+	if (linkOwner) {
+		if (!rowMatches(linkOwner)) {
+			throw new SubscriptionCorrelationError(
+				`StreamPay sub=${streampaySubscriptionId} was paid through payment link=${paymentLinkId} of row=${linkOwner.id}, which belongs to another reference or plan.`,
+			);
+		}
+		const updated = await linkReservedRow(
+			ctx,
+			client,
+			linkOwner,
+			projected,
+			metadataReferenceType,
+			streampaySubscriptionId,
+			displaceUnpaid,
+		);
+		return { row: updated, stream };
+	}
+
+	// An admin link never adopts someone's open checkout; only the reservation owning its link.
+	const incomplete = displaceUnpaid
+		? await findIncompleteRow(
+				ctx,
+				referenceId,
+				metadataReferenceType,
+				planName,
+				paymentLinkId,
+				stream.organization_consumer_id ?? null,
+			)
+		: null;
 	if (incomplete) {
 		const updated = await linkReservedRow(
 			ctx,
@@ -448,17 +673,27 @@ async function reconcileFromStreamPay(
 			projected,
 			metadataReferenceType,
 			streampaySubscriptionId,
+			displaceUnpaid,
 		);
 		return { row: updated, stream };
 	}
 
-	const plan = plans.byName.get(planName);
-	const referenceType = metadataReferenceType ?? "custom";
+	const owner = await verifyUnlinkedOwnership(ctx, stream, plans, policy, correlation);
+	if ("refusal" in owner) return refuse(owner.refusal);
+
+	const { plan, referenceType } = owner;
 	const activeSlotKey = isTerminalSubscriptionStatus(projected.status)
 		? null
-		: subscriptionSlotKey(referenceType, referenceId, plan?.group);
+		: subscriptionSlotKey(referenceType, referenceId, plan.group);
 	if (activeSlotKey) {
-		await takeSlotFromReservation(ctx, client, activeSlotKey, null, streampaySubscriptionId);
+		await takeSlotFromReservation(
+			ctx,
+			client,
+			activeSlotKey,
+			null,
+			streampaySubscriptionId,
+			displaceUnpaid,
+		);
 	}
 	const row = await ctx.context.adapter.create<Subscription>({
 		model: SUBSCRIPTION_MODEL,
@@ -470,10 +705,10 @@ async function reconcileFromStreamPay(
 			referenceType,
 			activeSlotKey,
 			streampayPaymentLinkId: paymentLinkId,
-			plan: planName,
-			planVersion: plan?.version ?? null,
-			productId: plan?.productId ?? subscriptionItemProductId(stream.items?.[0]),
-			group: plan?.group ?? null,
+			plan: plan.name,
+			planVersion: plan.version ?? null,
+			productId: plan.productId,
+			group: plan.group ?? null,
 			billingStatus: "current",
 			createdAt: new Date(),
 		},
@@ -510,7 +745,7 @@ async function processSubscriptionEvent(
 	payload: StreamPayWebhookPayload,
 	client: StreamPayClient,
 	plans: ResolvedPlans,
-	callbacks: SubscriptionCallbacks,
+	callbacks: SubscriptionCallbacks & LinkOptions,
 	options: SubscriptionEventOptions,
 ): Promise<void> {
 	if (
@@ -529,7 +764,13 @@ async function processSubscriptionEvent(
 		);
 		return;
 	}
-	const { row, stream } = await reconcileFromStreamPay(ctx, payload, client, plans);
+	const { row, stream } = await reconcileFromStreamPay(
+		ctx,
+		payload,
+		client,
+		plans,
+		linkPolicy(callbacks, CREATION_EVENT_TYPES.has(payload.event_type) ? "creation" : "recovery"),
+	);
 	if (!row) return;
 	const user = await resolveRowUser(ctx, row);
 	await dispatchSubscriptionCallback(
@@ -545,7 +786,7 @@ async function processSubscriptionEvent(
 export function subscriptionInboxScope(args: {
 	client: StreamPayClient;
 	plans: () => Promise<ResolvedPlans>;
-	callbacks: SubscriptionCallbacks;
+	callbacks: SubscriptionCallbacks & LinkOptions;
 	maxAttempts?: number;
 	retryOnCallbackError?: boolean;
 	retryingRenewalCallback?: boolean;
@@ -601,7 +842,7 @@ export async function syncWebhookPayload(
 	payload: StreamPayWebhookPayload,
 	client: StreamPayClient,
 	plans: ResolvedPlans,
-	callbacks: SubscriptionCallbacks,
+	callbacks: SubscriptionCallbacks & LinkOptions,
 	options: {
 		dedupe?: boolean;
 		rawBody?: string | null;
@@ -682,16 +923,20 @@ async function linkCheckoutFromRenewalEvidence(
 	payload: StreamPayWebhookPayload,
 	client: StreamPayClient,
 	plans: ResolvedPlans,
+	policy: LinkPolicy,
 	stream: SubscriptionDetailed,
 ): Promise<Subscription | null> {
-	const paymentLinkId = stream.latest_invoice?.payment_link_id;
-	if (!paymentLinkId || !stream.id) return null;
-	const reservation = await ctx.context.adapter.findOne<Subscription>({
-		model: SUBSCRIPTION_MODEL,
-		where: [{ field: "streampayPaymentLinkId", value: paymentLinkId }],
-	});
-	if (!reservation) return null;
-	const link = await client.getPaymentLink(paymentLinkId);
+	if (!stream.id) return null;
+	const paymentLinkId = stream.latest_invoice?.payment_link_id ?? null;
+	const reservation = paymentLinkId
+		? await ctx.context.adapter.findOne<Subscription>({
+				model: SUBSCRIPTION_MODEL,
+				where: [{ field: "streampayPaymentLinkId", value: paymentLinkId }],
+			})
+		: null;
+	// Without a reservation, only a configured plan product can be this app's; others cost no lookup.
+	if (!reservation && !inferPlanFromItems(stream, plans)) return null;
+	const metadata = paymentLinkId ? await readCheckoutLinkMetadata(client, paymentLinkId) : null;
 	const { row } = await reconcileFromStreamPay(
 		ctx,
 		{
@@ -699,17 +944,18 @@ async function linkCheckoutFromRenewalEvidence(
 			entity_type: "SUBSCRIPTION",
 			entity_id: stream.id,
 			data: {
-				metadata: link.custom_metadata ?? {},
-				payment_link: { id: paymentLinkId, url: "" },
+				metadata: metadata ?? {},
+				...(paymentLinkId ? { payment_link: { id: paymentLinkId, url: "" } } : {}),
 			},
 		} as StreamPayWebhookPayload,
 		client,
 		plans,
+		policy,
 		stream,
 	);
 	if (row) {
 		logger(ctx).warn(
-			`webhook ${payload.event_type}: linked checkout row=${row.id} to StreamPay sub=${stream.id} from renewal evidence.`,
+			`webhook ${payload.event_type}: linked row=${row.id} to StreamPay sub=${stream.id} from renewal evidence.`,
 		);
 		return row;
 	}
@@ -717,12 +963,25 @@ async function linkCheckoutFromRenewalEvidence(
 	return findSubscriptionByStreampayId(ctx, stream.id);
 }
 
+async function readCheckoutLinkMetadata(
+	client: StreamPayClient,
+	paymentLinkId: string,
+): Promise<Record<string, unknown> | null> {
+	try {
+		const link = await client.getPaymentLink(paymentLinkId);
+		return link?.custom_metadata ?? null;
+	} catch (err) {
+		if (readSdkErrorFields(err).status === 404) return null;
+		throw err;
+	}
+}
+
 async function handleRenewalEvidence(
 	ctx: SyncContext,
 	payload: StreamPayWebhookPayload,
 	client: StreamPayClient,
 	plans: ResolvedPlans,
-	callbacks: SubscriptionCallbacks,
+	callbacks: SubscriptionCallbacks & LinkOptions,
 	retryOnCallbackError: boolean,
 	retryingRenewalCallback: boolean,
 	inboxEnabled: boolean,
@@ -758,7 +1017,14 @@ async function handleRenewalEvidence(
 
 	const existing =
 		(await findSubscriptionByStreampayId(ctx, subscriptionId)) ??
-		(await linkCheckoutFromRenewalEvidence(ctx, payload, client, plans, stream));
+		(await linkCheckoutFromRenewalEvidence(
+			ctx,
+			payload,
+			client,
+			plans,
+			linkPolicy(callbacks, "recovery"),
+			stream,
+		));
 	if (!existing) return;
 
 	const eventAt = parseDate(payload.timestamp);
@@ -911,12 +1177,139 @@ async function dispatchSubscriptionCallback(
 	ctx: SyncContext,
 	payload: StreamPayWebhookPayload,
 	data: SubscriptionCallbackData,
-	callbacks: SubscriptionCallbacks,
+	callbacks: SubscriptionCallbacks & LinkOptions,
 	retryOnCallbackError: boolean,
 ): Promise<void> {
 	const callbackName = LIFECYCLE_CALLBACKS[payload.event_type];
 	if (!callbackName) return;
 	await fireCallback(ctx, callbacks[callbackName], data, callbackName, retryOnCallbackError);
+}
+
+export interface SubscriptionLinkRequest {
+	streampaySubscriptionId: string;
+	referenceType: SubscriptionReferenceType;
+	referenceId: string;
+	/** Defaults to the configured plan whose product StreamPay bills. */
+	plan?: string;
+}
+
+/**
+ * Explicitly links an existing StreamPay subscription to a local reference. It projects provider
+ * state only: no lifecycle callback fires, so a later real webhook cannot duplicate provisioning.
+ * It never takes a billing slot from another row, not even an unpaid checkout.
+ */
+export async function linkSubscriptionToReference(
+	ctx: SyncContext,
+	client: StreamPayClient,
+	plans: ResolvedPlans,
+	options: LinkOptions,
+	request: SubscriptionLinkRequest,
+): Promise<{ row: Subscription; reused: boolean }> {
+	const { streampaySubscriptionId, referenceType, referenceId } = request;
+	const stream = await client.getSubscription(streampaySubscriptionId);
+	const sameReference = (row: Subscription) =>
+		row.referenceId === referenceId && (row.referenceType ?? "user") === referenceType;
+	const reuse = async (row: Subscription) => {
+		if (!sameReference(row)) {
+			throw new APIError("CONFLICT", {
+				code: $ERROR_CODES.SUBSCRIPTION_INVALID_STATE.code,
+				message: `StreamPay subscription ${streampaySubscriptionId} is already linked to another reference.`,
+			});
+		}
+		await applySubscriptionProjection(
+			ctx.context.adapter,
+			stream,
+			plans,
+			logger(ctx),
+			"link subscription",
+		);
+		return {
+			row: (await findSubscriptionByStreampayId(ctx, streampaySubscriptionId)) ?? row,
+			reused: true,
+		};
+	};
+	const existing = await findSubscriptionByStreampayId(ctx, streampaySubscriptionId);
+	if (existing) return reuse(existing);
+
+	const inferredName = inferPlanFromItems(stream, plans);
+	const planName = request.plan ?? inferredName;
+	const plan = planName ? plans.byName.get(planName) : undefined;
+	if (!plan || planName !== inferredName) {
+		throw new APIError("BAD_REQUEST", {
+			code: $ERROR_CODES.SUBSCRIPTION_PLAN_NOT_FOUND.code,
+			message: inferredName
+				? `StreamPay bills plan "${inferredName}", not "${request.plan}".`
+				: "StreamPay bills no configured plan product.",
+		});
+	}
+	if (
+		referenceType === "user" &&
+		!(await findUserRow(ctx, [{ field: "id", value: referenceId }]))
+	) {
+		throw new APIError("BAD_REQUEST", {
+			code: $ERROR_CODES.SUBSCRIPTION_NOT_FOUND.code,
+			message: `User ${referenceId} does not exist.`,
+		});
+	}
+	const paymentLinkId = stream.latest_invoice?.payment_link_id ?? null;
+	if (!isTerminalSubscriptionStatus(toLocalStatus(stream.status))) {
+		const holder = await ctx.context.adapter.findOne<Subscription>({
+			model: SUBSCRIPTION_MODEL,
+			where: [
+				{
+					field: "activeSlotKey",
+					value: subscriptionSlotKey(referenceType, referenceId, plan.group),
+				},
+			],
+		});
+		if (holder && !(paymentLinkId && holder.streampayPaymentLinkId === paymentLinkId)) {
+			throw new APIError("CONFLICT", {
+				code: $ERROR_CODES.SUBSCRIPTION_ALREADY_ACTIVE.code,
+				message: `Row ${holder.id} (${holder.status}) holds this reference's billing slot. Resolve it first.`,
+			});
+		}
+	}
+	try {
+		const { row } = await reconcileFromStreamPay(
+			ctx,
+			{
+				event_type: "SUBSCRIPTION_CREATED",
+				entity_type: "SUBSCRIPTION",
+				entity_id: streampaySubscriptionId,
+				entity_url: "",
+				status: stream.status ?? "",
+				timestamp: new Date().toISOString(),
+				data: {
+					metadata: {
+						[PLAN_NAME_METADATA_KEY]: plan.name,
+						[REFERENCE_ID_METADATA_KEY]: referenceId,
+						[REFERENCE_TYPE_METADATA_KEY]: referenceType,
+					},
+					...(paymentLinkId ? { payment_link: { id: paymentLinkId, url: "" } } : {}),
+				},
+			} as StreamPayWebhookPayload,
+			client,
+			plans,
+			linkPolicy(options, "admin"),
+			stream,
+		);
+		if (row && !sameReference(row)) return reuse(row);
+		if (row) return { row, reused: false };
+	} catch (err) {
+		const winner = await findSubscriptionByStreampayId(ctx, streampaySubscriptionId);
+		if (winner) return reuse(winner);
+		if (err instanceof SubscriptionCorrelationError || isUniqueConstraintError(err)) {
+			throw new APIError("CONFLICT", {
+				code: $ERROR_CODES.SUBSCRIPTION_INVALID_STATE.code,
+				message: err instanceof Error ? err.message : String(err),
+			});
+		}
+		throw err;
+	}
+	throw new APIError("BAD_REQUEST", {
+		code: $ERROR_CODES.SUBSCRIPTION_INVALID_STATE.code,
+		message: `StreamPay subscription ${streampaySubscriptionId} could not be linked. See server logs.`,
+	});
 }
 
 export type WebhookSyncFailure = "PERMANENT" | "TRANSIENT";
