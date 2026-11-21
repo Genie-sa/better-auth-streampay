@@ -390,6 +390,8 @@ export async function yieldReservationToPaidSubscription(args: {
 	slotKey: string;
 	ownerRowId: string | null;
 	streampaySubscriptionId: string;
+	/** False for explicit admin links, which never take a slot from another checkout. */
+	displaceUnpaid?: boolean;
 	log: ReservationLog;
 }): Promise<void> {
 	const { client, adapter, slotKey, ownerRowId, streampaySubscriptionId, log } = args;
@@ -403,7 +405,11 @@ export async function yieldReservationToPaidSubscription(args: {
 			`StreamPay sub=${streampaySubscriptionId} was linked to row=${holder.id} concurrently. Retry delivery.`,
 		);
 	}
-	if (holder.status !== "incomplete" || holder.streampaySubscriptionId) {
+	if (
+		holder.status !== "incomplete" ||
+		holder.streampaySubscriptionId ||
+		args.displaceUnpaid === false
+	) {
 		throw new SubscriptionCorrelationError(
 			`StreamPay sub=${streampaySubscriptionId} needs the billing slot held by live row=${holder.id} (${holder.status}). Resolve the duplicate subscription, then replay.`,
 		);

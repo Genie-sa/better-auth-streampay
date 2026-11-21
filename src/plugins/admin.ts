@@ -913,6 +913,61 @@ function requireWebhookInbox(registry: StreamPayPluginRegistry | undefined): Web
 	return inbox;
 }
 
+const LinkSubscriptionBody = z
+	.object({
+		referenceType: z.enum(["user", "organization", "custom"]),
+		referenceId: z.string().min(1),
+		plan: z.string().min(1).optional(),
+	})
+	.strict();
+
+function buildSubscriptionLinkEndpoints(
+	adminOptions: AdminOptions,
+	registry: StreamPayPluginRegistry | undefined,
+) {
+	return {
+		adminLinkSubscription: createAuthEndpoint(
+			"/admin/streampay/subscriptions/:id/link",
+			{
+				method: "POST",
+				body: LinkSubscriptionBody,
+				use: [sessionMiddleware],
+			},
+			async (ctx) => {
+				const actor = await requireAdmin(ctx, adminOptions);
+				if (!registry?.linkSubscription) {
+					throw new APIError("BAD_REQUEST", {
+						message: "Linking requires the subscriptions plugin.",
+					});
+				}
+				const subscriptionId = ctx.params.id;
+				try {
+					const { row, reused } = await registry.linkSubscription(ctx, {
+						streampaySubscriptionId: subscriptionId,
+						referenceType: ctx.body.referenceType,
+						referenceId: ctx.body.referenceId,
+						...(ctx.body.plan ? { plan: ctx.body.plan } : {}),
+					});
+					getLogger(ctx).warn(
+						`admin user=${actor.id} linked StreamPay sub=${subscriptionId} to ${ctx.body.referenceType}:${ctx.body.referenceId} (row=${row.id}, reused=${reused}).`,
+					);
+					return ctx.json({ linked: true, reused, subscription: row });
+				} catch (err) {
+					if (err instanceof APIError) throw err;
+					toAPIError(
+						{
+							logPrefix: `StreamPay adminLinkSubscription failed for subscription=${subscriptionId}:`,
+							userMessage: "Linking the StreamPay subscription failed.",
+						},
+						err,
+						getLogger(ctx),
+					);
+				}
+			},
+		),
+	};
+}
+
 function buildWebhookEventsEndpoints(
 	adminOptions: AdminOptions,
 	registry: StreamPayPluginRegistry | undefined,
@@ -1033,6 +1088,7 @@ export const admin =
 				...buildCouponsEndpoints(client, adminOptions),
 				...buildPaymentLinksEndpoints(client, adminOptions),
 				...buildWebhookEventsEndpoints(adminOptions, registry),
+				...buildSubscriptionLinkEndpoints(adminOptions, registry),
 			},
 		};
 	};

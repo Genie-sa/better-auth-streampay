@@ -597,7 +597,7 @@ describe("syncWebhookPayload", () => {
 				}),
 				client,
 				resolvedPlans(),
-				{},
+				{ resolveSubscriptionReference: () => true },
 			);
 
 			expect(ctx.adapter.tables.subscription?.[0]).toMatchObject({

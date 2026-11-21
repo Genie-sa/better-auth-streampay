@@ -517,6 +517,56 @@ subscriptions({
 
 Without this callback, cross-account actions return `FORBIDDEN`.
 
+## Subscriptions without a local reservation
+
+A plugin checkout normally links its StreamPay subscription to the reservation the upgrade
+created. When that row is gone (deleted, or from an older plugin version), or the subscription was
+created in the StreamPay dashboard or API, the plugin links it only with ownership evidence. One
+StreamPay organization can serve several apps or environments, so metadata alone is not proof.
+
+```ts
+subscriptions({
+  plans,
+  // A different value per deployment that shares the StreamPay organization. Keep it stable:
+  // links stamped with an earlier value are treated as another app's.
+  appId: process.env.STREAMPAY_APP_ID,
+  // Confirms organization and custom references recovered from checkout metadata.
+  resolveSubscriptionReference: async ({ referenceType, referenceId }) =>
+    organizationExists(referenceType, referenceId),
+  // Maps subscriptions that carry no plugin metadata. Return null to leave them unlinked.
+  resolveUnlinkedSubscription: async ({ consumerUser, inferredPlan }) =>
+    consumerUser && inferredPlan ? { referenceType: "user", referenceId: consumerUser.id } : null,
+});
+```
+
+| Case | Linked when |
+| --- | --- |
+| Checkout link stamped with another `appId` | never, not even through a reservation row ID it names (a cloned database can hold another app's rows) |
+| Plugin metadata, `user` reference | StreamPay bills a configured plan product, the user exists, and its StreamPay consumer is unset or matches |
+| Plugin metadata, organization or custom reference | the same product check, and `resolveSubscriptionReference` returns `true`. Without that callback, `SUBSCRIPTION_CREATED` and `SUBSCRIPTION_ACTIVATED` still link it with a warning, as before (3.x compatibility); every other event skips it |
+| No plugin metadata at all | `resolveUnlinkedSubscription` returns a reference. `consumerUser` is only a hint; return `null` unless your app sold the subscription. Errors it throws are retried, whatever their status; a returned plan that StreamPay does not bill dead-letters the event |
+
+Both creation webhooks and renewal events (`INVOICE_COMPLETED`,
+`SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY`) apply these rules, so a subscription whose creation
+webhooks failed is linked by its next renewal, and that renewal is reported once. The plugin never
+looks up the checkout link of a subscription whose product is not a configured plan.
+
+To link one by hand, use the admin endpoint:
+
+```ts
+await auth.api.adminLinkSubscription({
+  params: { id: streampaySubscriptionId },
+  body: { referenceType: "user", referenceId: user.id },
+  headers,
+});
+```
+
+It projects StreamPay's state without firing lifecycle callbacks, returns `reused: true` for the
+same reference, and returns `409` when the subscription is linked elsewhere or any other row holds
+the reference's billing slot, including an open checkout; it never takes over a checkout other than
+the one that owns the subscription's payment link. Its next renewal event reports one catch-up
+renewal.
+
 ## Admin
 
 `admin()` adds billing actions for payments, subscriptions, freezes, consumers, invoices,
@@ -537,6 +587,7 @@ Calls use names such as:
 - `auth.api.adminGetSubscription`
 - `auth.api.adminCreateProduct`
 - `auth.api.adminReplayWebhookEvent`
+- `auth.api.adminLinkSubscription`
 
 The IDE shows the body, query, and response types for every action.
 

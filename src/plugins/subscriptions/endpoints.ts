@@ -46,6 +46,7 @@ import {
 import { buildSeatCheckoutItem, quotedSeatTotal, resolveSeatCount } from "./seats";
 import { isCheckoutSuccessStatus, isManageableSubscriptionStatus } from "./status";
 import {
+	APP_ID_METADATA_KEY,
 	PLAN_NAME_METADATA_KEY,
 	REFERENCE_ID_METADATA_KEY,
 	REFERENCE_TYPE_METADATA_KEY,
@@ -384,6 +385,7 @@ export function buildSubscriptionEndpoints(
 						[REFERENCE_ID_METADATA_KEY]: referenceId,
 						[REFERENCE_TYPE_METADATA_KEY]: referenceType,
 						[SUBSCRIPTION_ROW_ID_METADATA_KEY]: row.id,
+						...(subsOptions.appId ? { [APP_ID_METADATA_KEY]: subsOptions.appId } : {}),
 					},
 				};
 				if (ctx.body.successUrl) linkInput.success_redirect_url = ctx.body.successUrl;
