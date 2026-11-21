@@ -79,7 +79,7 @@ overlay: StreamPay keeps reporting `ACTIVE` while a renewal payment is outstandi
 
 | # | Trigger | From | To | Guard and code |
 | --- | --- | --- | --- | --- |
-| L1 | Paid checkout confirmed by webhook | `incomplete`, `incomplete_expired`, or no row | provider status | Signed metadata row ID, then a payment-link match, then the newest matching reservation (`reconcileFromStreamPay`). Takes the slot from an unpaid holder (S4). The `/subscription/success` fallback also confirms, but only for an `incomplete` row that still holds its slot, matched by consumer, product, and link (`isCheckoutSubscriptionCandidate`). |
+| L1 | Paid checkout confirmed by webhook | `incomplete`, `incomplete_expired`, or no row | provider status | Signed metadata row ID, then a payment-link match, then the newest matching reservation (`reconcileFromStreamPay`). Renewal evidence that finds no linked row links a reservation owning the subscription's checkout link the same way, with the link's signed metadata (`linkCheckoutFromRenewalEvidence`, F28). Takes the slot from an unpaid holder (S4). The `/subscription/success` fallback also confirms, but only for an `incomplete` row that still holds its slot, matched by consumer, product, and link (`isCheckoutSubscriptionCandidate`). |
 | L2 | `SUBSCRIPTION_CYCLE_RENEWAL_FAILED`, not stale | `active` | `past_due`, billing `past_due` | `sync.ts` |
 | L3 | `INVOICE_COMPLETED` or `SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY`, not stale, or stale while its invoice is the provider's `COMPLETED` `latest_invoice` | `past_due` | `active`, billing `current` | `handleRenewalEvidence` (`sync.ts`) |
 | L4 | Any other projection while billing is `past_due` | `past_due` | `past_due` | S5 |
@@ -202,7 +202,8 @@ Invariants: while the lock is set, its cycle's callback has not been delivered, 
 evidence for that subscription waits until the lock clears. Only renewal evidence advances
 `renewedCycleNumber`. Every other projection leaves it untouched, or initializes it to the row's
 current cycle when it is still null on a legacy row, so a webhook or endpoint that writes the new
-cycle first cannot absorb the renewal (F13). Every lifecycle CAS includes the marker, so a
+cycle first cannot absorb the renewal (F13). A subscription first linked after it already renewed starts at the
+first cycle, so its next renewal evidence reports the missed renewal once (F28). Every lifecycle CAS includes the marker, so a
 projection prepared before a renewal callback cannot roll it back and let a second renewal event
 deliver the callback again (F14). StreamPay's cycle counter is the renewal identity because period
 boundaries drift: live sandbox subscriptions started in July read cycle 5 in November, and their
@@ -328,6 +329,7 @@ PostgreSQL 17. Run the end-to-end tests on PostgreSQL with `STREAMPAY_E2E_DB=pos
 | F25 | Low | 1 | A row in plan group B still holding group A's slot. | Found by Gemini 4 Neon on re-review. StreamPay moves a subscription to a product in another configured group outside the plugin, and a customer endpoint observes it before any webhook. The endpoint wrote the new group but only moved the slot on a revival. | Upgrades in group A are refused as already active, and group B can hold two live rows. | Endpoints move the slot whenever the desired slot differs |
 | F26 | Low | 2 | A released reservation whose link stays payable (breaks C2). | Found by Gemini 4 Neon on re-review. A stale-replacement release read the reservation without a link; its own request saved the link before the release write landed. | A payable link without a live reservation, next to the replacement's link. | The release CAS compares the link ID it read |
 | F27 | Medium | 6 | A renewal callback lock owned by a `completed` event. | Found by GPT-6.2 Astra in the final check of F21's fix. The discard completes the event, then the process stops before it clears the lock. | Every later renewal for that subscription retries until it dead-letters. | Renewal evidence releases a lock whose owning event is completed and continues in the same attempt, so the release cannot spend its last retry; it never queries a disabled inbox |
+| F28 | Medium | 1, 6 | A paid checkout left `incomplete` and its renewals dropped, while every renewal event is `completed`. | The creation webhooks fail past StreamPay's retry window (or are delayed), and renewal evidence arrives first. `handleRenewalEvidence` found no linked row and returned. A later creation replay then started the renewal baseline at the current cycle. This was R11. | The customer has no access until someone replays the creation event, and `onSubscriptionRenewed` never runs for the cycles in between. Reproduced live; see below. | Renewal evidence links the reservation that owns the subscription's checkout link (StreamPay bills every cycle through it), and a first link at a later cycle starts the baseline at cycle 1 |
 | F14 | High | 6 | `renewedCycleNumber` rolled back after its callback ran, so a second renewal event delivers `onSubscriptionRenewed` again. | Found in review of the F13 fix. A customer endpoint (or webhook) reads the row, `INVOICE_COMPLETED` then advances the marker and runs the callback, and the endpoint write restores the old marker. Its CAS matched because the provider timestamp was unchanged. `SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY` then counted as a new renewal. | Duplicate per-cycle side effects. | Projections only initialize the marker, and every CAS includes it |
 | F15 | Medium | 7 | A due-queue retry before its backoff, or an automatic retry of a dead letter. | Pre-existing. Two overlapping `processDueStreampayWebhookEvents` runs select the same row. The first claims it and fails. The second replayed by event ID, re-read the updated row, and claimed it again at once, even after it was dead-lettered. | Extra provider calls and callback runs, and dead letters leaving manual review. | The processor passes the selected attempt (`dueAttemptCount`); replay requires the row to still be that pending attempt and due, and the claim CAS includes `attemptCount` |
 | F16 | Medium | 7 | A repaired event parked as unreplayable. | Found in review of F12. Replay reads a pending row without payload; a redelivery then claims it, stores its payload, fails, and schedules a retry; the stale parking write still matched `pending` and `lockedAt = null`. | The retry time is erased, so the due processor never retries the event. | Parking CAS includes `attemptCount` |
@@ -385,6 +387,17 @@ trigger). The guide gives no ordering guarantee and no event ID, so the inbox ke
 which is why both are treated as renewal evidence. The [cancel API](https://docs.streampay.sa/api/v2-subscriptions-cancel/)
 confirms `INACTIVE`, `TRIALING`, and `TRIAL_PENDING` are cancelled immediately and `ACTIVE` at
 period end.
+
+**F28.** StreamPay bills every cycle through the checkout link: all five invoices of sandbox
+subscription `a74dcc6a` (cycles 1 to 5) carry payment link `5fcf418c`, whose custom metadata holds
+the plugin's plan, reference, and reservation row ID. `probe-r11-live.mjs` gives each build only the
+reservation that owns that link, as if every creation webhook had failed, then delivers the real
+`INVOICE_COMPLETED` for cycle 5.
+
+| Build | Inbox | Reservation | `onSubscriptionRenewed` |
+| --- | --- | --- | --- |
+| 3.3.0 | `completed` | still `incomplete`, unlinked | none |
+| With the fix | `completed` | `active`, linked to `a74dcc6a`, cycle 5 | one, for cycle 5 |
 
 **F10.** The sandbox exposes `latest_invoice` with `id` and `status` on the subscription, and a
 paid invoice reads `COMPLETED` (subscription `39143aaa`). An invoice's `period_end` does not match
@@ -463,4 +476,4 @@ file covers F15 and F16; `tests/integration/review-findings.test.ts` covers F18 
 | R8 | Confirmed as F12 and fixed. Parked rather than dead-lettered, so StreamPay retries still count (W4). | |
 | R9 | Confirmed as F13 and fixed. | |
 | R10 | Confirmed as F17 and fixed. | |
-| R11 | Renewal evidence for a subscription that is not yet linked to a local row is completed and dropped (`handleRenewalEvidence` finds no row). If the creation events fail past StreamPay's retry window and are replayed after a renewal, that cycle's `onSubscriptionRenewed` never runs. | Needs creation events to fail for about 20 hours across a billing boundary. Invoice events carry no plugin metadata, so the fix is to hold uncorrelated evidence for retry; left for a separate change. |
+| R11 | Confirmed as F28 and fixed. Rows created by a webhook without any reservation (no plugin checkout link) still depend on their creation event. | |
