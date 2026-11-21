@@ -4,15 +4,14 @@ import { getMigrations } from "better-auth/db/migration";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { streampay, subscriptions, webhooks } from "../../src";
+import { type SyncContext, syncWebhookPayload } from "../../src/plugins/subscriptions/sync";
 import {
 	claimOrAdvanceWebhookEvent,
 	claimWebhookEventForReplay,
 	markWebhookEventCompleted,
 	recordWebhookEventFailure,
-	type SyncContext,
-	syncWebhookPayload,
 	type WebhookEventRow,
-} from "../../src/plugins/subscriptions/sync";
+} from "../../src/webhooks/inbox";
 import { createMockStreamPayClient } from "../utils/mocks";
 import { createMockWebhookPayload } from "../utils/subscription-helpers";
 
@@ -110,14 +109,14 @@ describe.runIf(connectionString)("PostgreSQL webhook persistence", () => {
 		const winner = winners[0];
 		if (!winner?.lockedBy || !first.row.lockedBy) throw new Error("Replay lease is missing.");
 		await markWebhookEventCompleted(context, first.row.id, first.row.lockedBy);
-		await recordWebhookEventFailure(
-			context,
-			first.row.id,
-			"stale payload",
-			"stale signature",
-			new Error("old worker"),
-			first.row.lockedBy,
-		);
+		await recordWebhookEventFailure(context, {
+			rowId: first.row.id,
+			lockId: first.row.lockedBy,
+			err: new Error("old worker"),
+			deadLetter: false,
+			rawBody: "stale payload",
+			signatureHeader: "stale signature",
+		});
 		const fenced = await pool.query('SELECT * FROM "streampayWebhookEvent" WHERE id = $1', [
 			first.row.id,
 		]);

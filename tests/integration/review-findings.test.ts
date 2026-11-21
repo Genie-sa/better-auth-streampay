@@ -1,10 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { admin, subscriptions, webhooks } from "../../src";
-import {
-	claimOrAdvanceWebhookEvent,
-	DEFAULT_MAX_WEBHOOK_ATTEMPTS,
-} from "../../src/plugins/subscriptions/sync";
 import { subscriptionSlotKey } from "../../src/plugins/subscriptions/types";
+import { claimOrAdvanceWebhookEvent, DEFAULT_MAX_WEBHOOK_ATTEMPTS } from "../../src/webhooks/inbox";
 import { callAuthEndpoint } from "../utils/auth-instance";
 import {
 	harness,

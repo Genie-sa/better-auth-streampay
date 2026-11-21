@@ -28,3 +28,24 @@ export interface PluginAdapter {
 		where?: Array<{ field: string; value: unknown }>;
 	}) => Promise<number>;
 }
+
+export interface SyncContext {
+	context: {
+		adapter: PluginAdapter;
+		logger: {
+			error: (msg: string) => void;
+			warn: (msg: string) => void;
+			info: (msg: string) => void;
+			debug: (msg: string) => void;
+		};
+		session?: { user?: unknown };
+		internalAdapter?: {
+			findUserById?: (userId: string) => Promise<unknown>;
+		};
+	};
+}
+
+/** Better Auth's endpoint context carries a structurally wider adapter than the plugin needs. */
+export function toSyncContext(ctx: { context: unknown }): SyncContext {
+	return { context: ctx.context as SyncContext["context"] };
+}

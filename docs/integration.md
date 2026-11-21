@@ -577,6 +577,8 @@ The plugin:
 unknown event envelopes. Apply the inbox table migration before enabling it. Handler receipts use
 the `handlers:` event ID prefix and support the existing authenticated admin replay endpoint.
 The default is `false` to preserve existing installations that have no inbox table.
+A handler event that keeps failing is dead-lettered after `maxWebhookAttempts` deliveries
+(default 5), the same budget `subscriptions({ maxWebhookAttempts })` sets for subscription sync.
 
 Verified payloads are persisted when processing is claimed, so an interrupted delivery can be
 recovered after its two-minute lease expires. A delivery that arrives while another worker holds

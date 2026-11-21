@@ -4,10 +4,14 @@ import { APIError } from "better-auth/api";
 import type { StreamPayOptions } from "../types";
 import {
 	assertConsumerUnclaimed,
+	type StreamPayLoggerContext,
+	unlinkConsumer,
+} from "../utils/consumer-link";
+import {
+	buildConsumerCreatePayload,
 	isDuplicateConsumerError,
 	isNotFoundError,
 	resolveDuplicateConsumer,
-	type StreamPayLoggerContext,
 } from "../utils/ensure-consumer";
 import { formatStreamPayError } from "../utils/format-error";
 import { getLogger } from "../utils/logger";
@@ -33,16 +37,10 @@ export const onBeforeUserCreate =
 			});
 		}
 
-		const extras = options.getConsumerCreateParams
-			? await options.getConsumerCreateParams({ user })
-			: {};
-
-		const createPayload: ConsumerCreate = {
-			consumer_type: "INDIVIDUAL",
-			...extras,
-			name: user.name || user.email,
+		const createPayload: ConsumerCreate = await buildConsumerCreatePayload(options, {
+			...user,
 			email: user.email,
-		};
+		});
 		// The auth user ID is assigned after insertion, then linked by the after-create hook.
 		delete createPayload.external_id;
 
@@ -126,14 +124,11 @@ export const onUserUpdate =
 				);
 				if (typeof context.context.adapter?.update === "function") {
 					try {
-						await context.context.adapter.update({
-							model: "user",
-							where: [
-								{ field: "id", value: sessionUser.id },
-								{ field: "streampayConsumerId", value: sessionUser.streampayConsumerId },
-							],
-							update: { streampayConsumerId: null },
-						});
+						await unlinkConsumer(
+							context.context.adapter,
+							sessionUser.streampayConsumerId,
+							sessionUser.id,
+						);
 					} catch (clearErr: unknown) {
 						getLogger(context).error(
 							`stale-link clear failed for user=${sessionUser.id}: ${formatStreamPayError(clearErr)}`,

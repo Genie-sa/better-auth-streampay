@@ -27,15 +27,15 @@ compare-and-set `where` clause must update the matching table here and add a reg
 
 | # | Machine | Kind | State lives in | Main code |
 | --- | --- | --- | --- | --- |
-| 1 | Subscription lifecycle | Explicit `status`, plus overlays | `subscription.status`, `billingStatus`, `activeSlotKey` | `subscriptions/sync.ts`, `reconcile.ts`, `endpoints.ts` |
-| 2 | Checkout reservation | Implicit sub-machine of 1 | `status = incomplete*`, `streampayPaymentLinkId`, `createdAt` | `subscriptions/checkout-reservation.ts`, `endpoints.ts` (`upgradeSubscription`) |
+| 1 | Subscription lifecycle | Explicit `status`, plus overlays | `subscription.status`, `billingStatus`, `activeSlotKey` | `subscriptions/reconcile.ts` (all row writes), `sync.ts`, `endpoints.ts` |
+| 2 | Checkout reservation | Implicit sub-machine of 1 | `status = incomplete*`, `streampayPaymentLinkId`, `createdAt` | `subscriptions/checkout-reservation.ts` (every R-state move) |
 | 3 | Cancellation schedule | Implicit | `cancelAtPeriodEnd`, `cancelAt`, `cancelScheduledAt`, `canceledAt` | `reconcile.ts`, `sync.ts` |
 | 4 | Pending plan/seat change | Implicit | `pendingPlan`, `pendingProductId`, `pendingSeats`, `pending*EffectiveAt` | `reconcile.ts` (`projectPlanFields`), `endpoints.ts` |
 | 5 | Freeze | Provider-driven projection | `status = frozen`, `frozenAt`, `freezeEndAt` | `endpoints.ts`, `lifecycle.ts` |
 | 6 | Renewal callback ownership | Implicit lock plus cycle marker | `subscription.renewalCallbackEventId`, `renewedCycleNumber` | `sync.ts` (`handleRenewalEvidence`) |
-| 7 | Webhook inbox event | Explicit `status`, plus lease | `streampayWebhookEvent.status`, `lockedAt`, `lockedBy`, `attemptCount` | `sync.ts`, `webhooks.ts`, `subscriptions/index.ts`, `admin.ts` |
+| 7 | Webhook inbox event | Explicit `status`, plus lease | `streampayWebhookEvent.status`, `lockedAt`, `lockedBy`, `attemptCount` | `webhooks/inbox.ts`; scopes in `subscriptions/sync.ts` and `plugins/webhooks.ts` |
 | 8 | Webhook request pipeline | Implicit ordering | Request scope | `plugins/webhooks.ts` |
-| 9 | Consumer link | Implicit | `user.streampayConsumerId` (unique) | `hooks/consumer.ts`, `utils/ensure-consumer.ts`, `utils/session.ts` |
+| 9 | Consumer link | Implicit | `user.streampayConsumerId` (unique) | `utils/consumer-link.ts` (every link write and read), `utils/ensure-consumer.ts`, `hooks/consumer.ts` |
 | 10 | One-time checkout link | Request-scoped saga | Provider payment link | `plugins/checkout.ts` |
 
 ## 1. Subscription lifecycle
@@ -69,10 +69,10 @@ overlay: StreamPay keeps reporting `ACTIVE` while a renewal payment is outstandi
 | S1 | `activeSlotKey` is non-null exactly when the status is not terminal. | `projectSubscriptionFields` clears the slot for terminal statuses. Releases set `incomplete_expired` and a null slot together. Webhook reconciliation and renewal evidence backfill a missing slot for live rows through `liveSlotKey` and the S4 takeover (`sync.ts`). Endpoint projections take a free slot when they observe a revival or a move to another plan group, and skip the write when another row holds it, leaving the conflict to the webhook path (`persistSubscriptionProjection`, F17, F25). |
 | S2 | At most one row holds a slot. | Database unique constraint on `activeSlotKey`. |
 | S3 | A provider subscription maps to at most one row. A payment link maps to at most one row. | Unique `streampaySubscriptionId` and `streampayPaymentLinkId`. |
-| S4 | A provider-confirmed subscription outranks an unpaid reservation (`incomplete` with no StreamPay subscription ID) for the same slot. Two live subscriptions in one slot are never written silently. | `updateReconciledSubscription` and `handleRenewalEvidence` run `takeSlotFromReservation` after their stale-state checks (`sync.ts`). |
+| S4 | A provider-confirmed subscription outranks an unpaid reservation (`incomplete` with no StreamPay subscription ID) for the same slot. Two live subscriptions in one slot are never written silently. | `persistReconciledProjection` and `handleRenewalEvidence` run `yieldReservationToPaidSubscription` after their stale-state checks (`sync.ts`). |
 | S5 | `billingStatus = past_due` and provider `ACTIVE` imply local `past_due`. | `reconcileProjectionAgainstExisting` (`reconcile.ts`), the renewal stale branch (`sync.ts`). |
-| S6 | `providerUpdatedAt` never moves backwards. | The webhook path throws and retries (`updateReconciledSubscription`). The endpoint path keeps the newer local row (`persistSubscriptionProjection`). |
-| S7 | Every lifecycle write is a CAS on `providerUpdatedAt`, `status`, `billingStatus`, and the correlation IDs. | `updateReconciledSubscription`, `persistSubscriptionProjection`, `handleRenewalEvidence`. |
+| S6 | `providerUpdatedAt` never moves backwards. | `isOlderProviderState` (`reconcile.ts`). The webhook path throws and retries (`persistReconciledProjection`). The endpoint path keeps the newer local row (`persistSubscriptionProjection`). |
+| S7 | Every lifecycle write is a CAS on `providerUpdatedAt`, `status`, `billingStatus`, and the correlation IDs. | `lifecycleWriteGuard` (`reconcile.ts`, includes `renewedCycleNumber`), used by `persistReconciledProjection`, `persistSubscriptionProjection`, and `handleRenewalEvidence`, which adds the period, cycle, and callback owner (F31). |
 | S8 | A stale event loses its lifecycle effects (callback, `past_due`, timestamp stamps) only when the fresh provider snapshot contradicts it. | `providerStateConfirmsEvent` in `reconcileFromStreamPay`; the latest-invoice check in `handleRenewalEvidence` (`sync.ts`). |
 
 ### Transitions
@@ -128,7 +128,7 @@ StreamPay's hosted checkout. The idempotency window is
 | ID | Invariant | Enforced by |
 | --- | --- | --- |
 | C1 | A request recovers a reservation only for the same plan and seat count. | `matchesCheckout` in `resumeOrReserveCheckoutSlot` |
-| C2 | A released reservation has no payable link. | `deactivatePaymentLink` (`lifecycle.ts`) runs before every release of a linked reservation. On upgrade, a deactivation failure keeps the reservation and fails the request. On the webhook takeover it is best effort and logged for manual action, so it never blocks the paid subscription. StreamPay still completes a payment already in progress, which S4 covers. |
+| C2 | A released reservation has no payable link. | `releaseReservation` (`checkout-reservation.ts`) runs `deactivatePaymentLink` before every release of a linked reservation, except when the link is already gone or inactive. On upgrade, a deactivation failure keeps the reservation and fails the request. On the webhook takeover it is best effort and logged for manual action, so it never blocks the paid subscription. StreamPay still completes a payment already in progress, which S4 covers. |
 | C3 | A checkout URL is returned only while its reservation is still live, or after the customer has already paid it, unless the link persistence write itself fails. | `upgradeSubscription` checks the row returned by the link persistence update (`endpoints.ts`). The takeover's release also matches the holder's link ID, so a link persisted concurrently makes the webhook retry. |
 
 ### Transitions
@@ -144,7 +144,7 @@ StreamPay's hosted checkout. The idempotency window is
 | C-g | Different plan or seats within the window | R1/R2 | R1/R2, request gets `SUBSCRIPTION_CHECKOUT_IN_PROGRESS` | by design |
 | C-h | Any request after the window, including the same plan and seats | R1/R2 | R3, then C-a | Deactivate the link, then CAS on `id`, `status`, slot, and the link ID that was read, so a link saved concurrently keeps its reservation (F26). The same-plan conflict path skipped this before F20. |
 | C-i | Reservation released while its link was being created | R1 (released) | R3, request gets `SUBSCRIPTION_CHECKOUT_IN_PROGRESS` | New link deactivated |
-| C-j | Paid subscription arrives for another row of the same slot | R1/R2 | R3 | `takeSlotFromReservation` |
+| C-j | Paid subscription arrives for another row of the same slot | R1/R2 | R3 | `yieldReservationToPaidSubscription` |
 | C-k | A live row holds the slot when the reservation is created | R0 | R0, request gets `SUBSCRIPTION_ALREADY_ACTIVE` | Previously surfaced the raw unique-constraint error |
 | C-l | Webhook | R1/R2/R3 | R4 | machine 1, L1 |
 | C-m | `/subscription/success` fallback | R1/R2 | R4 | machine 1, L1 |
@@ -195,7 +195,7 @@ retries without firing for two events of the same cycle.
 | event E | Callback throws with `retryOnCallbackError` | E (event recorded as failed) | same |
 | event E | Redelivery or replay of E | E, then null after success | `pendingCallback === eventId` branch |
 | event E | Renewal evidence for another event | E (other event fails and retries) | `pendingCallback !== eventId` |
-| event E | Admin discards E | null | `adminDiscardWebhookEvent`, after the event is completed |
+| event E | Admin discards E | null | the subscription scope's `onDiscard` (`releaseRenewalCallbackOwner`), after the event is completed |
 | event E, E already `completed` | Renewal evidence for another event | null, and that event continues in the same attempt | `releaseLockOfCompletedRenewal`: a completed owner can never deliver, for example after a discard that stopped before clearing the lock (F27). Skipped when the inbox table is disabled. |
 
 Invariants: while the lock is set, its cycle's callback has not been delivered, and other renewal
@@ -213,7 +213,9 @@ periods start up to 9 minutes after `started_at`.
 
 One table serves two scopes. Subscription sync uses
 `<event_type>:<entity_id>:<timestamp>`. Generic handlers (`webhooks({ deduplicate: true })`) use
-the same ID with a `handlers:` prefix.
+the same ID with a `handlers:` prefix. Both scopes run in the inbox module (`webhooks/inbox.ts`),
+which routes replay by that prefix: a `handlers:` row is never replayed through subscription sync,
+even when generic deduplication is off (F29).
 
 ### States
 
@@ -231,9 +233,9 @@ the same ID with a `handlers:` prefix.
 | ID | Invariant | Enforced by |
 | --- | --- | --- |
 | W1 | At most one worker holds a live lease. | `eventId` is unique. Claims are CAS on `status` and `lockedAt`. |
-| W2 | Only the lease owner can complete or fail an event. | `markWebhookEventCompleted` and `recordWebhookEventFailure` filter on `lockedBy`. |
+| W2 | Only the lease owner can complete or fail an event. | `markWebhookEventCompleted` and `recordWebhookEventFailure` require the lease's `lockedBy`. |
 | W3 | Completed and dead-lettered events are never processed by delivery, only by replay. | `claimOrAdvanceWebhookEvent` skips them. |
-| W4 | A replay failure never takes an event out of provider retry unless the event was already dead-lettered, has exhausted its attempts, or failed permanently. | Replay functions in `subscriptions/index.ts` and `webhooks.ts` (#27). |
+| W4 | A replay failure never takes an event out of provider retry unless the event was already dead-lettered, has exhausted its attempts, or failed permanently. | `runClaimedEvent` (`webhooks/inbox.ts`), shared by delivery, replay, and the due queue. |
 
 ### Transitions
 
@@ -246,10 +248,10 @@ the same ID with a `handlers:` prefix.
 | W-e | Processing succeeds | E1 | E3 | `markWebhookEventCompleted(lockedBy)` |
 | W-f | Transient failure, attempts left | E1 | E2 (`nextAttemptAt` set) | `recordWebhookEventFailure` |
 | W-g | Permanent failure (`SubscriptionCorrelationError`, including two live subscriptions in one slot, or a provider 4xx other than 404 and 429), or attempts exhausted | E1 | E4 | same |
-| W-h | Admin replay, or `processDueStreampayWebhookEvents` for E2 events whose `nextAttemptAt` passed or whose lease expired | E2 or E4 (admin), E2 still at the selected attempt and still due (processor) | E1 | `claimWebhookEventForReplay` (CAS on `status`, `lockedAt`, and `attemptCount`), `findDueWebhookEvents`, `isStillDueWebhookEvent` (F15) |
+| W-h | Admin replay, or `processDueStreampayWebhookEvents` for E2 events whose `nextAttemptAt` passed or whose lease expired | E2 or E4 (admin), E2 still at the selected attempt and still due (processor) | E1 | `claimWebhookEventForReplay` (CAS on `status`, `lockedAt`, and `attemptCount`), `findDueWebhookEvents`, `isStillDue` (`webhooks/inbox.ts`) (F15) |
 | W-i | Replay fails | E1 | E2 if it came from E2 with attempts left and a transient error, else E4 | #27. Before it, every admin replay failure dead-lettered. |
-| W-j | Admin discard | any except E1 | E3 | `completeUnchangedWebhookEvent`, a CAS on the observed `status`, `lockedAt`, and `attemptCount`; 409 on a live lease or a lost CAS. The renewal callback lock is cleared only after the event is completed (F21). |
-| W-k | Replay or due-event processing finds no replayable payload | E2 | E2p (request gets 400) | `parkUnreplayableWebhookEvent`, a CAS on `status`, `lockedAt`, and `attemptCount`, so a redelivery that repaired the row in between wins (F16). Before it, the row stayed due and filled every batch (F12). |
+| W-j | Admin discard | any except E1 | E3 | `WebhookInbox.discard`, a CAS on the observed `status`, `lockedAt`, and `attemptCount`; 409 on a live lease or a lost CAS. The renewal callback lock is cleared only after the event is completed (F21). |
+| W-k | Replay or due-event processing finds no replayable payload, or the event's scope is disabled (`lastErrorCode = WEBHOOK_INBOX_SCOPE_DISABLED`) | E2 | E2p (request gets 400) | `parkUnreplayableWebhookEvent`, a CAS on `status`, `lockedAt`, and `attemptCount`, so a redelivery that repaired the row in between wins (F16). Before it, the row stayed due and filled every batch (F12). |
 
 E2 events move on a StreamPay redelivery, an admin replay, or a scheduled call to
 `processDueStreampayWebhookEvents`, which selects them by `nextAttemptAt` and expired leases. E2p
@@ -282,10 +284,10 @@ sync, and the redelivery skips the sync row.
 | --- | --- | --- | --- |
 | Sign-up with `createConsumerOnSignUp` | Unlinked | Linked (inside the user insert) | `onBeforeUserCreate`. `onAfterUserCreate` backfills `external_id`. |
 | First checkout or upgrade | Unlinked | Linked | `ensureConsumerForUser`: recover by `external_id`, create, or claim a duplicate |
-| Claim backfill fails | Linked | Unlinked (CAS on the claimed ID) | `ensure-consumer.ts` duplicate branch |
+| Claim backfill fails | Linked | Unlinked (CAS on the claimed ID) | `unlinkConsumer`, from the `ensure-consumer.ts` duplicate branch, only by the request that stored the link |
 | Provider 404 on profile sync | Linked | Unlinked (CAS) | `onUserUpdate` |
 | Admin deletes the consumer | Linked | Unlinked (CAS) | `adminDeleteConsumer` |
-| Cached session carries an old ID | n/a | the database value wins | `getCurrentConsumerUser` |
+| Cached session carries an old ID, or none | n/a | the database value wins | `getCurrentConsumerUser` |
 | Portal call while unlinked | Unlinked | Unlinked (reads by `external_id`, never writes) | `portal.ts` |
 
 Invariants: one consumer per user and one user per consumer (unique column and
@@ -467,13 +469,23 @@ file covers F15 and F16; `tests/integration/review-findings.test.ts` covers F18 
 | ID | Risk | Why it is not fixed here |
 | --- | --- | --- |
 | R1 | Confirmed as F10 and fixed. | |
-| R2 | `persistConsumerId` writes with `updateUser`, not a CAS on a null link. | Disproved live: StreamPay rejects a concurrent duplicate email or `external_id`, so both requests link the same consumer. |
+| R2 | Disproved live: StreamPay rejects a concurrent duplicate email or `external_id`, so both requests link the same consumer. The link is still claimed with a CAS on a null link (`linkConsumer`), so a request that loses never overwrites the stored link or rolls it back. | |
 | R3 | An unknown future provider status maps to `incomplete` on a live row. The row keeps its slot but loses access. | Fails closed. Handle new statuses explicitly when StreamPay adds them. |
 | R4 | A dead-lettered renewal callback owner (machine 6) blocks renewal evidence for that subscription until it is replayed or discarded. | Intentional, to avoid a double callback. The operator needs to act. |
-| R5 | Generic handler deliveries always use 5 attempts and ignore `maxWebhookAttempts`. | That option belongs to `subscriptions()`. Changing it is an API decision. |
+| R5 | Fixed: `webhooks({ maxWebhookAttempts })` sets the generic handler attempt budget (default 5). | |
 | R6 | A callback that runs longer than the 2-minute lease can run concurrently with a redelivery. | Documented. Callbacks must be idempotent. |
 | R7 | Fixed with F8 (Issue 4). | |
 | R8 | Confirmed as F12 and fixed. Parked rather than dead-lettered, so StreamPay retries still count (W4). | |
 | R9 | Confirmed as F13 and fixed. | |
 | R10 | Confirmed as F17 and fixed. | |
 | R11 | Confirmed as F28 and fixed. Rows created by a webhook without any reservation (no plugin checkout link) still depend on their creation event. | |
+
+### Module consolidation findings
+
+Found while consolidating each machine into one module (3.4.0).
+
+| ID | Severity | Machine | Invalid state or transition | Before | Fix |
+| --- | --- | --- | --- | --- | --- |
+| F29 | Medium | 7 | A leftover `handlers:` row is marked completed without running any handler. | With `subscriptions()` deduplicating and `webhooks({ deduplicate })` off, replay fell through to subscription sync, which ignored the event and completed the row. | Prefix routing in the inbox; the row is parked (W-k). |
+| F30 | Low | 4 | `pending*` and `catalogMapped` stay stale after cancel, uncancel, freeze, unfreeze, freeze cancel, and admin subscription changes. | Those paths projected status fields only. | Every endpoint projection includes the plan catalog; admin writes go through `registry.refreshSubscriptionProjection`. A snapshot without `items` leaves plan fields unchanged. |
+| F31 | Low | 1, 6 | A renewal write could apply to a row whose consumer or subscription binding changed concurrently. | Its CAS omitted the correlation IDs that S7 lists. | `lifecycleWriteGuard` in the renewal CAS. |

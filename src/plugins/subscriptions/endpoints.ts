@@ -20,13 +20,12 @@ import {
 	requireUser,
 } from "./access";
 import {
-	checkoutInProgressError,
+	attachCheckoutLink,
 	deleteReservedSubscription,
 	resumeOrReserveCheckoutSlot,
 } from "./checkout-reservation";
 import {
 	configuredPlanForSubscription,
-	deactivatePaymentLink,
 	findSubscriptionFreeze,
 	isAlreadyCanceledFreezeError,
 	subscriptionCouponIds,
@@ -143,6 +142,20 @@ function isCheckoutSubscriptionCandidate(
 	);
 }
 
+/** These actions do not need the plan catalog at StreamPay, so it only enriches the local projection. */
+async function catalogForProjection(
+	plansRef: () => Promise<ResolvedPlans>,
+	log: { warn: (message: string) => void },
+): Promise<ResolvedPlans | null> {
+	try {
+		return await plansRef();
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		log.warn(`plan catalog unavailable (${message}); projecting without plan fields.`);
+		return null;
+	}
+}
+
 export function buildSubscriptionEndpoints(
 	options: StreamPayOptions,
 	subsOptions: SubscriptionsOptions,
@@ -173,8 +186,7 @@ export function buildSubscriptionEndpoints(
 							adapter,
 							row,
 							{
-								...projectSubscriptionAgainstExisting(row, current),
-								...projectPlanFields(current, plans),
+								...projectSubscriptionAgainstExisting(row, current, plans),
 								pendingPlan: null,
 								pendingProductId: null,
 								pendingPlanEffectiveAt: null,
@@ -192,8 +204,7 @@ export function buildSubscriptionEndpoints(
 						adapter,
 						row,
 						{
-							...projectSubscriptionAgainstExisting(row, stream),
-							...projectPlanFields(stream, plans),
+							...projectSubscriptionAgainstExisting(row, stream, plans),
 							pendingPlan: null,
 							pendingProductId: null,
 							pendingPlanEffectiveAt: null,
@@ -409,88 +420,17 @@ export function buildSubscriptionEndpoints(
 					);
 				}
 
-				if (!url) {
-					getLogger(ctx).error(`createPaymentLink returned link=${paymentLinkId} with no url.`);
-					try {
-						await adapter.update({
-							model: SUBSCRIPTION_MODEL,
-							update: {
-								streampayPaymentLinkId: paymentLinkId,
-								status: "incomplete_expired",
-								activeSlotKey: null,
-								updatedAt: new Date(),
-							},
-							where: [
-								{ field: "id", value: row.id },
-								{ field: "status", value: "incomplete" },
-								{ field: "streampayConsumerId", value: consumerId },
-							],
-						});
-					} catch (persistenceError) {
-						const message =
-							persistenceError instanceof Error
-								? persistenceError.message
-								: String(persistenceError);
-						getLogger(ctx).error(
-							`failed to mark unusable payment link=${paymentLinkId} expired for row=${row.id}: ${message}`,
-						);
-						await deleteReservedSubscription(
-							adapter,
-							row.id,
-							getLogger(ctx),
-							"unusable payment link cleanup",
-						);
-					}
-					throw new APIError("INTERNAL_SERVER_ERROR", {
-						message: "Payment link was created but no URL was returned.",
-					});
-				}
-
-				let updatedRow: Subscription | null = null;
-				try {
-					updatedRow = await adapter.update<Subscription>({
-						model: SUBSCRIPTION_MODEL,
-						update: {
-							streampayPaymentLinkId: paymentLinkId,
-							updatedAt: new Date(),
-						},
-						where: [
-							{ field: "id", value: row.id },
-							{ field: "referenceId", value: referenceId },
-							{ field: "referenceType", value: referenceType },
-							{ field: "streampayConsumerId", value: consumerId },
-							{ field: "streampayPaymentLinkId", value: null },
-						],
-					});
-				} catch (persistenceError) {
-					const message =
-						persistenceError instanceof Error ? persistenceError.message : String(persistenceError);
-					getLogger(ctx).error(
-						`failed to persist payment link=${paymentLinkId} for row=${row.id}: ${message}. Protected checkout metadata will reconcile the row from the webhook.`,
-					);
-				}
-				if (updatedRow?.status === "incomplete_expired") {
-					getLogger(ctx).warn(
-						`checkout reservation row=${row.id} was released while payment link=${paymentLinkId} was created; deactivating the link.`,
-					);
-					try {
-						await deactivatePaymentLink(client, paymentLinkId, getLogger(ctx));
-					} catch (deactivationError) {
-						toAPIError(
-							{
-								logPrefix: `deactivate orphaned checkout link=${paymentLinkId} failed for row=${row.id}:`,
-								userMessage: "Failed to start subscription checkout.",
-							},
-							deactivationError,
-							getLogger(ctx),
-						);
-					}
-					throw checkoutInProgressError();
-				}
-
+				const attached = await attachCheckoutLink({
+					client,
+					adapter,
+					reservation: row,
+					consumerId,
+					link: { id: paymentLinkId, url },
+					log: getLogger(ctx),
+				});
 				return ctx.json({
-					subscriptionId: updatedRow?.id ?? row.id,
-					url,
+					subscriptionId: attached.subscriptionId,
+					url: attached.url,
 					redirect: true,
 					reused: false,
 					status: "incomplete",
@@ -612,12 +552,13 @@ export function buildSubscriptionEndpoints(
 					cancel_related_invoices: ctx.body.cancelRelatedInvoices ?? false,
 				};
 				try {
+					const plans = await catalogForProjection(plansRef, getLogger(ctx));
 					const stream = await client.getSubscription(row.streampaySubscriptionId);
 					if (stream.status === "CANCELED") {
 						await persistSubscriptionProjection(
 							adapter,
 							row,
-							projectSubscriptionAgainstExisting(row, stream),
+							projectSubscriptionAgainstExisting(row, stream, plans),
 							getLogger(ctx),
 							"subscription endpoint",
 						);
@@ -634,7 +575,7 @@ export function buildSubscriptionEndpoints(
 						await persistSubscriptionProjection(
 							adapter,
 							row,
-							projectSubscriptionAgainstExisting(row, stream),
+							projectSubscriptionAgainstExisting(row, stream, plans),
 							getLogger(ctx),
 							"subscription endpoint",
 						);
@@ -652,6 +593,7 @@ export function buildSubscriptionEndpoints(
 						client,
 						adapter,
 						row.streampaySubscriptionId,
+						plans,
 						getLogger(ctx),
 						"cancelSubscription",
 						result,
@@ -747,8 +689,7 @@ export function buildSubscriptionEndpoints(
 							adapter,
 							row,
 							{
-								...projectSubscriptionAgainstExisting(row, stream),
-								...projectPlanFields(stream, plans),
+								...projectSubscriptionAgainstExisting(row, stream, plans),
 								pendingPlan: currentPlan.productId === nextPlan.productId ? null : nextPlan.name,
 								pendingProductId:
 									currentPlan.productId === nextPlan.productId ? null : nextPlan.productId,
@@ -798,7 +739,7 @@ export function buildSubscriptionEndpoints(
 						adapter,
 						row,
 						{
-							...projectSubscriptionAgainstExisting(row, result),
+							...projectSubscriptionAgainstExisting(row, result, null),
 							...planProjection,
 							updatedAt: new Date(),
 						},
@@ -880,10 +821,7 @@ export function buildSubscriptionEndpoints(
 							await persistSubscriptionProjection(
 								adapter,
 								row,
-								{
-									...projectSubscriptionAgainstExisting(row, stream),
-									...projectPlanFields(stream, plans),
-								},
+								projectSubscriptionAgainstExisting(row, stream, plans),
 								getLogger(ctx),
 								"subscription endpoint",
 							);
@@ -906,10 +844,7 @@ export function buildSubscriptionEndpoints(
 						await persistSubscriptionProjection(
 							adapter,
 							row,
-							{
-								...projectSubscriptionAgainstExisting(row, stream),
-								...projectPlanFields(stream, plans),
-							},
+							projectSubscriptionAgainstExisting(row, stream, plans),
 							getLogger(ctx),
 							"subscription endpoint",
 						);
@@ -934,7 +869,7 @@ export function buildSubscriptionEndpoints(
 						adapter,
 						row,
 						{
-							...projectSubscriptionAgainstExisting(row, result),
+							...projectSubscriptionAgainstExisting(row, result, null),
 							...planProjection,
 							updatedAt: new Date(),
 						},
@@ -987,12 +922,13 @@ export function buildSubscriptionEndpoints(
 				);
 
 				try {
+					const plans = await catalogForProjection(plansRef, getLogger(ctx));
 					await client.uncancelSubscription(row.streampaySubscriptionId);
 					const stream = await client.getSubscription(row.streampaySubscriptionId);
 					await persistSubscriptionProjection(
 						adapter,
 						row,
-						projectSubscriptionAgainstExisting(row, stream),
+						projectSubscriptionAgainstExisting(row, stream, plans),
 						getLogger(ctx),
 						"subscription endpoint",
 					);
@@ -1036,11 +972,13 @@ export function buildSubscriptionEndpoints(
 				}
 
 				try {
+					const plans = await catalogForProjection(plansRef, getLogger(ctx));
 					const freeze = await client.freezeSubscription(row.streampaySubscriptionId, payload);
 					await syncSubscriptionFromUpstream(
 						client,
 						adapter,
 						row.streampaySubscriptionId,
+						plans,
 						getLogger(ctx),
 						"freezeSubscription",
 					);
@@ -1075,6 +1013,7 @@ export function buildSubscriptionEndpoints(
 
 				const nowMs = Date.now();
 				try {
+					const plans = await catalogForProjection(plansRef, getLogger(ctx));
 					const isActiveFreeze = (freeze: FreezeSubscriptionBase) => {
 						if (!freeze.id || !freeze.freeze_start_datetime) return false;
 						const start = parseDate(freeze.freeze_start_datetime)?.getTime();
@@ -1122,6 +1061,7 @@ export function buildSubscriptionEndpoints(
 						client,
 						adapter,
 						row.streampaySubscriptionId,
+						plans,
 						getLogger(ctx),
 						"unfreezeSubscription",
 					);
@@ -1155,6 +1095,7 @@ export function buildSubscriptionEndpoints(
 				);
 
 				try {
+					const plans = await catalogForProjection(plansRef, getLogger(ctx));
 					const result = await findSubscriptionFreeze(
 						client,
 						subsOptions,
@@ -1176,6 +1117,7 @@ export function buildSubscriptionEndpoints(
 						client,
 						adapter,
 						row.streampaySubscriptionId,
+						plans,
 						getLogger(ctx),
 						"cancelSubscriptionFreeze",
 					);

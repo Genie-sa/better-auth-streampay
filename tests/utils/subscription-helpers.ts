@@ -19,14 +19,29 @@ export function createMockAdapter(): PluginAdapter & {
 		streampayWebhookEvent: ["eventId"],
 	};
 
+	function comparable(value: unknown): unknown {
+		return value instanceof Date ? value.getTime() : value;
+	}
+
+	function satisfies(
+		actual: unknown,
+		clause: { value: unknown; operator?: "lt" | "lte" | undefined },
+	): boolean {
+		const left = comparable(actual ?? null);
+		const right = comparable(clause.value ?? null);
+		if (!clause.operator) return left === right;
+		if (left === null || right === null) return false;
+		const order =
+			(left as number | string) < (right as number | string) ? -1 : left === right ? 0 : 1;
+		return clause.operator === "lt" ? order < 0 : order <= 0;
+	}
+
+	/** Mirrors SQL: undefined columns read as NULL, dates compare by instant, and NULL never orders. */
 	function matches(
 		row: Record<string, unknown>,
-		where: Array<{ field: string; value: unknown }>,
+		where: Array<{ field: string; value: unknown; operator?: "lt" | "lte" | undefined }>,
 	): boolean {
-		for (const clause of where) {
-			if (row[clause.field] !== clause.value) return false;
-		}
-		return true;
+		return where.every((clause) => satisfies(row[clause.field], clause));
 	}
 
 	function assertUnique(
@@ -94,7 +109,7 @@ export function createMockAdapter(): PluginAdapter & {
 		},
 		async findMany<T>(args: {
 			model: string;
-			where?: Array<{ field: string; value: unknown }>;
+			where?: Array<{ field: string; value: unknown; operator?: "lt" | "lte" }>;
 			limit?: number;
 			offset?: number;
 			sortBy?: { field: string; direction: "asc" | "desc" };
@@ -108,8 +123,8 @@ export function createMockAdapter(): PluginAdapter & {
 				const { field, direction } = args.sortBy;
 				const sign = direction === "asc" ? 1 : -1;
 				rows = [...rows].sort((a, b) => {
-					const av = a[field] as number | string | Date;
-					const bv = b[field] as number | string | Date;
+					const av = comparable(a[field]) as number | string;
+					const bv = comparable(b[field]) as number | string;
 					if (av === bv) return 0;
 					return av > bv ? sign : -sign;
 				});

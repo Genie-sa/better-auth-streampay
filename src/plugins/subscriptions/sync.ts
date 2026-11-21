@@ -1,7 +1,6 @@
-import { randomUUID } from "node:crypto";
 import type { SubscriptionDetailed } from "@streamsdk/typescript";
 import type { StreamPayClient } from "../../types";
-import { readEnvelope, readSdkErrorFields } from "../../utils/error-envelope";
+import { readSdkErrorFields } from "../../utils/error-envelope";
 import { type ScopedLogger, scopedLogger } from "../../utils/logger";
 import { asSessionUser, type StreamPaySessionUser } from "../../utils/session";
 import type {
@@ -9,13 +8,27 @@ import type {
 	StreamPayWebhookEnvelope,
 	StreamPayWebhookPayload,
 } from "../../webhooks/events";
-import type { PluginAdapter } from "./adapter";
-import { deactivatePaymentLink } from "./lifecycle";
+import {
+	DEFAULT_MAX_WEBHOOK_ATTEMPTS,
+	deliverWebhookEvent,
+	WEBHOOK_EVENT_MODEL,
+	type WebhookEventRow,
+	type WebhookInboxAttempt,
+	type WebhookInboxScope,
+	WebhookProcessingError,
+	webhookEventId,
+} from "../../webhooks/inbox";
+import type { SyncContext } from "./adapter";
+import { yieldReservationToPaidSubscription } from "./checkout-reservation";
+import { SubscriptionCorrelationError } from "./correlation-error";
 import type { ResolvedPlans } from "./plans";
 import {
 	inferPlanFromItems,
+	isOlderProviderState,
+	lifecycleWriteGuard,
 	liveSlotKey,
 	parseDate,
+	persistReconciledProjection,
 	projectPlanFields,
 	projectSubscriptionFields,
 	reconcileProjectionAgainstExisting,
@@ -34,436 +47,28 @@ import {
 	subscriptionSlotKey,
 } from "./types";
 
-export type { PluginAdapter } from "./adapter";
-export {
-	applySubscriptionProjection,
-	projectSubscriptionFields,
-	subscriptionItemProductId,
-	syncSubscriptionFromUpstream,
-} from "./reconcile";
-
-export interface SyncContext {
-	context: {
-		adapter: PluginAdapter;
-		logger: {
-			error: (msg: string) => void;
-			warn: (msg: string) => void;
-			info: (msg: string) => void;
-			debug: (msg: string) => void;
-		};
-		session?: { user?: unknown };
-		internalAdapter?: {
-			findUserById?: (userId: string) => Promise<unknown>;
-		};
-	};
-}
+export { WebhookEventInProgressError } from "../../webhooks/inbox";
+export type { PluginAdapter, SyncContext } from "./adapter";
+export { subscriptionItemProductId } from "./reconcile";
 
 const SUBSCRIPTION_MODEL = "subscription";
-export const WEBHOOK_EVENT_MODEL = "streampayWebhookEvent";
+const RENEWAL_CALLBACK_FAILURE_CODE = "SUBSCRIPTION_RENEWAL_CALLBACK_FAILED";
+/** Rows written before `RENEWAL_CALLBACK_FAILURE_CODE` existed only carry the message. */
+const LEGACY_RENEWAL_CALLBACK_FAILURE_PREFIX =
+	"Subscription callback onSubscriptionRenewed failed:";
 
 function logger(ctx: SyncContext): ScopedLogger {
 	return scopedLogger(ctx.context.logger);
-}
-
-export const DEFAULT_MAX_WEBHOOK_ATTEMPTS = 5;
-
-export type WebhookEventStatus = "pending" | "completed" | "dead_letter";
-
-export interface WebhookEventRow {
-	id: string;
-	eventId: string;
-	eventType: string;
-	status: WebhookEventStatus;
-	attemptCount: number;
-	receivedAt: Date;
-	lastAttemptAt: Date | null;
-	nextAttemptAt: Date | null;
-	completedAt: Date | null;
-	deadLetteredAt: Date | null;
-	lockedAt: Date | null;
-	lockedBy: string | null;
-	rawPayload: string | null;
-	signatureHeader: string | null;
-	lastError: string | null;
-	lastErrorCode: string | null;
-}
-
-const MAX_CAUSE_DEPTH = 5;
-
-function matchesUniqueMarker(err: unknown): boolean {
-	if (!err || typeof err !== "object") return false;
-	const message = "message" in err && typeof err.message === "string" ? err.message : "";
-	if (/unique/i.test(message) || /duplicate/i.test(message)) return true;
-	const code = "code" in err && typeof err.code === "string" ? err.code : "";
-	return code === "P2002" || code === "23505" || code === "SQLITE_CONSTRAINT_UNIQUE";
-}
-
-export function isUniqueConstraintError(err: unknown): boolean {
-	let current: unknown = err;
-	for (let depth = 0; depth <= MAX_CAUSE_DEPTH; depth++) {
-		if (matchesUniqueMarker(current)) return true;
-		if (!current || typeof current !== "object" || !("cause" in current)) return false;
-		current = current.cause;
-	}
-	return false;
-}
-
-export type ClaimAdvanceResult =
-	| { action: "process"; row: WebhookEventRow | null }
-	| { action: "skip"; reason: "completed" | "dead_letter" | "in_progress" }
-	| { action: "dead_letter"; row: WebhookEventRow };
-
-export const WEBHOOK_PROCESSING_LEASE_MS = 2 * 60 * 1000;
-const WEBHOOK_RETRY_DELAYS_MS = [5, 30, 120, 360, 720].map((minutes) => minutes * 60 * 1000);
-
-export function hasLiveLease(row: Pick<WebhookEventRow, "lockedAt">, now: Date): boolean {
-	return (
-		row.lockedAt instanceof Date &&
-		now.getTime() - row.lockedAt.getTime() < WEBHOOK_PROCESSING_LEASE_MS
-	);
-}
-
-/**
- * A concurrent delivery holds the processing lease. Surfaced as a retryable HTTP failure so the
- * provider redelivers instead of treating the event as handled while the lease holder may crash.
- */
-export class WebhookEventInProgressError extends Error {
-	constructor(eventType: string) {
-		super(`Webhook ${eventType} is already being processed; retry later.`);
-		this.name = "WebhookEventInProgressError";
-	}
 }
 
 export interface WebhookReplayOptions {
 	/** @deprecated No effect: a failed replay keeps a pending event retryable until its attempts are spent. */
 	retryUntilExhausted?: boolean;
 	/**
-	 * Set by `processDueStreampayWebhookEvents`: replay only if the event is still pending at this
-	 * attempt and due. Otherwise the replay fails with `CONFLICT`.
+	 * Replay only if the event is still pending at this attempt and due. Otherwise the replay fails
+	 * with `CONFLICT`. `processDueStreampayWebhookEvents` applies this check itself.
 	 */
 	dueAttemptCount?: number;
-}
-
-/** Pending events whose retry time has passed, plus events whose processing lease was abandoned. */
-export async function findDueWebhookEvents(
-	ctx: { context: { adapter: PluginAdapter } },
-	now: Date,
-	limit: number,
-): Promise<WebhookEventRow[]> {
-	const [retryDue, abandoned] = await Promise.all([
-		ctx.context.adapter.findMany<WebhookEventRow>({
-			model: WEBHOOK_EVENT_MODEL,
-			where: [
-				{ field: "status", value: "pending" },
-				{ field: "nextAttemptAt", operator: "lte", value: now },
-			],
-			limit,
-			sortBy: { field: "nextAttemptAt", direction: "asc" },
-		}),
-		ctx.context.adapter.findMany<WebhookEventRow>({
-			model: WEBHOOK_EVENT_MODEL,
-			where: [
-				{ field: "status", value: "pending" },
-				{
-					field: "lockedAt",
-					operator: "lt",
-					value: new Date(now.getTime() - WEBHOOK_PROCESSING_LEASE_MS),
-				},
-			],
-			limit,
-			sortBy: { field: "lockedAt", direction: "asc" },
-		}),
-	]);
-	const byId = new Map([...retryDue, ...abandoned].map((row) => [row.id, row]));
-	return [...byId.values()].slice(0, limit);
-}
-
-export async function claimOrAdvanceWebhookEvent(
-	ctx: SyncContext,
-	payload: StreamPayWebhookEnvelope,
-	rawBody: string | null,
-	signatureHeader: string | null,
-	maxAttempts: number,
-	scope?: string,
-): Promise<ClaimAdvanceResult> {
-	const sourceEventId = extractEventId(payload);
-	const eventId = sourceEventId && (scope ? `${scope}:${sourceEventId}` : sourceEventId);
-	if (!eventId) {
-		logger(ctx).warn(
-			`webhook ${payload.event_type}: missing entity_id/timestamp — processing without dedupe.`,
-		);
-		return { action: "process", row: null };
-	}
-
-	const now = new Date();
-	const lockId = randomUUID();
-
-	try {
-		const inserted = await ctx.context.adapter.create<WebhookEventRow>({
-			model: WEBHOOK_EVENT_MODEL,
-			data: {
-				eventId,
-				eventType: payload.event_type,
-				status: "pending",
-				attemptCount: 1,
-				receivedAt: now,
-				lastAttemptAt: now,
-				lockedAt: now,
-				lockedBy: lockId,
-				rawPayload: rawBody,
-				signatureHeader,
-			},
-		});
-		return { action: "process", row: inserted };
-	} catch (err) {
-		if (!isUniqueConstraintError(err)) throw err;
-	}
-
-	const existing = await ctx.context.adapter.findOne<WebhookEventRow>({
-		model: WEBHOOK_EVENT_MODEL,
-		where: [{ field: "eventId", value: eventId }],
-	});
-	if (!existing) {
-		throw new Error(
-			`Webhook inbox row missing after unique conflict for ${eventId}; retry delivery.`,
-		);
-	}
-
-	if (existing.status === "completed") {
-		logger(ctx).info(`webhook ${payload.event_type} (${eventId}) already completed — skipping.`);
-		return { action: "skip", reason: "completed" };
-	}
-	if (existing.status === "dead_letter") {
-		logger(ctx).warn(
-			`webhook ${payload.event_type} (${eventId}) already dead-lettered — skipping (replay manually).`,
-		);
-		return { action: "skip", reason: "dead_letter" };
-	}
-	if (hasLiveLease(existing, now)) {
-		logger(ctx).info(
-			`webhook ${payload.event_type} (${eventId}) is already being processed — skipping concurrent delivery.`,
-		);
-		return { action: "skip", reason: "in_progress" };
-	}
-
-	const nextAttempt = (existing.attemptCount ?? 0) + 1;
-	if (nextAttempt > maxAttempts) {
-		const updated = await ctx.context.adapter.update<WebhookEventRow>({
-			model: WEBHOOK_EVENT_MODEL,
-			update: {
-				status: "dead_letter",
-				attemptCount: nextAttempt,
-				lastAttemptAt: now,
-				deadLetteredAt: now,
-				nextAttemptAt: null,
-				...(rawBody !== null ? { rawPayload: rawBody, signatureHeader } : {}),
-				lockedAt: null,
-				lockedBy: null,
-			},
-			where: [
-				{ field: "id", value: existing.id },
-				{ field: "status", value: "pending" },
-				{ field: "lockedAt", value: existing.lockedAt ?? null },
-				{ field: "attemptCount", value: existing.attemptCount ?? null },
-			],
-		});
-		return updated
-			? { action: "dead_letter", row: updated }
-			: { action: "skip", reason: "in_progress" };
-	}
-
-	const updated = await ctx.context.adapter.update<WebhookEventRow>({
-		model: WEBHOOK_EVENT_MODEL,
-		update: {
-			attemptCount: nextAttempt,
-			lastAttemptAt: now,
-			nextAttemptAt: null,
-			lockedAt: now,
-			lockedBy: lockId,
-			...(rawBody !== null ? { rawPayload: rawBody, signatureHeader } : {}),
-		},
-		where: [
-			{ field: "id", value: existing.id },
-			{ field: "status", value: "pending" },
-			{ field: "lockedAt", value: existing.lockedAt ?? null },
-			{ field: "attemptCount", value: existing.attemptCount ?? null },
-		],
-	});
-	return updated ? { action: "process", row: updated } : { action: "skip", reason: "in_progress" };
-}
-
-export async function claimWebhookEventForReplay(
-	ctx: SyncContext,
-	row: WebhookEventRow,
-): Promise<WebhookEventRow | null> {
-	const now = new Date();
-	if (hasLiveLease(row, now)) {
-		return null;
-	}
-	return ctx.context.adapter.update<WebhookEventRow>({
-		model: WEBHOOK_EVENT_MODEL,
-		update: {
-			status: "pending",
-			attemptCount: (row.attemptCount ?? 0) + 1,
-			lastAttemptAt: now,
-			nextAttemptAt: null,
-			completedAt: null,
-			deadLetteredAt: null,
-			lockedAt: now,
-			lockedBy: randomUUID(),
-		},
-		where: [
-			{ field: "id", value: row.id },
-			{ field: "status", value: row.status },
-			{ field: "lockedAt", value: row.lockedAt ?? null },
-			{ field: "attemptCount", value: row.attemptCount ?? null },
-		],
-	});
-}
-
-/** The due queue may retry a row only while it is still the pending attempt it selected and is due. */
-export function isStillDueWebhookEvent(
-	row: WebhookEventRow,
-	selectedAttemptCount: number,
-	now: Date,
-): boolean {
-	const retryDue = row.nextAttemptAt instanceof Date && row.nextAttemptAt <= now;
-	const leaseAbandoned = row.lockedAt instanceof Date && !hasLiveLease(row, now);
-	return (
-		row.status === "pending" &&
-		row.attemptCount === selectedAttemptCount &&
-		(retryDue || leaseAbandoned)
-	);
-}
-
-/**
- * Takes a pending event whose stored payload cannot be replayed out of the due queue, so it stops
- * filling every batch. It stays pending: a StreamPay redelivery carries the payload and processes it.
- */
-export async function parkUnreplayableWebhookEvent(
-	ctx: { context: { adapter: PluginAdapter } },
-	row: WebhookEventRow,
-	reason: string,
-): Promise<void> {
-	if (row.status !== "pending" || hasLiveLease(row, new Date())) return;
-	await ctx.context.adapter.update({
-		model: WEBHOOK_EVENT_MODEL,
-		update: {
-			nextAttemptAt: null,
-			lockedAt: null,
-			lockedBy: null,
-			lastError: reason,
-			lastErrorCode: "UNREPLAYABLE_PAYLOAD",
-		},
-		where: [
-			{ field: "id", value: row.id },
-			{ field: "status", value: "pending" },
-			{ field: "lockedAt", value: row.lockedAt ?? null },
-			{ field: "attemptCount", value: row.attemptCount ?? null },
-		],
-	});
-}
-
-function completedWebhookEventFields() {
-	return {
-		status: "completed",
-		completedAt: new Date(),
-		nextAttemptAt: null,
-		lockedAt: null,
-		lockedBy: null,
-		rawPayload: null,
-		signatureHeader: null,
-		lastError: null,
-		lastErrorCode: null,
-	} as const;
-}
-
-export async function markWebhookEventCompleted(
-	ctx: { context: { adapter: PluginAdapter } },
-	rowId: string,
-	lockId?: string,
-): Promise<void> {
-	await ctx.context.adapter.update({
-		model: WEBHOOK_EVENT_MODEL,
-		update: completedWebhookEventFields(),
-		where: [
-			{ field: "id", value: rowId },
-			...(lockId ? [{ field: "lockedBy", value: lockId }] : []),
-		],
-	});
-}
-
-/** Completes an event only if no worker claimed or advanced it since `row` was read. */
-export async function completeUnchangedWebhookEvent(
-	ctx: { context: { adapter: PluginAdapter } },
-	row: WebhookEventRow,
-): Promise<boolean> {
-	const updated = await ctx.context.adapter.update<WebhookEventRow>({
-		model: WEBHOOK_EVENT_MODEL,
-		update: completedWebhookEventFields(),
-		where: [
-			{ field: "id", value: row.id },
-			{ field: "status", value: row.status },
-			{ field: "lockedAt", value: row.lockedAt ?? null },
-			{ field: "attemptCount", value: row.attemptCount ?? null },
-		],
-	});
-	return updated !== null;
-}
-
-export async function recordWebhookEventFailure(
-	ctx: { context: { adapter: PluginAdapter } },
-	rowId: string,
-	rawBody: string | null,
-	signatureHeader: string | null,
-	err: unknown,
-	lockId?: string,
-	deadLetter = false,
-): Promise<void> {
-	const lastError = err instanceof Error ? err.message : String(err);
-	const sdkError = readSdkErrorFields(err);
-	const lastErrorCode =
-		readEnvelope(sdkError.body)?.code ??
-		(sdkError.status !== undefined
-			? `HTTP_${sdkError.status}`
-			: err instanceof Error
-				? err.name
-				: "UNKNOWN");
-	const row = await ctx.context.adapter.findOne<WebhookEventRow>({
-		model: WEBHOOK_EVENT_MODEL,
-		where: [
-			{ field: "id", value: rowId },
-			...(lockId ? [{ field: "lockedBy", value: lockId }] : []),
-		],
-	});
-	const attemptCount = row?.attemptCount ?? 1;
-	const retryDelay =
-		WEBHOOK_RETRY_DELAYS_MS[Math.min(attemptCount - 1, WEBHOOK_RETRY_DELAYS_MS.length - 1)];
-	const now = new Date();
-	await ctx.context.adapter.update({
-		model: WEBHOOK_EVENT_MODEL,
-		update: {
-			...(deadLetter ? { status: "dead_letter", deadLetteredAt: now } : {}),
-			lastAttemptAt: now,
-			nextAttemptAt:
-				deadLetter || retryDelay === undefined ? null : new Date(now.getTime() + retryDelay),
-			lockedAt: null,
-			lockedBy: null,
-			lastError,
-			lastErrorCode,
-			...(rawBody !== null ? { rawPayload: rawBody } : {}),
-			...(signatureHeader !== null ? { signatureHeader } : {}),
-		},
-		where: [
-			{ field: "id", value: rowId },
-			...(lockId ? [{ field: "lockedBy", value: lockId }] : []),
-		],
-	});
-}
-
-function extractEventId(payload: StreamPayWebhookEnvelope): string | null {
-	if (!payload.timestamp || !payload.entity_id) return null;
-	return `${payload.event_type}:${payload.entity_id}:${payload.timestamp}`;
 }
 
 function readMetadataString(data: StreamPayWebhookData | undefined, key: string): string | null {
@@ -566,21 +171,19 @@ async function fireCallback(
 	}
 }
 
-class SubscriptionCallbackDeliveryError extends Error {
+class SubscriptionCallbackDeliveryError extends WebhookProcessingError {
 	readonly callbackName: string;
 
 	constructor(callbackName: string, cause: unknown) {
 		const message = cause instanceof Error ? cause.message : String(cause);
-		super(`Subscription callback ${callbackName} failed: ${message}`);
+		super(
+			`Subscription callback ${callbackName} failed: ${message}`,
+			callbackName === "onSubscriptionRenewed"
+				? RENEWAL_CALLBACK_FAILURE_CODE
+				: "SubscriptionCallbackDeliveryError",
+		);
 		this.name = "SubscriptionCallbackDeliveryError";
 		this.callbackName = callbackName;
-	}
-}
-
-class SubscriptionCorrelationError extends Error {
-	constructor(message: string) {
-		super(message);
-		this.name = "SubscriptionCorrelationError";
 	}
 }
 
@@ -618,10 +221,6 @@ function providerStateConfirmsEvent(eventType: string, stream: SubscriptionDetai
 	}
 }
 
-/**
- * A provider-confirmed subscription outranks an unpaid checkout reservation for the same slot.
- * Deactivating the reservation's link is best effort: it must never block the paid subscription.
- */
 async function takeSlotFromReservation(
 	ctx: SyncContext,
 	client: StreamPayClient,
@@ -629,47 +228,14 @@ async function takeSlotFromReservation(
 	ownerRowId: string | null,
 	streampaySubscriptionId: string,
 ): Promise<void> {
-	const holder = await ctx.context.adapter.findOne<Subscription>({
-		model: SUBSCRIPTION_MODEL,
-		where: [{ field: "activeSlotKey", value: slotKey }],
+	await yieldReservationToPaidSubscription({
+		client,
+		adapter: ctx.context.adapter,
+		slotKey,
+		ownerRowId,
+		streampaySubscriptionId,
+		log: logger(ctx),
 	});
-	if (!holder || holder.id === ownerRowId) return;
-	if (holder.streampaySubscriptionId === streampaySubscriptionId) {
-		throw new Error(
-			`StreamPay sub=${streampaySubscriptionId} was linked to row=${holder.id} concurrently. Retry delivery.`,
-		);
-	}
-	if (holder.status !== "incomplete" || holder.streampaySubscriptionId) {
-		throw new SubscriptionCorrelationError(
-			`StreamPay sub=${streampaySubscriptionId} needs the billing slot held by live row=${holder.id} (${holder.status}). Resolve the duplicate subscription, then replay.`,
-		);
-	}
-	if (holder.streampayPaymentLinkId) {
-		try {
-			await deactivatePaymentLink(client, holder.streampayPaymentLinkId, logger(ctx));
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			logger(ctx).error(
-				`payment link=${holder.streampayPaymentLinkId} of released row=${holder.id} could not be deactivated and may still be paid; deactivate it manually: ${message}`,
-			);
-		}
-	}
-	const released = await ctx.context.adapter.update<Subscription>({
-		model: SUBSCRIPTION_MODEL,
-		update: { status: "incomplete_expired", activeSlotKey: null, updatedAt: new Date() },
-		where: [
-			{ field: "id", value: holder.id },
-			{ field: "status", value: "incomplete" },
-			{ field: "activeSlotKey", value: slotKey },
-			{ field: "streampayPaymentLinkId", value: holder.streampayPaymentLinkId ?? null },
-		],
-	});
-	if (!released) {
-		throw new Error(`Checkout reservation row=${holder.id} changed while releasing its slot.`);
-	}
-	logger(ctx).warn(
-		`released checkout reservation row=${holder.id} for paid StreamPay sub=${streampaySubscriptionId}.`,
-	);
 }
 
 async function linkReservedRow(
@@ -702,50 +268,18 @@ async function linkReservedRow(
 	);
 }
 
-async function updateReconciledSubscription(
+function updateReconciledSubscription(
 	ctx: SyncContext,
 	client: StreamPayClient,
 	existing: Subscription,
 	projected: Partial<Subscription>,
 	streampaySubscriptionId: string,
 ): Promise<Subscription> {
-	if (
-		existing.providerUpdatedAt instanceof Date &&
-		projected.providerUpdatedAt instanceof Date &&
-		projected.providerUpdatedAt.getTime() < existing.providerUpdatedAt.getTime()
-	) {
-		throw new Error(
-			`StreamPay returned stale subscription state for sub=${streampaySubscriptionId}. Retry reconciliation.`,
-		);
-	}
-	if (projected.activeSlotKey && projected.activeSlotKey !== existing.activeSlotKey) {
-		await takeSlotFromReservation(
-			ctx,
-			client,
-			projected.activeSlotKey,
-			existing.id,
-			streampaySubscriptionId,
-		);
-	}
-	const updated = await ctx.context.adapter.update<Subscription>({
-		model: SUBSCRIPTION_MODEL,
-		update: projected,
-		where: [
-			{ field: "id", value: existing.id },
-			{ field: "providerUpdatedAt", value: existing.providerUpdatedAt ?? null },
-			{ field: "streampaySubscriptionId", value: existing.streampaySubscriptionId ?? null },
-			{ field: "streampayConsumerId", value: existing.streampayConsumerId ?? null },
-			{ field: "status", value: existing.status },
-			{ field: "billingStatus", value: existing.billingStatus },
-			{ field: "renewedCycleNumber", value: existing.renewedCycleNumber ?? null },
-		],
+	return persistReconciledProjection(ctx.context.adapter, existing, projected, {
+		streampaySubscriptionId,
+		takeSlot: (slotKey) =>
+			takeSlotFromReservation(ctx, client, slotKey, existing.id, streampaySubscriptionId),
 	});
-	if (!updated) {
-		throw new Error(
-			`Subscription state changed during reconciliation for sub=${streampaySubscriptionId}. Retry delivery.`,
-		);
-	}
-	return updated;
 }
 
 async function reconcileFromStreamPay(
@@ -947,6 +481,121 @@ async function reconcileFromStreamPay(
 	return { row, stream };
 }
 
+interface SubscriptionEventOptions {
+	retryOnCallbackError: boolean;
+	retryingRenewalCallback: boolean;
+	/** The inbox table exists, so a renewal lock whose event already completed can be released. */
+	inboxEnabled: boolean;
+}
+
+function isRenewalCallbackRetry(attempt: WebhookInboxAttempt): boolean {
+	return (
+		attempt.previousErrorCode === RENEWAL_CALLBACK_FAILURE_CODE ||
+		attempt.previousError?.startsWith(LEGACY_RENEWAL_CALLBACK_FAILURE_PREFIX) === true
+	);
+}
+
+/**
+ * Sync reconciles from StreamPay's current state rather than from the event, so subscription
+ * event types added after this release are reconciled too and only fire no callback.
+ */
+function isSubscriptionSyncEvent(
+	payload: StreamPayWebhookEnvelope,
+): payload is StreamPayWebhookPayload {
+	return payload.entity_type === "SUBSCRIPTION" || payload.event_type === "INVOICE_COMPLETED";
+}
+
+async function processSubscriptionEvent(
+	ctx: SyncContext,
+	payload: StreamPayWebhookPayload,
+	client: StreamPayClient,
+	plans: ResolvedPlans,
+	callbacks: SubscriptionCallbacks,
+	options: SubscriptionEventOptions,
+): Promise<void> {
+	if (
+		payload.event_type === "INVOICE_COMPLETED" ||
+		payload.event_type === "SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY"
+	) {
+		await handleRenewalEvidence(
+			ctx,
+			payload,
+			client,
+			plans,
+			callbacks,
+			options.retryOnCallbackError,
+			options.retryingRenewalCallback,
+			options.inboxEnabled,
+		);
+		return;
+	}
+	const { row, stream } = await reconcileFromStreamPay(ctx, payload, client, plans);
+	if (!row) return;
+	const user = await resolveRowUser(ctx, row);
+	await dispatchSubscriptionCallback(
+		ctx,
+		payload,
+		{ subscription: row, streampaySubscription: stream, user, event: payload },
+		callbacks,
+		options.retryOnCallbackError,
+	);
+}
+
+/** The inbox scope that reconciles subscription rows from StreamPay events. */
+export function subscriptionInboxScope(args: {
+	client: StreamPayClient;
+	plans: () => Promise<ResolvedPlans>;
+	callbacks: SubscriptionCallbacks;
+	maxAttempts?: number;
+	retryOnCallbackError?: boolean;
+	retryingRenewalCallback?: boolean;
+	/** Defaults to true: the scope runs inside the inbox, so its table exists. */
+	inboxEnabled?: boolean;
+}): WebhookInboxScope {
+	return {
+		eventIdPrefix: null,
+		maxAttempts: Math.max(1, args.maxAttempts ?? DEFAULT_MAX_WEBHOOK_ATTEMPTS),
+		isPermanentFailure: (err) => classifyWebhookFailure(err) === "PERMANENT",
+		prepare: (payload) => {
+			if (!isSubscriptionSyncEvent(payload)) return null;
+			return async (ctx, attempt) =>
+				processSubscriptionEvent(ctx, payload, args.client, await args.plans(), args.callbacks, {
+					retryOnCallbackError: args.retryOnCallbackError !== false,
+					retryingRenewalCallback:
+						args.retryingRenewalCallback === true || isRenewalCallbackRetry(attempt),
+					inboxEnabled: args.inboxEnabled !== false,
+				});
+		},
+		onDiscard: releaseRenewalCallbackOwner,
+	};
+}
+
+/** A discarded renewal event can never deliver its callback, so it must stop blocking the next cycle. */
+async function releaseRenewalCallbackOwner(
+	ctx: SyncContext,
+	row: { eventId: string; eventType: string },
+): Promise<void> {
+	if (
+		row.eventType !== "INVOICE_COMPLETED" &&
+		row.eventType !== "SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY"
+	) {
+		return;
+	}
+	const owner = await ctx.context.adapter.findOne<Subscription>({
+		model: SUBSCRIPTION_MODEL,
+		where: [{ field: "renewalCallbackEventId", value: row.eventId }],
+	});
+	if (!owner) return;
+	await ctx.context.adapter.update({
+		model: SUBSCRIPTION_MODEL,
+		update: { renewalCallbackEventId: null },
+		where: [
+			{ field: "id", value: owner.id },
+			{ field: "renewalCallbackEventId", value: row.eventId },
+		],
+	});
+}
+
 export async function syncWebhookPayload(
 	ctx: SyncContext,
 	payload: StreamPayWebhookPayload,
@@ -964,83 +613,32 @@ export async function syncWebhookPayload(
 		inboxEnabled?: boolean;
 	} = {},
 ): Promise<void> {
-	if (payload.entity_type !== "SUBSCRIPTION" && payload.event_type !== "INVOICE_COMPLETED") {
+	if (!isSubscriptionSyncEvent(payload)) return;
+	if (options.dedupe === false) {
+		await processSubscriptionEvent(ctx, payload, client, plans, callbacks, {
+			retryOnCallbackError: options.retryOnCallbackError !== false,
+			retryingRenewalCallback: options.retryingRenewalCallback === true,
+			inboxEnabled: options.inboxEnabled === true,
+		});
 		return;
 	}
-
-	const dedupe = options.dedupe !== false;
-	const rawBody = options.rawBody ?? null;
-	const signatureHeader = options.signatureHeader ?? null;
-	const maxAttempts = Math.max(1, options.maxAttempts ?? DEFAULT_MAX_WEBHOOK_ATTEMPTS);
-	const retryOnCallbackError = options.retryOnCallbackError !== false;
-
-	let claim: ClaimAdvanceResult = { action: "process", row: null };
-	if (dedupe) {
-		claim = await claimOrAdvanceWebhookEvent(ctx, payload, rawBody, signatureHeader, maxAttempts);
-		if (claim.action === "skip" && claim.reason === "in_progress") {
-			throw new WebhookEventInProgressError(payload.event_type);
-		}
-		if (claim.action === "skip") return;
-		if (claim.action === "dead_letter") {
-			logger(ctx).warn(
-				`webhook ${payload.event_type} (${claim.row.eventId}) dead-lettered after ${claim.row.attemptCount} attempts. Replay manually.`,
-			);
-			return;
-		}
-	}
-	const trackedRowId = claim.row?.id ?? null;
-	const trackedLockId = claim.row?.lockedBy ?? undefined;
-
-	try {
-		if (
-			payload.event_type === "INVOICE_COMPLETED" ||
-			payload.event_type === "SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY"
-		) {
-			await handleRenewalEvidence(
-				ctx,
-				payload,
-				client,
-				plans,
-				callbacks,
-				retryOnCallbackError,
-				options.retryingRenewalCallback === true ||
-					claim.row?.lastError?.startsWith(
-						"Subscription callback onSubscriptionRenewed failed:",
-					) === true,
-				options.inboxEnabled ?? dedupe,
-			);
-		} else {
-			const { row, stream } = await reconcileFromStreamPay(ctx, payload, client, plans);
-			if (row) {
-				const user = await resolveRowUser(ctx, row);
-				const data: SubscriptionCallbackData = {
-					subscription: row,
-					streampaySubscription: stream,
-					user,
-					event: payload,
-				};
-				await dispatchSubscriptionCallback(ctx, payload, data, callbacks, retryOnCallbackError);
-			}
-		}
-
-		if (trackedRowId) await markWebhookEventCompleted(ctx, trackedRowId, trackedLockId);
-	} catch (err) {
-		if (trackedRowId) {
-			const deadLetter =
-				classifyWebhookFailure(err) === "PERMANENT" ||
-				(claim.row?.attemptCount ?? 0) >= maxAttempts;
-			await recordWebhookEventFailure(
-				ctx,
-				trackedRowId,
-				rawBody,
-				signatureHeader,
-				err,
-				trackedLockId,
-				deadLetter,
-			);
-		}
-		throw err;
-	}
+	const scope = subscriptionInboxScope({
+		client,
+		plans: async () => plans,
+		callbacks,
+		...(options.maxAttempts !== undefined && { maxAttempts: options.maxAttempts }),
+		...(options.retryOnCallbackError !== undefined && {
+			retryOnCallbackError: options.retryOnCallbackError,
+		}),
+		...(options.retryingRenewalCallback !== undefined && {
+			retryingRenewalCallback: options.retryingRenewalCallback,
+		}),
+		...(options.inboxEnabled !== undefined && { inboxEnabled: options.inboxEnabled }),
+	});
+	await deliverWebhookEvent(ctx, scope, payload, {
+		rawBody: options.rawBody ?? null,
+		signatureHeader: options.signatureHeader ?? null,
+	});
 }
 
 /**
@@ -1200,7 +798,7 @@ async function handleRenewalEvidence(
 	// Period boundaries drift between cycles, so the provider's cycle counter identifies a renewal.
 	const tracksCycles = renewedCycle !== null && projectedCycle !== null;
 	const renewalAdvanced = tracksCycles ? projectedCycle > renewedCycle : periodAdvanced;
-	const eventId = extractEventId(payload);
+	const eventId = webhookEventId(payload);
 	let pendingCallback = existing.renewalCallbackEventId ?? null;
 	if (pendingCallback && pendingCallback !== eventId) {
 		const released =
@@ -1212,12 +810,7 @@ async function handleRenewalEvidence(
 		}
 		pendingCallback = null;
 	}
-	if (
-		!pendingCallback &&
-		existing.providerUpdatedAt instanceof Date &&
-		projected.providerUpdatedAt instanceof Date &&
-		projected.providerUpdatedAt.getTime() < existing.providerUpdatedAt.getTime()
-	) {
+	if (!pendingCallback && isOlderProviderState(existing, projected)) {
 		throw new Error(
 			`StreamPay returned stale subscription state for sub=${subscriptionId}; retry delivery.`,
 		);
@@ -1249,14 +842,10 @@ async function handleRenewalEvidence(
 			? { renewalCallbackEventId: callbackOwner }
 			: { ...projected, renewalCallbackEventId: callbackOwner },
 		where: [
-			{ field: "id", value: existing.id },
+			...lifecycleWriteGuard(existing),
 			{ field: "periodEnd", value: existing.periodEnd ?? null },
 			{ field: "currentCycleNumber", value: existing.currentCycleNumber ?? null },
-			{ field: "renewedCycleNumber", value: existing.renewedCycleNumber ?? null },
 			{ field: "renewalCallbackEventId", value: pendingCallback },
-			{ field: "providerUpdatedAt", value: existing.providerUpdatedAt ?? null },
-			{ field: "status", value: existing.status },
-			{ field: "billingStatus", value: existing.billingStatus },
 		],
 	});
 	if (!updated) {
@@ -1297,6 +886,27 @@ async function handleRenewalEvidence(
 	}
 }
 
+const LIFECYCLE_CALLBACKS: Partial<
+	Record<StreamPayWebhookPayload["event_type"], keyof SubscriptionCallbacks>
+> = {
+	SUBSCRIPTION_CREATED: "onSubscriptionCreated",
+	SUBSCRIPTION_ACTIVATED: "onSubscriptionActivated",
+	SUBSCRIPTION_CANCELED: "onSubscriptionCanceled",
+	SUBSCRIPTION_INACTIVATED: "onSubscriptionInactivated",
+	SUBSCRIPTION_CANCEL_AT_PERIOD_END: "onSubscriptionCancelScheduled",
+	SUBSCRIPTION_FROZEN: "onSubscriptionFrozen",
+	SUBSCRIPTION_FREEZE_NOW: "onSubscriptionFrozen",
+	SUBSCRIPTION_UNFREEZE_NOW: "onSubscriptionResumed",
+	SUBSCRIPTION_UNFREEZE_FUTURE: "onSubscriptionUnfreezeScheduled",
+	SUBSCRIPTION_FREEZE_CANCEL: "onSubscriptionFreezeCanceled",
+	SUBSCRIPTION_CYCLE_RENEWAL_FAILED: "onSubscriptionPaymentFailed",
+	SUBSCRIPTION_PLAN_CHANGE_SCHEDULED: "onSubscriptionPlanChangeScheduled",
+	SUBSCRIPTION_PLAN_CHANGE_CANCELED: "onSubscriptionPlanChangeCanceled",
+	SUBSCRIPTION_PLAN_CHANGED: "onSubscriptionPlanChanged",
+	SUBSCRIPTION_PLAN_CHANGE_INVOICE_REISSUED: "onSubscriptionPlanChangeInvoiceReissued",
+	SUBSCRIPTION_PLAN_UPDATED: "onSubscriptionPlanUpdated",
+};
+
 async function dispatchSubscriptionCallback(
 	ctx: SyncContext,
 	payload: StreamPayWebhookPayload,
@@ -1304,146 +914,9 @@ async function dispatchSubscriptionCallback(
 	callbacks: SubscriptionCallbacks,
 	retryOnCallbackError: boolean,
 ): Promise<void> {
-	switch (payload.event_type) {
-		case "SUBSCRIPTION_CREATED":
-			await fireCallback(
-				ctx,
-				callbacks.onSubscriptionCreated,
-				data,
-				"onSubscriptionCreated",
-				retryOnCallbackError,
-			);
-			return;
-		case "SUBSCRIPTION_ACTIVATED":
-			await fireCallback(
-				ctx,
-				callbacks.onSubscriptionActivated,
-				data,
-				"onSubscriptionActivated",
-				retryOnCallbackError,
-			);
-			return;
-		case "SUBSCRIPTION_CANCELED":
-			await fireCallback(
-				ctx,
-				callbacks.onSubscriptionCanceled,
-				data,
-				"onSubscriptionCanceled",
-				retryOnCallbackError,
-			);
-			return;
-		case "SUBSCRIPTION_INACTIVATED":
-			await fireCallback(
-				ctx,
-				callbacks.onSubscriptionInactivated,
-				data,
-				"onSubscriptionInactivated",
-				retryOnCallbackError,
-			);
-			return;
-		case "SUBSCRIPTION_CANCEL_AT_PERIOD_END":
-			await fireCallback(
-				ctx,
-				callbacks.onSubscriptionCancelScheduled,
-				data,
-				"onSubscriptionCancelScheduled",
-				retryOnCallbackError,
-			);
-			return;
-		case "SUBSCRIPTION_FROZEN":
-		case "SUBSCRIPTION_FREEZE_NOW":
-			await fireCallback(
-				ctx,
-				callbacks.onSubscriptionFrozen,
-				data,
-				"onSubscriptionFrozen",
-				retryOnCallbackError,
-			);
-			return;
-		case "SUBSCRIPTION_UNFREEZE_NOW":
-			await fireCallback(
-				ctx,
-				callbacks.onSubscriptionResumed,
-				data,
-				"onSubscriptionResumed",
-				retryOnCallbackError,
-			);
-			return;
-		case "SUBSCRIPTION_UNFREEZE_FUTURE":
-			await fireCallback(
-				ctx,
-				callbacks.onSubscriptionUnfreezeScheduled,
-				data,
-				"onSubscriptionUnfreezeScheduled",
-				retryOnCallbackError,
-			);
-			return;
-		case "SUBSCRIPTION_FREEZE_CANCEL":
-			await fireCallback(
-				ctx,
-				callbacks.onSubscriptionFreezeCanceled,
-				data,
-				"onSubscriptionFreezeCanceled",
-				retryOnCallbackError,
-			);
-			return;
-		case "SUBSCRIPTION_CYCLE_RENEWAL_FAILED":
-			await fireCallback(
-				ctx,
-				callbacks.onSubscriptionPaymentFailed,
-				data,
-				"onSubscriptionPaymentFailed",
-				retryOnCallbackError,
-			);
-			return;
-		case "SUBSCRIPTION_PLAN_CHANGE_SCHEDULED":
-			await fireCallback(
-				ctx,
-				callbacks.onSubscriptionPlanChangeScheduled,
-				data,
-				"onSubscriptionPlanChangeScheduled",
-				retryOnCallbackError,
-			);
-			return;
-		case "SUBSCRIPTION_PLAN_CHANGE_CANCELED":
-			await fireCallback(
-				ctx,
-				callbacks.onSubscriptionPlanChangeCanceled,
-				data,
-				"onSubscriptionPlanChangeCanceled",
-				retryOnCallbackError,
-			);
-			return;
-		case "SUBSCRIPTION_PLAN_CHANGED":
-			await fireCallback(
-				ctx,
-				callbacks.onSubscriptionPlanChanged,
-				data,
-				"onSubscriptionPlanChanged",
-				retryOnCallbackError,
-			);
-			return;
-		case "SUBSCRIPTION_PLAN_CHANGE_INVOICE_REISSUED":
-			await fireCallback(
-				ctx,
-				callbacks.onSubscriptionPlanChangeInvoiceReissued,
-				data,
-				"onSubscriptionPlanChangeInvoiceReissued",
-				retryOnCallbackError,
-			);
-			return;
-		case "SUBSCRIPTION_PLAN_UPDATED":
-			await fireCallback(
-				ctx,
-				callbacks.onSubscriptionPlanUpdated,
-				data,
-				"onSubscriptionPlanUpdated",
-				retryOnCallbackError,
-			);
-			return;
-		default:
-			return;
-	}
+	const callbackName = LIFECYCLE_CALLBACKS[payload.event_type];
+	if (!callbackName) return;
+	await fireCallback(ctx, callbacks[callbackName], data, callbackName, retryOnCallbackError);
 }
 
 export type WebhookSyncFailure = "PERMANENT" | "TRANSIENT";

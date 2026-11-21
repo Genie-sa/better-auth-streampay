@@ -1,12 +1,9 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it, type Mock, vi } from "vitest";
 import { subscriptions, webhooks } from "../../src";
-import {
-	type SyncContext,
-	syncWebhookPayload,
-	type WebhookEventRow,
-} from "../../src/plugins/subscriptions/sync";
+import { type SyncContext, syncWebhookPayload } from "../../src/plugins/subscriptions/sync";
 import type { WebhookEnvelopeHandler } from "../../src/webhooks/dispatcher";
+import type { WebhookEventRow } from "../../src/webhooks/inbox";
 import { createStreamPayTestInstance } from "../utils/auth-instance";
 import { createMockWebhookPayload } from "../utils/subscription-helpers";
 

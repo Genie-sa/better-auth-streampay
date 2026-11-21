@@ -2,10 +2,11 @@ import { APIError, createAuthEndpoint, sessionMiddleware } from "better-auth/api
 import { z } from "zod";
 import type { StreamPayClient, StreamPayOptions } from "../types";
 import { findConsumerByExternalId } from "../utils/consumer";
+import { getCurrentConsumerUser } from "../utils/consumer-link";
 import type { StreamPayLoggerContext } from "../utils/ensure-consumer";
 import { rejectUnauthorized, toAPIError } from "../utils/errors";
 import { getLogger } from "../utils/logger";
-import { asSessionUser, getCurrentConsumerUser, type StreamPaySessionUser } from "../utils/session";
+import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
 
 export interface PortalOptions {
 	pageSize?: number;

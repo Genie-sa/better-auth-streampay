@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { admin, subscriptions, webhooks } from "../src";
-import type { SyncContext, WebhookEventRow } from "../src/plugins/subscriptions/sync";
+import type { SyncContext } from "../src/plugins/subscriptions/sync";
+import type { WebhookEventRow } from "../src/webhooks/inbox";
 import { callAuthEndpoint, createStreamPayTestInstance } from "./utils/auth-instance";
 
 const sourceEvent = "SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY:subscription:2026-10-10T00:00:00.000Z";
