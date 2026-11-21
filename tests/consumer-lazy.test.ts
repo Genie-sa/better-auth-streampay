@@ -40,6 +40,23 @@ import {
 	type MockedStreamPayClient,
 } from "./utils/mocks";
 
+async function storedLink(ctx: ReturnType<typeof createMockContext>, userId: string) {
+	const user = await ctx.context.adapter.findOne<{ streampayConsumerId?: string | null }>({
+		model: "user",
+		where: [{ field: "id", value: userId }],
+	});
+	return user?.streampayConsumerId ?? null;
+}
+
+function expectNoLinkWrite(ctx: ReturnType<typeof createMockContext>) {
+	expect(ctx.context.adapter.update).not.toHaveBeenCalledWith(
+		expect.objectContaining({
+			model: "user",
+			update: { streampayConsumerId: expect.any(String) },
+		}),
+	);
+}
+
 describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 	let mockClient: MockedStreamPayClient;
 
@@ -95,10 +112,7 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 
 			expect(result).toEqual({ consumerId: "cons_prior", created: false });
 			expect(mockClient.createConsumer).not.toHaveBeenCalled();
-			expect(ctx.context.internalAdapter.updateUser).toHaveBeenCalledWith(
-				"user-1",
-				expect.objectContaining({ streampayConsumerId: "cons_prior" }),
-			);
+			expect(await storedLink(ctx, "user-1")).toBe("cons_prior");
 		});
 
 		it("rejects a recovered consumer linked to another local user", async () => {
@@ -115,7 +129,7 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 				code: "CONFLICT",
 				errorCode: "STREAMPAY_CONSUMER_LINK_CONFLICT",
 			});
-			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
+			expectNoLinkWrite(ctx);
 			expect(mockClient.createConsumer).not.toHaveBeenCalled();
 		});
 
@@ -130,7 +144,9 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 			await expect(
 				ensureConsumerForUser(options, ctx, { id: "user-1", email: "a@b.com" }),
 			).resolves.toEqual({ consumerId: "cons_prior", created: false });
-			expect(ctx.context.internalAdapter.updateUser).toHaveBeenCalled();
+			expect(ctx.context.adapter.update).toHaveBeenCalledWith(
+				expect.objectContaining({ update: { streampayConsumerId: "cons_prior" } }),
+			);
 		});
 
 		it("creates a consumer with external_id and persists the id on the user row", async () => {
@@ -153,10 +169,7 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 					external_id: "user-1",
 				}),
 			);
-			expect(ctx.context.internalAdapter.updateUser).toHaveBeenCalledWith(
-				"user-1",
-				expect.objectContaining({ streampayConsumerId: "cons_new" }),
-			);
+			expect(await storedLink(ctx, "user-1")).toBe("cons_new");
 		});
 
 		it("handles DUPLICATE_CONSUMER via resolve-and-reuse when the existing consumer is stranded", async () => {
@@ -182,7 +195,7 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 			});
 
 			expect(result).toEqual({ consumerId: "cons_stranded", created: false });
-			expect(ctx.context.internalAdapter.updateUser).toHaveBeenCalled();
+			expect(await storedLink(ctx, "user-1")).toBe("cons_stranded");
 		});
 
 		it("checks local ownership before reassigning a duplicate consumer", async () => {
@@ -205,7 +218,7 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 				errorCode: "STREAMPAY_CONSUMER_LINK_CONFLICT",
 			});
 			expect(mockClient.updateConsumer).not.toHaveBeenCalled();
-			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
+			expectNoLinkWrite(ctx);
 		});
 
 		it("fails closed when duplicate-consumer external_id backfill fails", async () => {
@@ -227,9 +240,7 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 				code: "INTERNAL_SERVER_ERROR",
 				errorCode: "STREAMPAY_CONSUMER_LINK_WRITE_FAILED",
 			});
-			expect(ctx.context.internalAdapter.updateUser).toHaveBeenCalledWith("user-1", {
-				streampayConsumerId: "cons_stranded",
-			});
+			expect(await storedLink(ctx, "user-1")).toBeNull();
 			expect(ctx.context.adapter.update).toHaveBeenCalledWith({
 				model: "user",
 				where: [
@@ -311,7 +322,7 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 			).rejects.toMatchObject({ code: "INTERNAL_SERVER_ERROR" });
 			expect(mockClient.listConsumers).toHaveBeenCalledTimes(2);
 			expect(mockClient.createConsumer).toHaveBeenCalledTimes(1);
-			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
+			expectNoLinkWrite(ctx);
 		});
 
 		it("surfaces the provider failure and logs when the recovery search fails", async () => {
@@ -329,7 +340,7 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 			expect(ctx.context.logger.warn).toHaveBeenCalledWith(
 				expect.stringContaining("consumer recovery search failed for user=user-1"),
 			);
-			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
+			expectNoLinkWrite(ctx);
 		});
 
 		it("recovers a lost creation response by exact external ID without another create", async () => {
@@ -347,9 +358,7 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 				ensureConsumerForUser(options, ctx, { id: "user-1", email: "a@b.com" }),
 			).resolves.toEqual({ consumerId: "cons_created", created: false });
 			expect(mockClient.createConsumer).toHaveBeenCalledTimes(1);
-			expect(ctx.context.internalAdapter.updateUser).toHaveBeenCalledWith("user-1", {
-				streampayConsumerId: "cons_created",
-			});
+			expect(await storedLink(ctx, "user-1")).toBe("cons_created");
 		});
 
 		it("rejects recovery when another local user owns the customer", async () => {
@@ -369,14 +378,14 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 					email: "a@b.com",
 				}),
 			).rejects.toMatchObject({ code: "CONFLICT", errorCode: "STREAMPAY_CONSUMER_LINK_CONFLICT" });
-			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
+			expectNoLinkWrite(ctx);
 		});
 
 		it("fails closed when writing streampayConsumerId to the user row fails", async () => {
 			mockClient.createConsumer.mockResolvedValue(createMockConsumer({ id: "cons_created" }));
 			const options = createTestStreamPayOptions({ client: mockClient });
 			const ctx = createMockContext();
-			ctx.context.internalAdapter.updateUser.mockRejectedValue(new Error("db down"));
+			ctx.context.adapter.update = vi.fn().mockRejectedValue(new Error("db down"));
 
 			await expect(
 				ensureConsumerForUser(options, ctx, {
@@ -392,12 +401,111 @@ describe("lazy consumer provisioning (createConsumerOnSignUp: false)", () => {
 			);
 		});
 
+		it("stores the link with one guarded write and never republishes it", async () => {
+			mockClient.createConsumer.mockResolvedValue(createMockConsumer({ id: "cons_created" }));
+			const ctx = createMockContext();
+
+			await ensureConsumerForUser(createTestStreamPayOptions({ client: mockClient }), ctx, {
+				id: "user-1",
+				email: "a@b.com",
+			});
+
+			expect(ctx.context.adapter.update).toHaveBeenCalledTimes(1);
+			expect(ctx.context.adapter.update).toHaveBeenCalledWith({
+				model: "user",
+				where: [
+					{ field: "id", value: "user-1" },
+					{ field: "streampayConsumerId", value: null },
+				],
+				update: { streampayConsumerId: "cons_created" },
+			});
+			expect(ctx.context.internalAdapter.updateUser).not.toHaveBeenCalled();
+		});
+
+		it("leaves the winner's link alone when its own duplicate backfill fails after losing the claim", async () => {
+			const ctx = createMockContext();
+			mockClient.createConsumer.mockRejectedValue(
+				mockApiError(409, { error: { code: "DUPLICATE_CONSUMER" } }, "POST", "/api/v2/consumers"),
+			);
+			mockClient.listConsumers.mockResolvedValue(
+				createMockConsumerList([
+					createMockConsumer({ id: "cons_shared", email: "a@b.com", external_id: null }),
+				]),
+			);
+			mockClient.updateConsumer.mockRejectedValue(mockApiError(503, "unavailable"));
+			const update = ctx.context.adapter.update;
+			ctx.context.adapter.update = vi.fn(async (input) => {
+				const winner = { ...input, update: { streampayConsumerId: "cons_shared" } };
+				await update?.(winner);
+				return null;
+			});
+
+			await expect(
+				ensureConsumerForUser(createTestStreamPayOptions({ client: mockClient }), ctx, {
+					id: "user-1",
+					email: "a@b.com",
+				}),
+			).resolves.toEqual({ consumerId: "cons_shared", created: false });
+
+			expect(mockClient.updateConsumer).not.toHaveBeenCalled();
+			expect(await storedLink(ctx, "user-1")).toBe("cons_shared");
+		});
+
+		it("converges concurrent first checkouts on the first stored consumer and deletes the other", async () => {
+			let created = 0;
+			mockClient.createConsumer.mockImplementation(async () =>
+				createMockConsumer({ id: `cons_${++created}`, external_id: "user-race" }),
+			);
+			mockClient.deleteConsumer.mockResolvedValue(undefined);
+			const ctx = createMockContext();
+			const user = { id: "user-race", email: "race@example.com" };
+			const options = createTestStreamPayOptions({ client: mockClient });
+
+			const [first, second] = await Promise.all([
+				ensureConsumerForUser(options, ctx, user),
+				ensureConsumerForUser(options, ctx, user),
+			]);
+
+			expect(created).toBe(2);
+			expect(second.consumerId).toBe(first.consumerId);
+			const stored = await ctx.context.adapter.findOne<{ streampayConsumerId: string }>({
+				model: "user",
+				where: [{ field: "id", value: "user-race" }],
+			});
+			expect(stored?.streampayConsumerId).toBe(first.consumerId);
+			const orphan = first.consumerId === "cons_1" ? "cons_2" : "cons_1";
+			expect(mockClient.deleteConsumer).toHaveBeenCalledWith(orphan);
+			expect(mockClient.deleteConsumer).toHaveBeenCalledTimes(1);
+		});
+
+		it("uses a link stored after the session was issued instead of provisioning again", async () => {
+			const sessionUser = createMockUser({ id: "user-cached", streampayConsumerId: null });
+			const ctx = createMockContext({ user: sessionUser });
+			await ctx.context.adapter.update?.({
+				model: "user",
+				where: [{ field: "id", value: "user-cached" }],
+				update: { streampayConsumerId: "cons_stored" },
+			});
+
+			await expect(
+				ensureConsumerForUser(createTestStreamPayOptions({ client: mockClient }), ctx, {
+					id: "user-cached",
+					email: "cached@example.com",
+					streampayConsumerId: null,
+				}),
+			).resolves.toEqual({ consumerId: "cons_stored", created: false });
+
+			expect(mockClient.listConsumers).not.toHaveBeenCalled();
+			expect(mockClient.createConsumer).not.toHaveBeenCalled();
+		});
+
 		it("reports a concurrent unique-write loss as an ownership conflict", async () => {
 			mockClient.createConsumer.mockResolvedValue(createMockConsumer({ id: "cons_created" }));
 			const options = createTestStreamPayOptions({ client: mockClient });
 			const ctx = createMockContext();
-			ctx.context.internalAdapter.updateUser.mockRejectedValue(new Error("unique constraint"));
+			ctx.context.adapter.update = vi.fn().mockRejectedValue(new Error("unique constraint"));
 			vi.mocked(ctx.context.adapter.findOne)
+				.mockResolvedValueOnce(null)
 				.mockResolvedValueOnce(null)
 				.mockResolvedValueOnce({ id: "user-other" });
 

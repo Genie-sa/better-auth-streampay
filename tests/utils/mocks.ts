@@ -164,8 +164,39 @@ export interface MockCtx {
 	json: Mock<(value: unknown) => unknown>;
 }
 
+type StoredUser = Record<string, unknown> & { id: string };
+
+function matchesWhere(row: Record<string, unknown>, where: Where[]): boolean {
+	return where.every((clause) => (row[clause.field] ?? null) === (clause.value ?? null));
+}
+
+/**
+ * A user table that, like the database, makes link writes visible to later reads. Users the
+ * test never registered are treated as existing unlinked rows when first written.
+ */
+function createUserStore(sessionUser: MockUser | null | undefined) {
+	const users = new Map<string, StoredUser>();
+	if (sessionUser) users.set(sessionUser.id, { ...sessionUser });
+	return {
+		findOne(where: Where[]): StoredUser | null {
+			const row = [...users.values()].find((candidate) => matchesWhere(candidate, where));
+			return row ? { ...row } : null;
+		},
+		update(where: Where[], update: Record<string, unknown>): StoredUser | null {
+			const id = where.find((clause) => clause.field === "id")?.value;
+			if (typeof id !== "string") return null;
+			const row = users.get(id) ?? { id, streampayConsumerId: null };
+			if (!matchesWhere(row, where)) return null;
+			const next = { ...row, ...update };
+			users.set(id, next);
+			return { ...next };
+		},
+	};
+}
+
 export const createMockContext = (options: MockCtxOptions = {}): MockCtx => {
 	const user = "user" in options ? options.user : createMockUser();
+	const userStore = createUserStore(user);
 	return {
 		context: {
 			baseURL: "http://localhost:3000",
@@ -182,18 +213,24 @@ export const createMockContext = (options: MockCtxOptions = {}): MockCtx => {
 			adapter: {
 				findOne: vi
 					.fn()
-					.mockImplementation(async ({ model, where }) =>
-						model === "user" &&
-						where.length === 1 &&
-						where[0].field === "id" &&
-						user &&
-						where[0].value === user.id
-							? { ...user }
-							: null,
+					.mockImplementation(async ({ model, where }: { model: string; where: Where[] }) =>
+						model === "user" ? userStore.findOne(where) : null,
 					) as unknown as MockCtx["context"]["adapter"]["findOne"],
 				findMany: vi.fn().mockResolvedValue([]),
 				create: vi.fn().mockResolvedValue(undefined),
-				update: vi.fn().mockResolvedValue(undefined),
+				update: vi
+					.fn()
+					.mockImplementation(
+						async ({
+							model,
+							where,
+							update,
+						}: {
+							model: string;
+							where: Where[];
+							update: Record<string, unknown>;
+						}) => (model === "user" ? userStore.update(where, update) : undefined),
+					),
 				delete: vi.fn().mockResolvedValue(undefined),
 			},
 		},

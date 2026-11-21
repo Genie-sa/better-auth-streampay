@@ -1,26 +1,24 @@
+import type { SubscriptionDetailed } from "@streamsdk/typescript";
 import type { GenericEndpointContext } from "better-auth";
-import { APIError } from "better-auth/api";
-import { $ERROR_CODES } from "../../error-codes";
 import type { StreamPayOptions } from "../../types";
 import { getLogger } from "../../utils/logger";
 import type { StreamPayWebhookPayload } from "../../webhooks/events";
-import { isKnownStreamPayWebhookPayload, isStreamPayWebhookEnvelope } from "../../webhooks/events";
+import {
+	createWebhookInbox,
+	deliverWebhookEvent,
+	type WebhookInbox,
+	type WebhookInboxScope,
+} from "../../webhooks/inbox";
+import { toSyncContext } from "./adapter";
 import { buildSubscriptionEndpoints } from "./endpoints";
-import { resolvePlans, validatePlansShape } from "./plans";
+import { type ResolvedPlans, resolvePlans, validatePlansShape } from "./plans";
+import { applySubscriptionProjection, syncSubscriptionFromUpstream } from "./reconcile";
 import { subscriptionTable, webhookEventTable } from "./schema";
 import { SUBSCRIPTION_STATUSES } from "./status";
 import {
-	claimWebhookEventForReplay,
 	classifyWebhookFailure,
-	DEFAULT_MAX_WEBHOOK_ATTEMPTS,
-	isStillDueWebhookEvent,
-	markWebhookEventCompleted,
-	parkUnreplayableWebhookEvent,
-	recordWebhookEventFailure,
-	type SyncContext,
+	subscriptionInboxScope,
 	syncWebhookPayload,
-	WEBHOOK_EVENT_MODEL,
-	type WebhookEventRow,
 	type WebhookReplayOptions,
 } from "./sync";
 import type { StreamPayPlanLike, SubscriptionsOptions } from "./types";
@@ -75,12 +73,26 @@ export interface StreamPayPluginRegistry {
 		meta?: { rawBody?: string; signatureHeader?: string | null },
 	) => Promise<void>;
 
+	/** Shared by every plugin that stores events in the webhook inbox table. */
+	webhookInbox?: WebhookInbox;
+
+	/**
+	 * Re-projects a local subscription row from StreamPay after an out-of-band provider change,
+	 * using the configured plan catalog. Never throws: a failed projection reconciles on the next
+	 * webhook.
+	 */
+	refreshSubscriptionProjection?: (
+		ctx: GenericEndpointContext,
+		subscription: { streampaySubscriptionId: string } | { snapshot: SubscriptionDetailed },
+		source: string,
+	) => Promise<void>;
+
 	replayWebhookEvent?: (
 		ctx: GenericEndpointContext,
 		eventId: string,
-		/** @deprecated No effect. */
 		options?: WebhookReplayOptions,
 	) => Promise<{ replayed: true; eventId: string }>;
+	/** @deprecated Use `replayWebhookEvent`; both replay any inbox event. */
 	replayWebhookHandler?: NonNullable<StreamPayPluginRegistry["replayWebhookEvent"]>;
 }
 
@@ -108,25 +120,65 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 		const plansRef = () => resolvePlans(subsOptions.plans);
 
 		if (registry) {
-			registry.subscriptionWebhookSync = async (
-				ctx: GenericEndpointContext,
-				payload: StreamPayWebhookPayload,
-				meta?: { rawBody?: string; signatureHeader?: string | null },
-			) => {
-				const syncCtx: SyncContext = {
-					context: ctx.context as SyncContext["context"],
-				};
-				const plans = await plansRef();
+			const scope = subscriptionInboxScope({
+				client: options.client,
+				plans: plansRef,
+				callbacks: subsOptions,
+				...(subsOptions.maxWebhookAttempts !== undefined && {
+					maxAttempts: subsOptions.maxWebhookAttempts,
+				}),
+				retryOnCallbackError: subsOptions.retryOnCallbackError !== false,
+			});
+			// Without its own inbox table the scope still releases renewal owners of rows it stored earlier.
+			registerWebhookInboxScope(registry, scope, { replayable: dedupeEnabled });
+
+			registry.refreshSubscriptionProjection = async (ctx, subscription, source) => {
+				const log = getLogger(ctx);
+				let plans: ResolvedPlans | null = null;
 				try {
-					await syncWebhookPayload(syncCtx, payload, options.client, plans, subsOptions, {
-						dedupe: dedupeEnabled,
-						rawBody: meta?.rawBody ?? null,
-						signatureHeader: meta?.signatureHeader ?? null,
-						...(subsOptions.maxWebhookAttempts !== undefined && {
-							maxAttempts: subsOptions.maxWebhookAttempts,
-						}),
-						retryOnCallbackError: subsOptions.retryOnCallbackError !== false,
-					});
+					plans = await plansRef();
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					log.warn(
+						`${source}: plan catalog unavailable (${message}); projecting without plan fields.`,
+					);
+				}
+				const adapter = toSyncContext(ctx).context.adapter;
+				if ("snapshot" in subscription) {
+					await applySubscriptionProjection(adapter, subscription.snapshot, plans, log, source);
+					return;
+				}
+				await syncSubscriptionFromUpstream(
+					options.client,
+					adapter,
+					subscription.streampaySubscriptionId,
+					plans,
+					log,
+					source,
+				);
+			};
+
+			registry.subscriptionWebhookSync = async (ctx, payload, meta) => {
+				const syncCtx = toSyncContext(ctx);
+				try {
+					if (dedupeEnabled) {
+						await deliverWebhookEvent(syncCtx, scope, payload, {
+							rawBody: meta?.rawBody ?? null,
+							signatureHeader: meta?.signatureHeader ?? null,
+						});
+					} else {
+						await syncWebhookPayload(
+							syncCtx,
+							payload,
+							options.client,
+							await plansRef(),
+							subsOptions,
+							{
+								dedupe: false,
+								retryOnCallbackError: subsOptions.retryOnCallbackError !== false,
+							},
+						);
+					}
 				} catch (err) {
 					if (classifyWebhookFailure(err) === "PERMANENT") {
 						const msg = err instanceof Error ? err.message : String(err);
@@ -138,96 +190,6 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 					throw err;
 				}
 			};
-
-			if (dedupeEnabled) {
-				registry.replayWebhookEvent = async (ctx, eventId, replayOptions) => {
-					if (eventId.startsWith("handlers:") && registry.replayWebhookHandler) {
-						return registry.replayWebhookHandler(ctx, eventId, replayOptions);
-					}
-					const syncCtx: SyncContext = {
-						context: ctx.context as SyncContext["context"],
-					};
-					const row = await syncCtx.context.adapter.findOne<WebhookEventRow>({
-						model: WEBHOOK_EVENT_MODEL,
-						where: [{ field: "eventId", value: eventId }],
-					});
-					if (!row) {
-						throw new APIError("NOT_FOUND", {
-							code: $ERROR_CODES.NOT_FOUND.code,
-							message: `Webhook event ${eventId} not found.`,
-						});
-					}
-					if (
-						replayOptions?.dueAttemptCount !== undefined &&
-						!isStillDueWebhookEvent(row, replayOptions.dueAttemptCount, new Date())
-					) {
-						throw new APIError("CONFLICT", {
-							code: $ERROR_CODES.WEBHOOK_REPLAY_IN_PROGRESS.code,
-							message: `Webhook event ${eventId} is no longer due.`,
-						});
-					}
-					const unreplayable = async (message: string): Promise<never> => {
-						await parkUnreplayableWebhookEvent(syncCtx, row, message);
-						throw new APIError("BAD_REQUEST", { message });
-					};
-					if (!row.rawPayload) {
-						return unreplayable(
-							`Webhook event ${eventId} has no rawPayload — nothing to replay (already completed cleanly?).`,
-						);
-					}
-
-					let parsedPayload: unknown;
-					try {
-						parsedPayload = JSON.parse(row.rawPayload);
-					} catch {
-						return unreplayable(`Webhook event ${eventId} has malformed stored JSON.`);
-					}
-					if (
-						!isStreamPayWebhookEnvelope(parsedPayload) ||
-						!isKnownStreamPayWebhookPayload(parsedPayload)
-					) {
-						return unreplayable(`Webhook event ${eventId} has an invalid stored payload.`);
-					}
-					const payload = parsedPayload;
-					const plans = await plansRef();
-					const previousStatus = row.status;
-					const claimed = await claimWebhookEventForReplay(syncCtx, row);
-					if (!claimed?.lockedBy) {
-						throw new APIError("CONFLICT", {
-							code: $ERROR_CODES.WEBHOOK_REPLAY_IN_PROGRESS.code,
-							message: `Webhook event ${eventId} is already being replayed.`,
-						});
-					}
-
-					try {
-						await syncWebhookPayload(syncCtx, payload, options.client, plans, subsOptions, {
-							dedupe: false,
-							inboxEnabled: true,
-							retryOnCallbackError: subsOptions.retryOnCallbackError !== false,
-							retryingRenewalCallback:
-								claimed.lastError?.startsWith(
-									"Subscription callback onSubscriptionRenewed failed:",
-								) === true,
-						});
-						await markWebhookEventCompleted(syncCtx, claimed.id, claimed.lockedBy);
-						return { replayed: true, eventId };
-					} catch (err) {
-						const maxAttempts = subsOptions.maxWebhookAttempts ?? DEFAULT_MAX_WEBHOOK_ATTEMPTS;
-						await recordWebhookEventFailure(
-							syncCtx,
-							claimed.id,
-							null,
-							null,
-							err,
-							claimed.lockedBy,
-							previousStatus === "dead_letter" ||
-								classifyWebhookFailure(err) === "PERMANENT" ||
-								claimed.attemptCount >= maxAttempts,
-						);
-						throw err;
-					}
-				};
-			}
 		}
 
 		const schema = {
@@ -240,4 +202,30 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 			schema,
 		};
 	};
+}
+
+/** Registers a scope with the shared inbox and exposes replay through the registry. */
+export function registerWebhookInboxScope(
+	registry: StreamPayPluginRegistry,
+	scope: WebhookInboxScope,
+	options: { replayable: boolean },
+): void {
+	registry.webhookInbox ??= createWebhookInbox();
+	const inbox = registry.webhookInbox;
+	inbox.register(scope, options);
+	if (!inbox.isEnabled()) return;
+	const replay: NonNullable<StreamPayPluginRegistry["replayWebhookEvent"]> = (
+		ctx,
+		eventId,
+		replayOptions,
+	) =>
+		inbox.replay(
+			toSyncContext(ctx),
+			eventId,
+			replayOptions?.dueAttemptCount === undefined
+				? {}
+				: { dueAttemptCount: replayOptions.dueAttemptCount },
+		);
+	registry.replayWebhookEvent = replay;
+	registry.replayWebhookHandler = replay;
 }

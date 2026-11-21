@@ -44,11 +44,16 @@ export function reconcileProjectionAgainstExisting(
 	return projected;
 }
 
+/** Without a plan catalog the plan fields keep their stored values until the next webhook. */
 export function projectSubscriptionAgainstExisting(
 	existing: Subscription,
 	stream: SubscriptionDetailed,
+	plans: ResolvedPlans | null,
 ): Partial<Subscription> {
-	return reconcileProjectionAgainstExisting(existing, projectSubscriptionFields(stream, existing));
+	return reconcileProjectionAgainstExisting(existing, {
+		...projectSubscriptionFields(stream, existing),
+		...(plans ? projectPlanFields(stream, plans) : {}),
+	});
 }
 
 /** The slot a row must hold after the projection, or null when the projected status is terminal. */
@@ -64,6 +69,72 @@ export function liveSlotKey(
 	);
 }
 
+/** S6: provider state never moves `providerUpdatedAt` backwards. */
+export function isOlderProviderState(
+	existing: Pick<Subscription, "providerUpdatedAt">,
+	projection: Partial<Subscription>,
+): boolean {
+	return (
+		existing.providerUpdatedAt instanceof Date &&
+		projection.providerUpdatedAt instanceof Date &&
+		projection.providerUpdatedAt.getTime() < existing.providerUpdatedAt.getTime()
+	);
+}
+
+/** S7: a lifecycle write applies only to the row state its projection was computed from. */
+export function lifecycleWriteGuard(
+	existing: Subscription,
+): Array<{ field: string; value: unknown }> {
+	return [
+		{ field: "id", value: existing.id },
+		{ field: "providerUpdatedAt", value: existing.providerUpdatedAt ?? null },
+		{ field: "streampaySubscriptionId", value: existing.streampaySubscriptionId ?? null },
+		{ field: "streampayConsumerId", value: existing.streampayConsumerId ?? null },
+		{ field: "status", value: existing.status },
+		{ field: "billingStatus", value: existing.billingStatus },
+		{ field: "renewedCycleNumber", value: existing.renewedCycleNumber ?? null },
+	];
+}
+
+/**
+ * Webhook conflict policy: an older provider snapshot or a concurrent local write throws, so the
+ * inbox retries the event against fresh state. A slot the projection moves into is claimed from
+ * an unpaid reservation only after the snapshot is known to be current.
+ */
+export async function persistReconciledProjection(
+	adapter: PluginAdapter,
+	existing: Subscription,
+	projection: Partial<Subscription>,
+	options: {
+		streampaySubscriptionId: string;
+		takeSlot: (slotKey: string) => Promise<void>;
+	},
+): Promise<Subscription> {
+	if (isOlderProviderState(existing, projection)) {
+		throw new Error(
+			`StreamPay returned stale subscription state for sub=${options.streampaySubscriptionId}. Retry reconciliation.`,
+		);
+	}
+	if (projection.activeSlotKey && projection.activeSlotKey !== existing.activeSlotKey) {
+		await options.takeSlot(projection.activeSlotKey);
+	}
+	const updated = await adapter.update<Subscription>({
+		model: SUBSCRIPTION_MODEL,
+		update: projection,
+		where: lifecycleWriteGuard(existing),
+	});
+	if (!updated) {
+		throw new Error(
+			`Subscription state changed during reconciliation for sub=${options.streampaySubscriptionId}. Retry delivery.`,
+		);
+	}
+	return updated;
+}
+
+/**
+ * Endpoint conflict policy: the provider action already happened, so a losing write keeps the
+ * newer local row and returns it instead of failing the customer's request.
+ */
 export async function persistSubscriptionProjection(
 	adapter: PluginAdapter,
 	existing: Subscription,
@@ -71,10 +142,6 @@ export async function persistSubscriptionProjection(
 	log: { warn: (message: string) => void },
 	source: string,
 ): Promise<Subscription | null> {
-	const stale =
-		existing.providerUpdatedAt instanceof Date &&
-		projection.providerUpdatedAt instanceof Date &&
-		projection.providerUpdatedAt.getTime() < existing.providerUpdatedAt.getTime();
 	const slotKey = liveSlotKey(existing, projection);
 	const movesSlot = slotKey !== null && existing.activeSlotKey !== slotKey;
 	// Only webhooks take a slot from another row or flag a live holder, so endpoints move into a free slot.
@@ -85,20 +152,12 @@ export async function persistSubscriptionProjection(
 			})
 		: null;
 	const updated =
-		stale || slotHolder
+		isOlderProviderState(existing, projection) || slotHolder
 			? null
 			: await adapter.update<Subscription>({
 					model: SUBSCRIPTION_MODEL,
 					update: movesSlot ? { ...projection, activeSlotKey: slotKey } : projection,
-					where: [
-						{ field: "id", value: existing.id },
-						{ field: "providerUpdatedAt", value: existing.providerUpdatedAt ?? null },
-						{ field: "streampaySubscriptionId", value: existing.streampaySubscriptionId ?? null },
-						{ field: "streampayConsumerId", value: existing.streampayConsumerId ?? null },
-						{ field: "status", value: existing.status },
-						{ field: "billingStatus", value: existing.billingStatus },
-						{ field: "renewedCycleNumber", value: existing.renewedCycleNumber ?? null },
-					],
+					where: lifecycleWriteGuard(existing),
 				});
 	if (updated) return updated;
 	log.warn(
@@ -115,6 +174,7 @@ export async function persistSubscriptionProjection(
 export async function applySubscriptionProjection(
 	adapter: PluginAdapter,
 	stream: SubscriptionDetailed | null | undefined,
+	plans: ResolvedPlans | null,
 	log: { warn: (msg: string) => void },
 	source: string,
 ): Promise<void> {
@@ -129,7 +189,7 @@ export async function applySubscriptionProjection(
 		await persistSubscriptionProjection(
 			adapter,
 			existing,
-			projectSubscriptionAgainstExisting(existing, stream),
+			projectSubscriptionAgainstExisting(existing, stream, plans),
 			log,
 			source,
 		);
@@ -145,6 +205,7 @@ export async function syncSubscriptionFromUpstream(
 	client: { getSubscription: (id: string) => Promise<SubscriptionDetailed> },
 	adapter: PluginAdapter,
 	streampaySubscriptionId: string,
+	plans: ResolvedPlans | null,
 	log: { warn: (msg: string) => void },
 	source: string,
 	prefetched?: SubscriptionDetailed,
@@ -161,7 +222,7 @@ export async function syncSubscriptionFromUpstream(
 			return;
 		}
 	}
-	await applySubscriptionProjection(adapter, stream, log, source);
+	await applySubscriptionProjection(adapter, stream, plans, log, source);
 }
 
 export function projectSubscriptionFields(
@@ -343,6 +404,8 @@ export function projectPlanFields(
 		| "pendingSeatsEffectiveAt"
 	>
 > {
+	// A snapshot without an item list says nothing about the plan; it must not revoke access.
+	if (!Array.isArray(sub.items)) return {};
 	const currentPlan = inferPlanFromItems(sub, plans);
 	const configuredCurrent = currentPlan ? plans.byName.get(currentPlan) : undefined;
 	const currentItem = configuredCurrent

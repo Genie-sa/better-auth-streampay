@@ -17,21 +17,20 @@ import { APIError, createAuthEndpoint, sessionMiddleware } from "better-auth/api
 import { z } from "zod";
 import { $ERROR_CODES } from "../error-codes";
 import type { StreamPayClient, StreamPayOptions } from "../types";
+import { unlinkConsumer } from "../utils/consumer-link";
 import { isNotFoundError } from "../utils/ensure-consumer";
 import { toAPIError } from "../utils/errors";
 import { formatStreamPayError } from "../utils/format-error";
 import { getLogger } from "../utils/logger";
 import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
-import type { StreamPayPluginRegistry } from "./subscriptions";
 import {
-	applySubscriptionProjection,
-	completeUnchangedWebhookEvent,
-	hasLiveLease,
-	type PluginAdapter,
-	syncSubscriptionFromUpstream,
+	createWebhookInbox,
 	WEBHOOK_EVENT_MODEL,
 	type WebhookEventRow,
-} from "./subscriptions/sync";
+	type WebhookInbox,
+} from "../webhooks/inbox";
+import type { StreamPayPluginRegistry } from "./subscriptions";
+import { type PluginAdapter, toSyncContext } from "./subscriptions/adapter";
 
 interface UserWithRole {
 	role?: string | null;
@@ -209,7 +208,11 @@ function buildPaymentsEndpoints(client: StreamPayClient, adminOptions: AdminOpti
 	};
 }
 
-function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: AdminOptions) {
+function buildSubscriptionsEndpoints(
+	client: StreamPayClient,
+	adminOptions: AdminOptions,
+	registry: StreamPayPluginRegistry | undefined,
+) {
 	return {
 		adminCreateSubscription: createAuthEndpoint(
 			"/admin/streampay/subscriptions",
@@ -258,10 +261,9 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 
 				try {
 					const subscription = await client.updateSubscription(subscriptionId, patch);
-					await applySubscriptionProjection(
-						getAdapter(ctx),
-						subscription,
-						getLogger(ctx),
+					await registry?.refreshSubscriptionProjection?.(
+						ctx,
+						{ snapshot: subscription },
 						"adminUpdateSubscription",
 					);
 					return ctx.json(subscription);
@@ -330,10 +332,9 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 				const input = ctx.body;
 				try {
 					const result = await client.cancelSubscription(subscriptionId, input);
-					await applySubscriptionProjection(
-						getAdapter(ctx),
-						result,
-						getLogger(ctx),
+					await registry?.refreshSubscriptionProjection?.(
+						ctx,
+						{ snapshot: result },
 						"adminCancelSubscription",
 					);
 					return ctx.json(result);
@@ -363,11 +364,9 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 				const input = ctx.body;
 				try {
 					const freeze = await client.freezeSubscription(subscriptionId, input);
-					await syncSubscriptionFromUpstream(
-						client,
-						getAdapter(ctx),
-						subscriptionId,
-						getLogger(ctx),
+					await registry?.refreshSubscriptionProjection?.(
+						ctx,
+						{ streampaySubscriptionId: subscriptionId },
 						"adminFreezeSubscription",
 					);
 					return ctx.json(freeze);
@@ -418,11 +417,9 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 				const input = ctx.body;
 				try {
 					const freeze = await client.updateSubscriptionFreeze(subscriptionId, freezeId, input);
-					await syncSubscriptionFromUpstream(
-						client,
-						getAdapter(ctx),
-						subscriptionId,
-						getLogger(ctx),
+					await registry?.refreshSubscriptionProjection?.(
+						ctx,
+						{ streampaySubscriptionId: subscriptionId },
 						"adminUpdateSubscriptionFreeze",
 					);
 					return ctx.json(freeze);
@@ -451,11 +448,9 @@ function buildSubscriptionsEndpoints(client: StreamPayClient, adminOptions: Admi
 				const { id: subscriptionId, freezeId } = ctx.params;
 				try {
 					await client.deleteSubscriptionFreeze(subscriptionId, freezeId);
-					await syncSubscriptionFromUpstream(
-						client,
-						getAdapter(ctx),
-						subscriptionId,
-						getLogger(ctx),
+					await registry?.refreshSubscriptionProjection?.(
+						ctx,
+						{ streampaySubscriptionId: subscriptionId },
 						"adminDeleteSubscriptionFreeze",
 					);
 					return ctx.json({ deleted: true });
@@ -567,21 +562,7 @@ function buildConsumersEndpoints(client: StreamPayClient, adminOptions: AdminOpt
 				}
 
 				try {
-					const adapter = getAdapter(ctx);
-					const user = await adapter.findOne<{ id: string }>({
-						model: "user",
-						where: [{ field: "streampayConsumerId", value: consumerId }],
-					});
-					if (user) {
-						await adapter.update({
-							model: "user",
-							update: { streampayConsumerId: null },
-							where: [
-								{ field: "id", value: user.id },
-								{ field: "streampayConsumerId", value: consumerId },
-							],
-						});
-					}
+					await unlinkConsumer(getAdapter(ctx), consumerId);
 				} catch (err: unknown) {
 					getLogger(ctx).error(
 						`StreamPay admin delete: link clear failed for consumer=${consumerId}: ${formatStreamPayError(err)}`,
@@ -921,6 +902,17 @@ function decodeWebhookEventId(value: string): string {
 	}
 }
 
+function requireWebhookInbox(registry: StreamPayPluginRegistry | undefined): WebhookInbox {
+	const inbox = registry?.webhookInbox;
+	if (!inbox?.isEnabled()) {
+		throw new APIError("BAD_REQUEST", {
+			message:
+				"Webhook inbox unavailable — enable the subscriptions webhook inbox or webhooks({ deduplicate: true }).",
+		});
+	}
+	return inbox;
+}
+
 function buildWebhookEventsEndpoints(
 	adminOptions: AdminOptions,
 	registry: StreamPayPluginRegistry | undefined,
@@ -990,15 +982,10 @@ function buildWebhookEventsEndpoints(
 			},
 			async (ctx) => {
 				await requireAdmin(ctx, adminOptions);
-				if (!registry?.replayWebhookEvent) {
-					throw new APIError("BAD_REQUEST", {
-						message:
-							"Replay unavailable — enable the subscriptions webhook inbox or webhooks({ deduplicate: true }).",
-					});
-				}
+				const inbox = requireWebhookInbox(registry);
 				try {
-					const result = await registry.replayWebhookEvent(
-						ctx,
+					const result = await inbox.replay(
+						toSyncContext(ctx),
 						decodeWebhookEventId(ctx.params.eventId),
 					);
 					return ctx.json(result);
@@ -1022,47 +1009,11 @@ function buildWebhookEventsEndpoints(
 			},
 			async (ctx) => {
 				await requireAdmin(ctx, adminOptions);
-				const adapter = getAdapter(ctx);
-				const eventId = decodeWebhookEventId(ctx.params.eventId);
-				const row = await adapter.findOne<WebhookEventRow>({
-					model: WEBHOOK_EVENT_MODEL,
-					where: [{ field: "eventId", value: eventId }],
-				});
-				if (!row) {
-					throw new APIError("NOT_FOUND", {
-						code: $ERROR_CODES.NOT_FOUND.code,
-						message: `Webhook event ${ctx.params.eventId} not found.`,
-					});
-				}
-				const inProgress = new APIError("CONFLICT", {
-					code: $ERROR_CODES.WEBHOOK_REPLAY_IN_PROGRESS.code,
-					message: `Webhook event ${ctx.params.eventId} is being processed. Retry after its lease expires.`,
-				});
-				if (row.status === "pending" && hasLiveLease(row, new Date())) throw inProgress;
-				// Complete first: once no worker can claim the event, its renewal callback lock is safe to clear.
-				if (!(await completeUnchangedWebhookEvent({ context: { adapter } }, row))) throw inProgress;
-				if (
-					registry?.subscriptionWebhookSync &&
-					!eventId.startsWith("handlers:") &&
-					(row.eventType === "INVOICE_COMPLETED" ||
-						row.eventType === "SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY")
-				) {
-					const subscription = await adapter.findOne<{ id: string }>({
-						model: "subscription",
-						where: [{ field: "renewalCallbackEventId", value: eventId }],
-					});
-					if (subscription) {
-						await adapter.update({
-							model: "subscription",
-							update: { renewalCallbackEventId: null },
-							where: [
-								{ field: "id", value: subscription.id },
-								{ field: "renewalCallbackEventId", value: eventId },
-							],
-						});
-					}
-				}
-				return ctx.json({ discarded: true, eventId });
+				// Without a registered scope the row is still completed through the lease-aware CAS.
+				const inbox = registry?.webhookInbox ?? createWebhookInbox();
+				return ctx.json(
+					await inbox.discard(toSyncContext(ctx), decodeWebhookEventId(ctx.params.eventId)),
+				);
 			},
 		),
 	};
@@ -1075,7 +1026,7 @@ export const admin =
 		return {
 			endpoints: {
 				...buildPaymentsEndpoints(client, adminOptions),
-				...buildSubscriptionsEndpoints(client, adminOptions),
+				...buildSubscriptionsEndpoints(client, adminOptions, registry),
 				...buildConsumersEndpoints(client, adminOptions),
 				...buildInvoicesEndpoints(client, adminOptions),
 				...buildProductsEndpoints(client, adminOptions),

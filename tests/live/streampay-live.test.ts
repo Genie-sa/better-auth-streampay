@@ -42,6 +42,8 @@ interface MeResponse {
 function createHookContext(): StreamPayHookContext {
 	return {
 		context: {
+			// Better Auth supplies the user store; no local user owns the sandbox consumer yet.
+			internalAdapter: { listUsers: async () => [] },
 			logger: {
 				error: () => {},
 				warn: () => {},

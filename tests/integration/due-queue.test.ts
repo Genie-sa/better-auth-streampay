@@ -1,9 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { subscriptions, webhooks } from "../../src";
-import {
-	parkUnreplayableWebhookEvent,
-	type WebhookEventRow,
-} from "../../src/plugins/subscriptions/sync";
+import { parkUnreplayableWebhookEvent, type WebhookEventRow } from "../../src/webhooks/inbox";
 import {
 	type Harness,
 	harness,
@@ -141,8 +138,10 @@ describe(`due webhook queue end-to-end (${TEST_WITH})`, () => {
 		});
 		let inboxQueries = 0;
 		vi.spyOn(adapter, "findMany").mockImplementation(async (input) => {
+			// Count at call time: the two due queries of one run resolve in either order on PostgreSQL.
+			const staleRunQuery = input.model === "streampayWebhookEvent" && ++inboxQueries <= 2;
 			const rows = await findMany(input);
-			if (input.model === "streampayWebhookEvent" && ++inboxQueries <= 2) await firstRunFinished;
+			if (staleRunQuery) await firstRunFinished;
 			return rows;
 		});
 

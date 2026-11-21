@@ -2,13 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { checkLimit, hasFeature } from "../src/plugins/subscriptions/plans";
 import { parseDate, projectPlanFields } from "../src/plugins/subscriptions/reconcile";
 import {
-	claimOrAdvanceWebhookEvent,
-	claimWebhookEventForReplay,
 	classifyWebhookFailure,
-	markWebhookEventCompleted,
 	syncWebhookPayload,
 	WebhookEventInProgressError,
-	type WebhookEventRow,
 } from "../src/plugins/subscriptions/sync";
 import {
 	PLAN_NAME_METADATA_KEY,
@@ -18,6 +14,12 @@ import {
 	type SubscriptionCallbacks,
 	subscriptionSlotKey,
 } from "../src/plugins/subscriptions/types";
+import {
+	claimOrAdvanceWebhookEvent,
+	claimWebhookEventForReplay,
+	markWebhookEventCompleted,
+	type WebhookEventRow,
+} from "../src/webhooks/inbox";
 import { mockApiError } from "./utils/helpers";
 import { createMockStreamPayClient, type MockedStreamPayClient } from "./utils/mocks";
 import {

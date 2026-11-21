@@ -1,8 +1,8 @@
 import type { GenericEndpointContext } from "better-auth";
 import { describe, expect, it } from "vitest";
 import { type StreamPayPluginRegistry, subscriptions } from "../src/plugins/subscriptions";
-import type { WebhookEventRow } from "../src/plugins/subscriptions/sync";
 import { webhooks } from "../src/plugins/webhooks";
+import type { WebhookEventRow } from "../src/webhooks/inbox";
 import { createTestStreamPayOptions, mockApiError } from "./utils/helpers";
 import { createMockStreamPayClient } from "./utils/mocks";
 import { createMockSyncContext, createMockWebhookPayload } from "./utils/subscription-helpers";
