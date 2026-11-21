@@ -166,7 +166,10 @@ export async function syncSubscriptionFromUpstream(
 
 export function projectSubscriptionFields(
 	sub: SubscriptionDetailed,
-	existing?: Pick<Subscription, "trialStart" | "currentCycleNumber" | "renewedCycleNumber"> | null,
+	existing?: Pick<
+		Subscription,
+		"trialStart" | "currentCycleNumber" | "renewedCycleNumber" | "streampaySubscriptionId"
+	> | null,
 ): Partial<Subscription> {
 	const status = toLocalStatus(sub.status);
 	const terminal = isTerminalSubscriptionStatus(status);
@@ -196,7 +199,10 @@ export function projectSubscriptionFields(
 		...(existing?.renewedCycleNumber == null
 			? {
 					renewedCycleNumber:
-						existing?.currentCycleNumber ?? firstLinkRenewalBaseline(sub.current_cycle_number),
+						existing?.currentCycleNumber ??
+						(existing?.streampaySubscriptionId
+							? (sub.current_cycle_number ?? null)
+							: firstLinkRenewalBaseline(sub.current_cycle_number)),
 				}
 			: {}),
 		trialStart:

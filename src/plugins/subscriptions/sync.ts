@@ -753,6 +753,7 @@ async function reconcileFromStreamPay(
 	payload: StreamPayWebhookPayload,
 	client: StreamPayClient,
 	plans: ResolvedPlans,
+	prefetched?: SubscriptionDetailed,
 ): Promise<{ row: Subscription | null; stream: SubscriptionDetailed | null }> {
 	const streampaySubscriptionId = payload.entity_id;
 	if (!streampaySubscriptionId) {
@@ -762,7 +763,7 @@ async function reconcileFromStreamPay(
 
 	let stream: SubscriptionDetailed;
 	try {
-		stream = await client.getSubscription(streampaySubscriptionId);
+		stream = prefetched ?? (await client.getSubscription(streampaySubscriptionId));
 	} catch (err: unknown) {
 		const msg = err instanceof Error ? err.message : String(err);
 		logger(ctx).error(
@@ -1106,6 +1107,7 @@ async function linkCheckoutFromRenewalEvidence(
 		} as StreamPayWebhookPayload,
 		client,
 		plans,
+		stream,
 	);
 	if (row) {
 		logger(ctx).warn(

@@ -146,4 +146,50 @@ describe(`renewal evidence for an unlinked subscription (${TEST_WITH})`, () => {
 			{ streampaySubscriptionId: "sub_late", renewedCycleNumber: 3 },
 		]);
 	});
+
+	it("uses the snapshot it linked with when StreamPay changed between reads", async () => {
+		const onSubscriptionRenewed = vi.fn();
+		const h = await harness([
+			subscriptions({ plans: [TEAM], onSubscriptionRenewed }),
+			webhooks({ secret: SECRET }),
+		]);
+		await paidCheckoutWithoutCreationEvents(h, 3, "inv_3");
+		const renewed = (updatedAt: string) =>
+			providerSubscription("sub_late", "ACTIVE", {
+				current_cycle_number: 3,
+				updated_at: updatedAt,
+				latest_invoice: { id: "inv_3", status: "COMPLETED", payment_link_id: "pl_1" },
+			});
+		h.stream.getSubscription
+			.mockResolvedValueOnce(renewed("2026-04-01T00:00:00.000Z"))
+			.mockResolvedValue(renewed("2026-04-01T00:00:30.000Z"));
+
+		expect((await h.deliver(invoiceCompleted("inv_3"))).status).toBe(200);
+
+		expect(onSubscriptionRenewed).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not report a renewal when an already linked row first learns its cycle", async () => {
+		const onSubscriptionRenewed = vi.fn();
+		const h = await harness([
+			subscriptions({ plans: [TEAM], onSubscriptionRenewed }),
+			webhooks({ secret: SECRET }),
+		]);
+		h.stream.getSubscription.mockResolvedValue(providerSubscription("sub_legacy", "ACTIVE"));
+		await h.deliver(subscriptionEvent(h, "SUBSCRIPTION_ACTIVATED", "sub_legacy", RENEWAL_EVENT));
+		h.stream.getSubscription.mockResolvedValue(
+			providerSubscription("sub_legacy", "ACTIVE", {
+				current_cycle_number: 4,
+				latest_invoice: { id: "inv_4", status: "COMPLETED" },
+			}),
+		);
+		await h.deliver(subscriptionEvent(h, "SUBSCRIPTION_PLAN_UPDATED", "sub_legacy", RENEWAL_EVENT));
+
+		await h.deliver(
+			subscriptionEvent(h, "SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY", "sub_legacy", RENEWAL_EVENT),
+		);
+
+		expect(onSubscriptionRenewed).not.toHaveBeenCalled();
+		expect(await h.rows("subscription")).toMatchObject([{ renewedCycleNumber: 4 }]);
+	});
 });
