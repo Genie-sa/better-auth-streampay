@@ -105,6 +105,7 @@ ALTER TABLE subscription ADD COLUMN IF NOT EXISTS "catalogMapped" boolean DEFAUL
 ALTER TABLE subscription ALTER COLUMN "catalogMapped" SET DEFAULT true;
 UPDATE subscription SET "catalogMapped" = true WHERE "catalogMapped" IS NULL;
 ALTER TABLE subscription ADD COLUMN IF NOT EXISTS "renewalCallbackEventId" text;
+ALTER TABLE subscription ADD COLUMN IF NOT EXISTS "renewedCycleNumber" integer;
 ```
 
 Use your configured table name and your database's boolean syntax when they differ. The column
@@ -603,8 +604,11 @@ does not provide exactly-once execution of external side effects.
 Typed handlers include `onPaymentPartiallyRefunded` and `onSubscriptionCycleRenewedSuccessfully`.
 Successful renewal events reconcile billing state and share renewal inference with completed
 invoices. The cycle update records its callback owner in `renewalCallbackEventId`; an interrupted
-owner can resume on replay, and competing events cannot take its pending callback. Apply this
-nullable column before deploying. External callback side effects still need idempotency.
+owner can resume on replay, and competing events cannot take its pending callback. A renewal is a
+StreamPay cycle number above `renewedCycleNumber`, the last cycle whose renewal the plugin handled,
+so a plan-change webhook or customer action that writes the new cycle first does not absorb the
+callback. Apply both nullable columns before deploying; existing rows need no backfill. External
+callback side effects still need idempotency.
 
 The StreamPay SDK does not export webhook payload types. This package provides checked event
 types based on StreamPay's documented payloads.
