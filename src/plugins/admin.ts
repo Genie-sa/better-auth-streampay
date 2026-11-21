@@ -25,6 +25,7 @@ import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
 import type { StreamPayPluginRegistry } from "./subscriptions";
 import {
 	applySubscriptionProjection,
+	hasLiveLease,
 	markWebhookEventCompleted,
 	type PluginAdapter,
 	syncSubscriptionFromUpstream,
@@ -1031,6 +1032,12 @@ function buildWebhookEventsEndpoints(
 					throw new APIError("NOT_FOUND", {
 						code: $ERROR_CODES.NOT_FOUND.code,
 						message: `Webhook event ${ctx.params.eventId} not found.`,
+					});
+				}
+				if (row.status === "pending" && hasLiveLease(row, new Date())) {
+					throw new APIError("CONFLICT", {
+						code: $ERROR_CODES.WEBHOOK_REPLAY_IN_PROGRESS.code,
+						message: `Webhook event ${ctx.params.eventId} is being processed. Retry after its lease expires.`,
 					});
 				}
 				if (

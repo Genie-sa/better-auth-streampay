@@ -25,3 +25,11 @@ the integration guide). Existing rows need no backfill.
   attempt.
 - A customer action that observes a revived subscription takes its free billing slot, and no longer
   writes it live while another subscription holds that slot.
+- Two concurrent first deliveries for a subscription without a matching reservation no longer
+  dead-letter `SUBSCRIPTION_ACTIVATED`; the second retries.
+- A late `SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY` clears `past_due` and delivers its renewal when
+  the latest invoice is completed.
+- A same-plan upgrade after the 15-minute window starts a new checkout instead of resuming the old
+  link, and a link that is `INACTIVE` at StreamPay is never resumed.
+- Admin discard returns 409 while a worker holds the event's processing lease.
+- A dead-lettered event keeps its stored payload when the final delivery has no body.

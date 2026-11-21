@@ -139,10 +139,10 @@ StreamPay's hosted checkout. The idempotency window is
 | C-b | `createPaymentLink` succeeds | R1 | R2 | CAS on `id`, `referenceId`, `referenceType`, consumer, `link = null` |
 | C-c | `createPaymentLink` throws | R1 | R0 (row deleted) | `deleteReservedSubscription` |
 | C-d | Link has no URL | R1 | R3 | CAS on `status = incomplete` |
-| C-e | Same plan and seats within the window, URL recoverable | R2 | R2 (`reused: true`) | `recoverCheckoutUrl` |
-| C-f | Same plan and seats, link gone (404 or no URL) | R2 | R3, then C-a | CAS on `status = incomplete` |
+| C-e | Same plan and seats within the window, link not `INACTIVE` and URL recoverable | R2 | R2 (`reused: true`) | `recoverCheckoutUrl` |
+| C-f | Same plan and seats, link gone (404, `INACTIVE`, or no URL) | R2 | R3, then C-a | CAS on `status = incomplete` |
 | C-g | Different plan or seats within the window | R1/R2 | R1/R2, request gets `SUBSCRIPTION_CHECKOUT_IN_PROGRESS` | by design |
-| C-h | Any request after the window | R1/R2 | R3, then C-a | Deactivate the link, then CAS on `id`, `status`, slot |
+| C-h | Any request after the window, including the same plan and seats | R1/R2 | R3, then C-a | Deactivate the link, then CAS on `id`, `status`, slot. The same-plan conflict path skipped this before F20. |
 | C-i | Reservation released while its link was being created | R1 (released) | R3, request gets `SUBSCRIPTION_CHECKOUT_IN_PROGRESS` | New link deactivated |
 | C-j | Paid subscription arrives for another row of the same slot | R1/R2 | R3 | `takeSlotFromReservation` |
 | C-k | A live row holds the slot when the reservation is created | R0 | R0, request gets `SUBSCRIPTION_ALREADY_ACTIVE` | Previously surfaced the raw unique-constraint error |
@@ -246,7 +246,7 @@ the same ID with a `handlers:` prefix.
 | W-g | Permanent failure (`SubscriptionCorrelationError`, including two live subscriptions in one slot, or a provider 4xx other than 404 and 429), or attempts exhausted | E1 | E4 | same |
 | W-h | Admin replay, or `processDueStreampayWebhookEvents` for E2 events whose `nextAttemptAt` passed or whose lease expired | E2 or E4 (admin), E2 still at the selected attempt and still due (processor) | E1 | `claimWebhookEventForReplay` (CAS on `status`, `lockedAt`, and `attemptCount`), `findDueWebhookEvents`, `isStillDueWebhookEvent` (F15) |
 | W-i | Replay fails | E1 | E2 if it came from E2 with attempts left and a transient error, else E4 | #27. Before it, every admin replay failure dead-lettered. |
-| W-j | Admin discard | any | E3 | `adminDiscardWebhookEvent`. Ignores a live lease by design. |
+| W-j | Admin discard | any except E1 | E3 | `adminDiscardWebhookEvent`. Returns 409 while a live lease exists (F21). |
 | W-k | Replay or due-event processing finds no replayable payload | E2 | E2p (request gets 400) | `parkUnreplayableWebhookEvent`, a CAS on `status`, `lockedAt`, and `attemptCount`, so a redelivery that repaired the row in between wins (F16). Before it, the row stayed due and filled every batch (F12). |
 
 E2 events move on a StreamPay redelivery, an admin replay, or a scheduled call to
@@ -317,6 +317,11 @@ PostgreSQL 17. Run the end-to-end tests on PostgreSQL with `STREAMPAY_E2E_DB=pos
 | F10 | Medium | 1 | `past_due` (and billing `past_due`) after StreamPay recorded the payment. | A renewal fails. The customer pays the outstanding invoice, then some other write reaches the row before `INVOICE_COMPLETED` is processed (a retry after a failed first delivery, or a customer action). The invoice event is stale and the stale branch keeps `past_due`. This is R1. | `past_due` until the next successful cycle. Apps whose `accessStatuses` exclude `past_due` lock out a paying customer, and `onSubscriptionRenewed` is skipped for that evidence. | S8: stale evidence still clears `past_due` when its invoice is the provider's `latest_invoice` and that invoice is `COMPLETED` (Issue 4) |
 | F11 | Low | 1 | S1 broken: a live status with `activeSlotKey = null`, and a revival that skips S4's duplicate check. | StreamPay revives a terminal subscription and `INVOICE_COMPLETED` (or `SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY`) is processed before any other subscription event. `handleRenewalEvidence` wrote the projection without the slot logic of the reconcile path. | The row is `active` without a slot until another webhook backfills it. If a replacement subscription holds the slot, two live subscriptions exist, and the renewal path never raises the correlation error, so the customer can be billed twice unnoticed. | `liveSlotKey` plus `takeSlotFromReservation` in `handleRenewalEvidence` (Issue 5) |
 | F13 | Medium | 6 | A renewed cycle whose `onSubscriptionRenewed` never runs. | Another writer stores the new cycle before the renewal evidence is processed: `SUBSCRIPTION_PLAN_CHANGED` when a scheduled change applies at renewal, any other subscription event, or a customer action, including during a retry backoff of `INVOICE_COMPLETED`. The evidence then compares against the already advanced row and sees no renewal. This is R9. | No renewal callback for that cycle, so apps that grant per-cycle credits or send receipts skip it silently. | `renewedCycleNumber` (Issue 7). Needs the migration in the integration guide. |
+| F18 | High | 1, 7 | A paid subscription's `SUBSCRIPTION_ACTIVATED` dead-lettered on its first attempt. | Found by Gemini 4 Neon; pre-existing. No live reservation matches (the metadata row is gone or carries no row ID), so two concurrent first deliveries (`SUBSCRIPTION_CREATED` and `SUBSCRIPTION_ACTIVATED`) both take the create path. The second found the first one's new row in the slot and raised `SubscriptionCorrelationError` against its own subscription. | Permanent dead letter, HTTP 200, so StreamPay never retries and `onSubscriptionActivated` never runs. | `takeSlotFromReservation` treats a holder with the same StreamPay subscription ID as a concurrent link and fails transiently |
+| F19 | Medium | 1, 6 | `past_due` and a lost `onSubscriptionRenewed` after a late `SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY`. | Found by Gemini 4 Neon in the F10 fix. The renewal-success event names no invoice, so the latest-invoice check never applied to it when it was stale. | Same as F10 and F13, for StreamPay's renewal-success event. | Stale renewal evidence that names no invoice applies when the latest invoice is `COMPLETED` |
+| F20 | Medium | 2 | An unpayable or long-abandoned checkout returned as `reused: true`, forever. | Found by Gemini 4 Neon; pre-existing. After the 15-minute window, a same-plan, same-seat upgrade hit the slot conflict and resumed the old link without checking its age (C-h). `getPaymentUrl` also returns a URL for `INACTIVE` links (verified in SDK 1.1.3), so a link deactivated in the dashboard was resumed on every retry. | The customer cannot start a payable checkout for that plan and seat count. | The conflict path resumes only inside the window, and an `INACTIVE` link counts as expired (`recoverCheckoutUrl`) |
+| F21 | Low | 6, 7 | `renewalCallbackEventId` left set by an event that is already `completed`. | Found by Gemini 4 Neon; pre-existing. An admin discard ran while a worker held the lease, before the worker wrote the callback lock. | Every later renewal event for that subscription fails with "renewal callback is pending" until the event is discarded again. | Discard returns 409 while a live lease exists |
+| F22 | Low | 7 | A dead-lettered event with its stored payload erased. | Found by Gemini 4 Neon. The exhausted-attempts branch of `claimOrAdvanceWebhookEvent` wrote the delivery body even when a direct `syncWebhookPayload` caller passed none. | The dead letter cannot be replayed. | Keep the stored payload when the delivery has no body |
 | F14 | High | 6 | `renewedCycleNumber` rolled back after its callback ran, so a second renewal event delivers `onSubscriptionRenewed` again. | Found in review of the F13 fix. A customer endpoint (or webhook) reads the row, `INVOICE_COMPLETED` then advances the marker and runs the callback, and the endpoint write restores the old marker. Its CAS matched because the provider timestamp was unchanged. `SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY` then counted as a new renewal. | Duplicate per-cycle side effects. | Projections only initialize the marker, and every CAS includes it |
 | F15 | Medium | 7 | A due-queue retry before its backoff, or an automatic retry of a dead letter. | Pre-existing. Two overlapping `processDueStreampayWebhookEvents` runs select the same row. The first claims it and fails. The second replayed by event ID, re-read the updated row, and claimed it again at once, even after it was dead-lettered. | Extra provider calls and callback runs, and dead letters leaving manual review. | The processor passes the selected attempt (`dueAttemptCount`); replay requires the row to still be that pending attempt and due, and the claim CAS includes `attemptCount` |
 | F16 | Medium | 7 | A repaired event parked as unreplayable. | Found in review of F12. Replay reads a pending row without payload; a redelivery then claims it, stores its payload, fails, and schedules a retry; the stale parking write still matched `pending` and `lockedAt = null`. | The retry time is erased, so the due processor never retries the event. | Parking CAS includes `attemptCount` |
@@ -352,6 +357,28 @@ activated at 09:23:32 and its period-end cancellation was scheduled at 09:26:30,
 | Retry | 200, callback skipped as stale | 200, callback delivered with `cancelAtPeriodEnd: true` |
 | Inbox | `completed` after 2 attempts | `completed` after 2 attempts |
 | Successful callbacks | 0 | 1 |
+
+**F13.** `probe-f13-live.mjs` runs each build against sandbox subscription `a74dcc6a`, which
+StreamPay renewed from cycle 4 to 5 on 2026-11-12. The local row starts at cycle 4. A
+`SUBSCRIPTION_PLAN_UPDATED` is processed first (it writes cycle 5), then `INVOICE_COMPLETED` for
+the real latest invoice (`COMPLETED`, `subscription_id` matching).
+
+| Build | `onSubscriptionRenewed` calls | Row after |
+| --- | --- | --- |
+| Original `main` | none | cycle 5 |
+| With the fix | one, for cycle 5 | cycle 5, `renewedCycleNumber` 5 |
+
+**StreamPay documentation, checked 2026-11-21.** The [webhook guide](https://docs.streampay.sa/webhooks/)
+confirms the assumptions above: `SUBSCRIPTION_ACTIVATED` covers "initial activation or
+reactivation" (L6, F11), failed deliveries are retried up to 5 times after 5 minutes, 30 minutes,
+2, 6, and 12 hours (the plugin uses the same schedule; the first gap is the F9 window), and
+`SUBSCRIPTION_PLAN_CHANGED` fires when a scheduled change is applied at period end (the F13
+trigger). The guide gives no ordering guarantee and no event ID, so the inbox keys stay
+`event_type:entity_id:timestamp`. It documents renewal as `INVOICE_CREATED`, `PAYMENT_SUCCEEDED`,
+`INVOICE_COMPLETED` and does not place `SUBSCRIPTION_CYCLE_RENEWED_SUCCESSFULLY` in that sequence,
+which is why both are treated as renewal evidence. The [cancel API](https://docs.streampay.sa/api/v2-subscriptions-cancel/)
+confirms `INACTIVE`, `TRIALING`, and `TRIAL_PENDING` are cancelled immediately and `ACTIVE` at
+period end.
 
 **F10.** The sandbox exposes `latest_invoice` with `id` and `status` on the subscription, and a
 paid invoice reads `COMPLETED` (subscription `39143aaa`). An invoice's `period_end` does not match
@@ -404,15 +431,16 @@ the due queue, keep them open to StreamPay redelivery, and store the payload a r
 **Issue 7, P2: Renewal callbacks are absorbed by other writers (F13).** Track the last handled
 cycle in its own column, advanced only by renewal evidence.
 
-**Issue 8, P1: Review findings on the fixes (F14 to F17).** GPT-6.2 Astra reviewed the branch.
-F14 and F16 were regressions in the new code; F15 and F17 were pre-existing.
+**Issue 8, P1: Review findings (F14 to F22).** GPT-6.2 Astra and Gemini 4 Neon (high) reviewed
+the branch independently. Both found F14. F14, F16, and F19 were gaps in the new code; the rest
+were pre-existing.
 
 Issues 4 to 8 are fixed on `ali/fix-stale-lifecycle-effects`. Regression tests:
 `tests/integration/stale-lifecycle.test.ts` (F8 to F11, plus two guards: a contradicted stale
 cancellation stays suppressed, and a late invoice that is not the latest keeps `past_due`) and
 `tests/integration/due-queue.test.ts` (F12). The `renewal callbacks` tests in the first file cover
 F13 and F14, including a legacy row without the marker; the revival tests cover F17; the due-queue
-file covers F15 and F16. Every bug test fails on the code before its fix and passes after it.
+file covers F15 and F16; `tests/integration/review-findings.test.ts` covers F18 to F22. Every bug test fails on the code before its fix and passes after it.
 
 ### Open risks (not confirmed, not changed)
 

@@ -116,7 +116,7 @@ export type ClaimAdvanceResult =
 export const WEBHOOK_PROCESSING_LEASE_MS = 2 * 60 * 1000;
 const WEBHOOK_RETRY_DELAYS_MS = [5, 30, 120, 360, 720].map((minutes) => minutes * 60 * 1000);
 
-function hasLiveLease(row: Pick<WebhookEventRow, "lockedAt">, now: Date): boolean {
+export function hasLiveLease(row: Pick<WebhookEventRow, "lockedAt">, now: Date): boolean {
 	return (
 		row.lockedAt instanceof Date &&
 		now.getTime() - row.lockedAt.getTime() < WEBHOOK_PROCESSING_LEASE_MS
@@ -256,8 +256,7 @@ export async function claimOrAdvanceWebhookEvent(
 				lastAttemptAt: now,
 				deadLetteredAt: now,
 				nextAttemptAt: null,
-				rawPayload: rawBody,
-				signatureHeader,
+				...(rawBody !== null ? { rawPayload: rawBody, signatureHeader } : {}),
 				lockedAt: null,
 				lockedBy: null,
 			},
@@ -611,6 +610,11 @@ async function takeSlotFromReservation(
 		where: [{ field: "activeSlotKey", value: slotKey }],
 	});
 	if (!holder || holder.id === ownerRowId) return;
+	if (holder.streampaySubscriptionId === streampaySubscriptionId) {
+		throw new Error(
+			`StreamPay sub=${streampaySubscriptionId} was linked to row=${holder.id} concurrently. Retry delivery.`,
+		);
+	}
 	if (holder.status !== "incomplete" || holder.streampaySubscriptionId) {
 		throw new SubscriptionCorrelationError(
 			`StreamPay sub=${streampaySubscriptionId} needs the billing slot held by live row=${holder.id} (${holder.status}). Resolve the duplicate subscription, then replay.`,
@@ -1060,10 +1064,10 @@ async function handleRenewalEvidence(
 	);
 	const evidenceInvoiceId =
 		payload.data?.invoice?.id ?? (payload.entity_type === "INVOICE" ? payload.entity_id : null);
+	// A renewal-success event names no invoice, so the paid latest invoice is its evidence.
 	const settlesLatestInvoice =
-		evidenceInvoiceId !== null &&
-		stream.latest_invoice?.id === evidenceInvoiceId &&
-		stream.latest_invoice.status === "COMPLETED";
+		stream.latest_invoice?.status === "COMPLETED" &&
+		(evidenceInvoiceId === null || stream.latest_invoice.id === evidenceInvoiceId);
 	const evidenceApplies = !eventIsStale || settlesLatestInvoice;
 	const projected: Partial<Subscription> = {
 		...projectSubscriptionFields(stream, existing),
