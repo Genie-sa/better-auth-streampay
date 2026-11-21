@@ -166,7 +166,10 @@ export async function syncSubscriptionFromUpstream(
 
 export function projectSubscriptionFields(
 	sub: SubscriptionDetailed,
-	existing?: Pick<Subscription, "trialStart" | "currentCycleNumber" | "renewedCycleNumber"> | null,
+	existing?: Pick<
+		Subscription,
+		"trialStart" | "currentCycleNumber" | "renewedCycleNumber" | "streampaySubscriptionId"
+	> | null,
 ): Partial<Subscription> {
 	const status = toLocalStatus(sub.status);
 	const terminal = isTerminalSubscriptionStatus(status);
@@ -194,7 +197,13 @@ export function projectSubscriptionFields(
 		// Only renewal evidence advances the baseline. Other writers only initialize it, so they can
 		// neither absorb a renewal nor roll back one that was just delivered.
 		...(existing?.renewedCycleNumber == null
-			? { renewedCycleNumber: existing?.currentCycleNumber ?? sub.current_cycle_number ?? null }
+			? {
+					renewedCycleNumber:
+						existing?.currentCycleNumber ??
+						(existing?.streampaySubscriptionId
+							? (sub.current_cycle_number ?? null)
+							: firstLinkRenewalBaseline(sub.current_cycle_number)),
+				}
 			: {}),
 		trialStart:
 			(sub.trial_end ? (parseDate(sub.started_at) ?? periodStart) : null) ??
@@ -212,6 +221,15 @@ export function projectSubscriptionFields(
 		...(terminal ? { activeSlotKey: null } : {}),
 		updatedAt: new Date(),
 	};
+}
+
+/**
+ * A subscription first linked after it already renewed (its creation webhooks failed) has renewals
+ * the app was never told about. Starting at the first cycle lets the next renewal evidence report
+ * them once instead of absorbing them.
+ */
+function firstLinkRenewalBaseline(currentCycle: number | null | undefined): number | null {
+	return typeof currentCycle === "number" ? Math.min(currentCycle, 1) : null;
 }
 
 export function parseDate(value: string | null | undefined): Date | null {

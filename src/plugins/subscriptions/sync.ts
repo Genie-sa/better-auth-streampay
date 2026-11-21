@@ -753,6 +753,7 @@ async function reconcileFromStreamPay(
 	payload: StreamPayWebhookPayload,
 	client: StreamPayClient,
 	plans: ResolvedPlans,
+	prefetched?: SubscriptionDetailed,
 ): Promise<{ row: Subscription | null; stream: SubscriptionDetailed | null }> {
 	const streampaySubscriptionId = payload.entity_id;
 	if (!streampaySubscriptionId) {
@@ -762,7 +763,7 @@ async function reconcileFromStreamPay(
 
 	let stream: SubscriptionDetailed;
 	try {
-		stream = await client.getSubscription(streampaySubscriptionId);
+		stream = prefetched ?? (await client.getSubscription(streampaySubscriptionId));
 	} catch (err: unknown) {
 		const msg = err instanceof Error ? err.message : String(err);
 		logger(ctx).error(
@@ -1072,6 +1073,52 @@ async function releaseLockOfCompletedRenewal(
 	return released !== null;
 }
 
+/**
+ * Renewal evidence can arrive before the creation webhooks, or after they failed for good. StreamPay
+ * bills every cycle through the checkout link, so a local reservation that owns that link is linked
+ * here, through the same signed-metadata correlation as the creation webhooks, instead of dropping
+ * the renewal. Subscriptions the plugin did not check out are left alone.
+ */
+async function linkCheckoutFromRenewalEvidence(
+	ctx: SyncContext,
+	payload: StreamPayWebhookPayload,
+	client: StreamPayClient,
+	plans: ResolvedPlans,
+	stream: SubscriptionDetailed,
+): Promise<Subscription | null> {
+	const paymentLinkId = stream.latest_invoice?.payment_link_id;
+	if (!paymentLinkId || !stream.id) return null;
+	const reservation = await ctx.context.adapter.findOne<Subscription>({
+		model: SUBSCRIPTION_MODEL,
+		where: [{ field: "streampayPaymentLinkId", value: paymentLinkId }],
+	});
+	if (!reservation) return null;
+	const link = await client.getPaymentLink(paymentLinkId);
+	const { row } = await reconcileFromStreamPay(
+		ctx,
+		{
+			...payload,
+			entity_type: "SUBSCRIPTION",
+			entity_id: stream.id,
+			data: {
+				metadata: link.custom_metadata ?? {},
+				payment_link: { id: paymentLinkId, url: "" },
+			},
+		} as StreamPayWebhookPayload,
+		client,
+		plans,
+		stream,
+	);
+	if (row) {
+		logger(ctx).warn(
+			`webhook ${payload.event_type}: linked checkout row=${row.id} to StreamPay sub=${stream.id} from renewal evidence.`,
+		);
+		return row;
+	}
+	// A creation webhook linked it first; the renewal checks below still apply to that row.
+	return findSubscriptionByStreampayId(ctx, stream.id);
+}
+
 async function handleRenewalEvidence(
 	ctx: SyncContext,
 	payload: StreamPayWebhookPayload,
@@ -1111,7 +1158,9 @@ async function handleRenewalEvidence(
 		throw err;
 	}
 
-	const existing = await findSubscriptionByStreampayId(ctx, subscriptionId);
+	const existing =
+		(await findSubscriptionByStreampayId(ctx, subscriptionId)) ??
+		(await linkCheckoutFromRenewalEvidence(ctx, payload, client, plans, stream));
 	if (!existing) return;
 
 	const eventAt = parseDate(payload.timestamp);
