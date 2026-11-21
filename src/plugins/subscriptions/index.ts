@@ -202,6 +202,7 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 					try {
 						await syncWebhookPayload(syncCtx, payload, options.client, plans, subsOptions, {
 							dedupe: false,
+							inboxEnabled: true,
 							retryOnCallbackError: subsOptions.retryOnCallbackError !== false,
 							retryingRenewalCallback:
 								claimed.lastError?.startsWith(

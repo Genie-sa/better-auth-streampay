@@ -398,7 +398,7 @@ describe(`review findings end-to-end (${TEST_WITH})`, () => {
 	it("releases a renewal lock whose event was completed before the lock was cleared", async () => {
 		const onSubscriptionRenewed = vi.fn();
 		const h = await harness([
-			subscriptions({ plans: [TEAM], onSubscriptionRenewed }),
+			subscriptions({ plans: [TEAM], onSubscriptionRenewed, maxWebhookAttempts: 1 }),
 			webhooks({ secret: SECRET }),
 		]);
 		const context = await h.auth.$context;
@@ -437,12 +437,46 @@ describe(`review findings end-to-end (${TEST_WITH})`, () => {
 			data: { invoice: { id: "inv_next", url: "" } },
 		};
 
-		expect((await h.deliver(renewal)).status).toBe(500);
 		expect((await h.deliver(renewal)).status).toBe(200);
 
 		expect(onSubscriptionRenewed).toHaveBeenCalledTimes(1);
 		expect(await h.rows("subscription")).toMatchObject([
 			{ renewalCallbackEventId: null, renewedCycleNumber: 2 },
 		]);
+	});
+
+	it("does not query a missing inbox while another renewal holds the lock", async () => {
+		const h = await harness([
+			subscriptions({ plans: [TEAM], enableWebhookEventTable: false }),
+			webhooks({ secret: SECRET }),
+		]);
+		h.stream.getSubscription.mockResolvedValue(
+			providerSubscription("sub_no_inbox", "ACTIVE", { current_cycle_number: 1 }),
+		);
+		await h.deliver(subscriptionEvent(h, "SUBSCRIPTION_ACTIVATED", "sub_no_inbox", FIRST_EVENT));
+		const [row] = await h.rows("subscription");
+		await h.setRow("subscription", String(row?.id), {
+			renewalCallbackEventId: `INVOICE_COMPLETED:inv_other:${FIRST_EVENT}`,
+		});
+		h.stream.getInvoice.mockResolvedValue({
+			id: "inv_next",
+			subscription_id: "sub_no_inbox",
+		} as never);
+		const adapter = (await h.auth.$context).adapter as unknown as {
+			findOne: (input: { model: string }) => Promise<unknown>;
+		};
+		const findOne = vi.spyOn(adapter, "findOne");
+
+		await h.deliver({
+			event_type: "INVOICE_COMPLETED",
+			entity_type: "INVOICE",
+			entity_id: "inv_next",
+			timestamp: LATER_EVENT,
+			data: { invoice: { id: "inv_next", url: "" } },
+		});
+
+		expect(findOne.mock.calls.some(([input]) => input.model === "streampayWebhookEvent")).toBe(
+			false,
+		);
 	});
 });

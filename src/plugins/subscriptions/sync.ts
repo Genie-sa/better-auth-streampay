@@ -959,6 +959,8 @@ export async function syncWebhookPayload(
 		maxAttempts?: number;
 		retryOnCallbackError?: boolean;
 		retryingRenewalCallback?: boolean;
+		/** The inbox table exists. Defaults to `dedupe`; replay processes without dedupe but has an inbox. */
+		inboxEnabled?: boolean;
 	} = {},
 ): Promise<void> {
 	if (payload.entity_type !== "SUBSCRIPTION" && payload.event_type !== "INVOICE_COMPLETED") {
@@ -1004,6 +1006,7 @@ export async function syncWebhookPayload(
 					claim.row?.lastError?.startsWith(
 						"Subscription callback onSubscriptionRenewed failed:",
 					) === true,
+				options.inboxEnabled ?? dedupe,
 			);
 		} else {
 			const { row, stream } = await reconcileFromStreamPay(ctx, payload, client, plans);
@@ -1047,13 +1050,13 @@ async function releaseLockOfCompletedRenewal(
 	ctx: SyncContext,
 	subscriptionRowId: string,
 	lockEventId: string,
-): Promise<void> {
+): Promise<boolean> {
 	const owner = await ctx.context.adapter.findOne<WebhookEventRow>({
 		model: WEBHOOK_EVENT_MODEL,
 		where: [{ field: "eventId", value: lockEventId }],
 	});
-	if (owner?.status !== "completed") return;
-	await ctx.context.adapter.update({
+	if (owner?.status !== "completed") return false;
+	const released = await ctx.context.adapter.update<Subscription>({
 		model: SUBSCRIPTION_MODEL,
 		update: { renewalCallbackEventId: null },
 		where: [
@@ -1061,9 +1064,12 @@ async function releaseLockOfCompletedRenewal(
 			{ field: "renewalCallbackEventId", value: lockEventId },
 		],
 	});
-	logger(ctx).warn(
-		`released renewal callback lock of completed event ${lockEventId} for row=${subscriptionRowId}.`,
-	);
+	if (released) {
+		logger(ctx).warn(
+			`released renewal callback lock of completed event ${lockEventId} for row=${subscriptionRowId}.`,
+		);
+	}
+	return released !== null;
 }
 
 async function handleRenewalEvidence(
@@ -1074,6 +1080,7 @@ async function handleRenewalEvidence(
 	callbacks: SubscriptionCallbacks,
 	retryOnCallbackError: boolean,
 	retryingRenewalCallback: boolean,
+	inboxEnabled: boolean,
 ): Promise<void> {
 	const invoiceId = payload.data?.invoice?.id ?? payload.entity_id;
 	if (!invoiceId) return;
@@ -1145,7 +1152,17 @@ async function handleRenewalEvidence(
 	const tracksCycles = renewedCycle !== null && projectedCycle !== null;
 	const renewalAdvanced = tracksCycles ? projectedCycle > renewedCycle : periodAdvanced;
 	const eventId = extractEventId(payload);
-	const pendingCallback = existing.renewalCallbackEventId ?? null;
+	let pendingCallback = existing.renewalCallbackEventId ?? null;
+	if (pendingCallback && pendingCallback !== eventId) {
+		const released =
+			inboxEnabled && (await releaseLockOfCompletedRenewal(ctx, existing.id, pendingCallback));
+		if (!released) {
+			throw new Error(
+				`Subscription renewal callback ${pendingCallback} is pending; retry delivery.`,
+			);
+		}
+		pendingCallback = null;
+	}
 	if (
 		!pendingCallback &&
 		existing.providerUpdatedAt instanceof Date &&
@@ -1155,10 +1172,6 @@ async function handleRenewalEvidence(
 		throw new Error(
 			`StreamPay returned stale subscription state for sub=${subscriptionId}; retry delivery.`,
 		);
-	}
-	if (pendingCallback && pendingCallback !== eventId) {
-		await releaseLockOfCompletedRenewal(ctx, existing.id, pendingCallback);
-		throw new Error(`Subscription renewal callback ${pendingCallback} is pending; retry delivery.`);
 	}
 	if (
 		!pendingCallback &&
