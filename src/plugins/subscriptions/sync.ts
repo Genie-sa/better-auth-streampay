@@ -115,6 +115,13 @@ export type ClaimAdvanceResult =
 export const WEBHOOK_PROCESSING_LEASE_MS = 2 * 60 * 1000;
 const WEBHOOK_RETRY_DELAYS_MS = [5, 30, 120, 360, 720].map((minutes) => minutes * 60 * 1000);
 
+function hasLiveLease(row: Pick<WebhookEventRow, "lockedAt">, now: Date): boolean {
+	return (
+		row.lockedAt instanceof Date &&
+		now.getTime() - row.lockedAt.getTime() < WEBHOOK_PROCESSING_LEASE_MS
+	);
+}
+
 /**
  * A concurrent delivery holds the processing lease. Surfaced as a retryable HTTP failure so the
  * provider redelivers instead of treating the event as handled while the lease holder may crash.
@@ -226,10 +233,7 @@ export async function claimOrAdvanceWebhookEvent(
 		);
 		return { action: "skip", reason: "dead_letter" };
 	}
-	if (
-		existing.lockedAt instanceof Date &&
-		now.getTime() - existing.lockedAt.getTime() < WEBHOOK_PROCESSING_LEASE_MS
-	) {
+	if (hasLiveLease(existing, now)) {
 		logger(ctx).info(
 			`webhook ${payload.event_type} (${eventId}) is already being processed — skipping concurrent delivery.`,
 		);
@@ -270,6 +274,7 @@ export async function claimOrAdvanceWebhookEvent(
 			nextAttemptAt: null,
 			lockedAt: now,
 			lockedBy: lockId,
+			...(rawBody !== null ? { rawPayload: rawBody, signatureHeader } : {}),
 		},
 		where: [
 			{ field: "id", value: existing.id },
@@ -285,10 +290,7 @@ export async function claimWebhookEventForReplay(
 	row: WebhookEventRow,
 ): Promise<WebhookEventRow | null> {
 	const now = new Date();
-	if (
-		row.lockedAt instanceof Date &&
-		now.getTime() - row.lockedAt.getTime() < WEBHOOK_PROCESSING_LEASE_MS
-	) {
+	if (hasLiveLease(row, now)) {
 		return null;
 	}
 	return ctx.context.adapter.update<WebhookEventRow>({
@@ -306,6 +308,33 @@ export async function claimWebhookEventForReplay(
 		where: [
 			{ field: "id", value: row.id },
 			{ field: "status", value: row.status },
+			{ field: "lockedAt", value: row.lockedAt ?? null },
+		],
+	});
+}
+
+/**
+ * Takes a pending event whose stored payload cannot be replayed out of the due queue, so it stops
+ * filling every batch. It stays pending: a StreamPay redelivery carries the payload and processes it.
+ */
+export async function parkUnreplayableWebhookEvent(
+	ctx: { context: { adapter: PluginAdapter } },
+	row: WebhookEventRow,
+	reason: string,
+): Promise<void> {
+	if (row.status !== "pending" || hasLiveLease(row, new Date())) return;
+	await ctx.context.adapter.update({
+		model: WEBHOOK_EVENT_MODEL,
+		update: {
+			nextAttemptAt: null,
+			lockedAt: null,
+			lockedBy: null,
+			lastError: reason,
+			lastErrorCode: "UNREPLAYABLE_PAYLOAD",
+		},
+		where: [
+			{ field: "id", value: row.id },
+			{ field: "status", value: "pending" },
 			{ field: "lockedAt", value: row.lockedAt ?? null },
 		],
 	});
@@ -510,6 +539,50 @@ class SubscriptionCorrelationError extends Error {
 }
 
 /**
+ * A stale event (older than the stored provider state) keeps its lifecycle effects when the fresh
+ * provider snapshot still shows what the event announced. StreamPay keeps writing to a subscription
+ * after emitting an event, so a retried or reordered delivery is routinely older than the stored
+ * state without being contradicted by it. Events with no checkable state stay suppressed.
+ */
+function providerStateConfirmsEvent(eventType: string, stream: SubscriptionDetailed): boolean {
+	switch (eventType) {
+		case "SUBSCRIPTION_CREATED":
+			return true;
+		case "SUBSCRIPTION_ACTIVATED":
+		case "SUBSCRIPTION_UNFREEZE_NOW":
+			return stream.status === "ACTIVE" || stream.status === "TRIALING";
+		case "SUBSCRIPTION_CANCELED":
+			return stream.status === "CANCELED";
+		case "SUBSCRIPTION_INACTIVATED":
+			return stream.status === "INACTIVE";
+		case "SUBSCRIPTION_CANCEL_AT_PERIOD_END":
+			return (
+				Boolean(stream.cancel_at_period_end) &&
+				!isTerminalSubscriptionStatus(toLocalStatus(stream.status))
+			);
+		case "SUBSCRIPTION_FROZEN":
+		case "SUBSCRIPTION_FREEZE_NOW":
+			return stream.status === "FROZEN";
+		case "SUBSCRIPTION_PLAN_CHANGE_SCHEDULED":
+			return Boolean(stream.pending_change);
+		case "SUBSCRIPTION_PLAN_CHANGE_CANCELED":
+			return !stream.pending_change;
+		default:
+			return false;
+	}
+}
+
+/** The slot a row must hold after the projection, or null when the projected status is terminal. */
+function liveSlotKey(existing: Subscription, projected: Partial<Subscription>): string | null {
+	if (isTerminalSubscriptionStatus(projected.status ?? existing.status)) return null;
+	return subscriptionSlotKey(
+		existing.referenceType ?? "user",
+		existing.referenceId,
+		projected.group === undefined ? existing.group : projected.group,
+	);
+}
+
+/**
  * A provider-confirmed subscription outranks an unpaid checkout reservation for the same slot.
  * Deactivating the reservation's link is best effort: it must never block the paid subscription.
  */
@@ -667,8 +740,9 @@ async function reconcileFromStreamPay(
 			existing?.providerUpdatedAt instanceof Date &&
 			eventAt.getTime() < existing.providerUpdatedAt.getTime(),
 	);
+	const eventApplies = !eventIsStale || providerStateConfirmsEvent(payload.event_type, stream);
 	if (
-		!eventIsStale &&
+		eventApplies &&
 		payload.event_type === "SUBSCRIPTION_CYCLE_RENEWAL_FAILED" &&
 		projected.status === "active"
 	) {
@@ -676,14 +750,14 @@ async function reconcileFromStreamPay(
 		projected.billingStatus = "past_due";
 	}
 	const schedulesCancellation =
-		!eventIsStale &&
+		eventApplies &&
 		payload.event_type === "SUBSCRIPTION_CANCEL_AT_PERIOD_END" &&
 		Boolean(stream.cancel_at_period_end);
 	if (schedulesCancellation) {
 		projected.cancelAt = parseDate(stream.current_period_end);
 	}
 	const confirmsCancellation =
-		!eventIsStale &&
+		eventApplies &&
 		payload.event_type === "SUBSCRIPTION_CANCELED" &&
 		projected.status === "canceled";
 	if (confirmsCancellation) {
@@ -694,18 +768,20 @@ async function reconcileFromStreamPay(
 		stampCancelScheduled: schedulesCancellation,
 		stampCanceled: confirmsCancellation,
 	});
+	// The cancel event dates the schedule, even when an earlier-processed event already saw the flag.
+	if (
+		schedulesCancellation &&
+		eventAt &&
+		existing?.cancelAtPeriodEnd &&
+		!existing.cancelScheduledAt
+	) {
+		projected.cancelScheduledAt = eventAt;
+	}
 
 	if (existing) {
-		const projectedStatus = projected.status ?? existing.status;
-		if (!isTerminalSubscriptionStatus(projectedStatus)) {
-			const desiredSlotKey = subscriptionSlotKey(
-				existing.referenceType ?? "user",
-				existing.referenceId,
-				projected.group === undefined ? existing.group : projected.group,
-			);
-			if (existing.activeSlotKey !== desiredSlotKey) {
-				projected.activeSlotKey = desiredSlotKey;
-			}
+		const slotKey = liveSlotKey(existing, projected);
+		if (slotKey && existing.activeSlotKey !== slotKey) {
+			projected.activeSlotKey = slotKey;
 		}
 		const updated = await updateReconciledSubscription(
 			ctx,
@@ -714,7 +790,7 @@ async function reconcileFromStreamPay(
 			projected,
 			streampaySubscriptionId,
 		);
-		if (eventIsStale) {
+		if (!eventApplies) {
 			logger(ctx).info(
 				`webhook ${payload.event_type}: ignored stale lifecycle callback for sub=${streampaySubscriptionId}.`,
 			);
@@ -968,27 +1044,37 @@ async function handleRenewalEvidence(
 			existing.providerUpdatedAt instanceof Date &&
 			eventAt.getTime() < existing.providerUpdatedAt.getTime(),
 	);
+	const evidenceInvoiceId =
+		payload.data?.invoice?.id ?? (payload.entity_type === "INVOICE" ? payload.entity_id : null);
+	const settlesLatestInvoice =
+		evidenceInvoiceId !== null &&
+		stream.latest_invoice?.id === evidenceInvoiceId &&
+		stream.latest_invoice.status === "COMPLETED";
+	const evidenceApplies = !eventIsStale || settlesLatestInvoice;
 	const projected: Partial<Subscription> = {
 		...projectSubscriptionFields(stream, existing),
 		...projectPlanFields(stream, plans),
-		...(eventIsStale
-			? existing.billingStatus === "past_due" && toLocalStatus(stream.status) === "active"
+		...(evidenceApplies
+			? { billingStatus: "current" }
+			: existing.billingStatus === "past_due" && toLocalStatus(stream.status) === "active"
 				? { status: "past_due", billingStatus: "past_due" }
-				: {}
-			: { billingStatus: "current" }),
+				: {}),
 	};
+	const slotKey = liveSlotKey(existing, projected);
+	if (slotKey && existing.activeSlotKey !== slotKey) {
+		projected.activeSlotKey = slotKey;
+	}
 	const previousPeriodEnd = existing.periodEnd?.getTime() ?? null;
 	const projectedPeriodEnd = projected.periodEnd?.getTime() ?? null;
 	const periodAdvanced =
 		previousPeriodEnd !== null &&
 		projectedPeriodEnd !== null &&
 		projectedPeriodEnd > previousPeriodEnd;
-	const cycleAdvanced =
-		existing.currentCycleNumber !== null &&
-		existing.currentCycleNumber !== undefined &&
-		projected.currentCycleNumber !== null &&
-		projected.currentCycleNumber !== undefined &&
-		projected.currentCycleNumber > existing.currentCycleNumber;
+	const renewedCycle = existing.renewedCycleNumber ?? existing.currentCycleNumber ?? null;
+	const projectedCycle = projected.currentCycleNumber ?? null;
+	// Period boundaries drift between cycles, so the provider's cycle counter identifies a renewal.
+	const tracksCycles = renewedCycle !== null && projectedCycle !== null;
+	const renewalAdvanced = tracksCycles ? projectedCycle > renewedCycle : periodAdvanced;
 	const eventId = extractEventId(payload);
 	const pendingCallback = existing.renewalCallbackEventId ?? null;
 	if (
@@ -1004,10 +1090,26 @@ async function handleRenewalEvidence(
 	if (pendingCallback && pendingCallback !== eventId) {
 		throw new Error(`Subscription renewal callback ${pendingCallback} is pending; retry delivery.`);
 	}
+	if (
+		!pendingCallback &&
+		projected.activeSlotKey &&
+		projected.activeSlotKey !== existing.activeSlotKey
+	) {
+		await takeSlotFromReservation(
+			ctx,
+			client,
+			projected.activeSlotKey,
+			existing.id,
+			subscriptionId,
+		);
+	}
 	const deliverCallback =
 		(pendingCallback === eventId && pendingCallback !== null) ||
-		(!eventIsStale && (periodAdvanced || cycleAdvanced || retryingRenewalCallback));
+		(evidenceApplies && (renewalAdvanced || retryingRenewalCallback));
 	const callbackOwner = deliverCallback && callbacks.onSubscriptionRenewed ? eventId : null;
+	if (deliverCallback && renewalAdvanced && projectedCycle !== null) {
+		projected.renewedCycleNumber = projectedCycle;
+	}
 	const updated = await ctx.context.adapter.update<Subscription>({
 		model: SUBSCRIPTION_MODEL,
 		// Recovery must retain the pending cycle, even if Stream has already advanced again.
@@ -1018,6 +1120,7 @@ async function handleRenewalEvidence(
 			{ field: "id", value: existing.id },
 			{ field: "periodEnd", value: existing.periodEnd ?? null },
 			{ field: "currentCycleNumber", value: existing.currentCycleNumber ?? null },
+			{ field: "renewedCycleNumber", value: existing.renewedCycleNumber ?? null },
 			{ field: "renewalCallbackEventId", value: pendingCallback },
 			{ field: "providerUpdatedAt", value: existing.providerUpdatedAt ?? null },
 			{ field: "status", value: existing.status },
@@ -1030,11 +1133,12 @@ async function handleRenewalEvidence(
 		}
 		const latest = await findSubscriptionByStreampayId(ctx, subscriptionId);
 		const anotherCallbackOwner = latest?.renewalCallbackEventId;
-		const desiredCycleAdvanced =
-			(periodAdvanced || cycleAdvanced) &&
-			(!periodAdvanced || (latest?.periodEnd?.getTime() ?? 0) >= (projectedPeriodEnd ?? 0)) &&
-			(!cycleAdvanced || (latest?.currentCycleNumber ?? 0) >= (projected.currentCycleNumber ?? 0));
-		if (anotherCallbackOwner && anotherCallbackOwner !== eventId && desiredCycleAdvanced) return;
+		const renewalClaimedElsewhere =
+			renewalAdvanced &&
+			(tracksCycles
+				? (latest?.renewedCycleNumber ?? 0) >= projectedCycle
+				: (latest?.periodEnd?.getTime() ?? 0) >= (projectedPeriodEnd ?? 0));
+		if (anotherCallbackOwner && anotherCallbackOwner !== eventId && renewalClaimedElsewhere) return;
 		throw new Error(`Subscription changed during renewal reconciliation; retry delivery.`);
 	}
 	const row = updated;

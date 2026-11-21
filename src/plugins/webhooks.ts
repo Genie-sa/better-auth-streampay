@@ -13,6 +13,7 @@ import {
 	DEFAULT_MAX_WEBHOOK_ATTEMPTS,
 	findDueWebhookEvents,
 	markWebhookEventCompleted,
+	parkUnreplayableWebhookEvent,
 	recordWebhookEventFailure,
 	type SyncContext,
 	WEBHOOK_EVENT_MODEL,
@@ -69,20 +70,19 @@ export const webhooks = (webhooksOptions: WebhooksOptions) => {
 				});
 				if (!eventId.startsWith("handlers:") || !row)
 					throw new APIError("NOT_FOUND", { message: "Webhook callback event not found." });
-				if (!row.rawPayload)
-					throw new APIError("BAD_REQUEST", { message: "Webhook callback has no stored payload." });
+				const unreplayable = async (message: string): Promise<never> => {
+					await parkUnreplayableWebhookEvent(syncContext, row, message);
+					throw new APIError("BAD_REQUEST", { message });
+				};
+				if (!row.rawPayload) return unreplayable("Webhook callback has no stored payload.");
 				let payload: unknown;
 				try {
 					payload = JSON.parse(row.rawPayload);
 				} catch {
-					throw new APIError("BAD_REQUEST", {
-						message: "Stored webhook payload is not valid JSON.",
-					});
+					return unreplayable("Stored webhook payload is not valid JSON.");
 				}
 				if (!isStreamPayWebhookEnvelope(payload))
-					throw new APIError("BAD_REQUEST", {
-						message: "Stored webhook payload is not a valid event envelope.",
-					});
+					return unreplayable("Stored webhook payload is not a valid event envelope.");
 				const previousStatus = row.status;
 				const claimed = await claimWebhookEventForReplay(syncContext, row);
 				if (!claimed?.lockedBy)

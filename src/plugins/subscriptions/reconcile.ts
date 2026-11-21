@@ -140,7 +140,7 @@ export async function syncSubscriptionFromUpstream(
 
 export function projectSubscriptionFields(
 	sub: SubscriptionDetailed,
-	existing?: Pick<Subscription, "trialStart"> | null,
+	existing?: Pick<Subscription, "trialStart" | "currentCycleNumber" | "renewedCycleNumber"> | null,
 ): Partial<Subscription> {
 	const status = toLocalStatus(sub.status);
 	const terminal = isTerminalSubscriptionStatus(status);
@@ -165,6 +165,12 @@ export function projectSubscriptionFields(
 		periodStart,
 		periodEnd,
 		currentCycleNumber: sub.current_cycle_number ?? null,
+		// Only renewal evidence advances the baseline; other writers keep it so they cannot absorb a renewal.
+		renewedCycleNumber:
+			existing?.renewedCycleNumber ??
+			existing?.currentCycleNumber ??
+			sub.current_cycle_number ??
+			null,
 		trialStart:
 			(sub.trial_end ? (parseDate(sub.started_at) ?? periodStart) : null) ??
 			existing?.trialStart ??

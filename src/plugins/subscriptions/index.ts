@@ -14,6 +14,7 @@ import {
 	classifyWebhookFailure,
 	DEFAULT_MAX_WEBHOOK_ATTEMPTS,
 	markWebhookEventCompleted,
+	parkUnreplayableWebhookEvent,
 	recordWebhookEventFailure,
 	type SyncContext,
 	syncWebhookPayload,
@@ -155,27 +156,27 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 							message: `Webhook event ${eventId} not found.`,
 						});
 					}
+					const unreplayable = async (message: string): Promise<never> => {
+						await parkUnreplayableWebhookEvent(syncCtx, row, message);
+						throw new APIError("BAD_REQUEST", { message });
+					};
 					if (!row.rawPayload) {
-						throw new APIError("BAD_REQUEST", {
-							message: `Webhook event ${eventId} has no rawPayload — nothing to replay (already completed cleanly?).`,
-						});
+						return unreplayable(
+							`Webhook event ${eventId} has no rawPayload — nothing to replay (already completed cleanly?).`,
+						);
 					}
 
 					let parsedPayload: unknown;
 					try {
 						parsedPayload = JSON.parse(row.rawPayload);
 					} catch {
-						throw new APIError("BAD_REQUEST", {
-							message: `Webhook event ${eventId} has malformed stored JSON.`,
-						});
+						return unreplayable(`Webhook event ${eventId} has malformed stored JSON.`);
 					}
 					if (
 						!isStreamPayWebhookEnvelope(parsedPayload) ||
 						!isKnownStreamPayWebhookPayload(parsedPayload)
 					) {
-						throw new APIError("BAD_REQUEST", {
-							message: `Webhook event ${eventId} has an invalid stored payload.`,
-						});
+						return unreplayable(`Webhook event ${eventId} has an invalid stored payload.`);
 					}
 					const payload = parsedPayload;
 					const plans = await plansRef();
