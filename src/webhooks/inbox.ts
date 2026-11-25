@@ -14,7 +14,11 @@ const WEBHOOK_RETRY_DELAYS_MS = [5, 30, 120, 360, 720].map((minutes) => minutes 
 const UNREPLAYABLE_PAYLOAD_CODE = "UNREPLAYABLE_PAYLOAD";
 const SCOPE_DISABLED_CODE = "WEBHOOK_INBOX_SCOPE_DISABLED";
 export const HANDLERS_EVENT_ID_PREFIX = "handlers";
-const SCOPED_EVENT_ID_PREFIXES: readonly string[] = [HANDLERS_EVENT_ID_PREFIX];
+export const ACTIVATION_EVENT_ID_PREFIX = "activation";
+const SCOPED_EVENT_ID_PREFIXES: readonly string[] = [
+	HANDLERS_EVENT_ID_PREFIX,
+	ACTIVATION_EVENT_ID_PREFIX,
+];
 
 export type WebhookEventStatus = "pending" | "completed" | "dead_letter";
 
@@ -67,6 +71,7 @@ export class WebhookProcessingError extends Error {
 
 /** What a scope learns about the attempt it is running. */
 export interface WebhookInboxAttempt {
+	eventId: string | null;
 	previousError: string | null;
 	previousErrorCode: string | null;
 }
@@ -74,12 +79,13 @@ export interface WebhookInboxAttempt {
 export type WebhookEventRunner = (ctx: SyncContext, attempt: WebhookInboxAttempt) => Promise<void>;
 
 /**
- * One kind of work the inbox runs for a StreamPay event. Subscription sync and generic handlers are
- * the two scopes; each keeps its own inbox row per event, distinguished by `eventIdPrefix`.
+ * One kind of work the inbox runs for a StreamPay event, identified by `eventIdPrefix`.
  */
 export interface WebhookInboxScope {
 	/** `null` keeps the unprefixed event IDs that subscription sync has always stored. */
 	eventIdPrefix: string | null;
+	/** Internal scopes can share a receipt across distinct deliveries of the same business event. */
+	eventKey?: (payload: StreamPayWebhookEnvelope) => string;
 	maxAttempts: number;
 	/** Returns the work for an event this scope handles, or `null` to leave the event alone. */
 	prepare: (payload: StreamPayWebhookEnvelope) => WebhookEventRunner | null;
@@ -100,8 +106,7 @@ export interface WebhookInbox {
 	 * Adds a scope. A scope that is not `replayable` keeps its discard hook for rows it stored
 	 * earlier, but its events are neither replayed nor retried.
 	 *
-	 * @throws TypeError for a prefix other than `null` or `HANDLERS_EVENT_ID_PREFIX`, which replay
-	 * could not route.
+	 * @throws TypeError if replay cannot route the prefix.
 	 */
 	register: (scope: WebhookInboxScope, options?: { replayable?: boolean }) => void;
 	isEnabled: () => boolean;
@@ -116,14 +121,19 @@ export interface WebhookInbox {
 	processDue: (ctx: SyncContext, limit: number) => Promise<ProcessDueWebhookEventsResult>;
 }
 
-export function webhookEventId(payload: StreamPayWebhookEnvelope): string | null {
+function legacyEventId(payload: StreamPayWebhookEnvelope): string | null {
 	if (!payload.timestamp || !payload.entity_id) return null;
 	return `${payload.event_type}:${payload.entity_id}:${payload.timestamp}`;
 }
 
-function scopedEventId(payload: StreamPayWebhookEnvelope, prefix: string | null): string | null {
-	const sourceEventId = webhookEventId(payload);
-	return sourceEventId && (prefix ? `${prefix}:${sourceEventId}` : sourceEventId);
+export function webhookEventId(payload: StreamPayWebhookEnvelope): string | null {
+	return payload.webhook_delivery_id
+		? `delivery:${payload.webhook_delivery_id}`
+		: legacyEventId(payload);
+}
+
+function scopedEventId(eventId: string | null, prefix: string | null): string | null {
+	return eventId && (prefix ? `${prefix}:${eventId}` : eventId);
 }
 
 /** CAS clauses that match only while no worker has claimed, advanced, or finished the row. */
@@ -198,9 +208,19 @@ export async function claimOrAdvanceWebhookEvent(
 	signatureHeader: string | null,
 	maxAttempts: number,
 	scope?: string,
+	eventKey?: string,
 ): Promise<ClaimAdvanceResult> {
 	const log = scopedLogger(ctx.context.logger);
-	const eventId = scopedEventId(payload, scope ?? null);
+	const prefix = scope ?? null;
+	const legacyId = scopedEventId(legacyEventId(payload), prefix);
+	const legacyRow =
+		eventKey === undefined && payload.webhook_delivery_id && legacyId
+			? await ctx.context.adapter.findOne<WebhookEventRow>({
+					model: WEBHOOK_EVENT_MODEL,
+					where: [{ field: "eventId", value: legacyId }],
+				})
+			: null;
+	const eventId = legacyRow?.eventId ?? scopedEventId(eventKey ?? webhookEventId(payload), prefix);
 	if (!eventId) {
 		log.warn(
 			`webhook ${payload.event_type}: missing entity_id/timestamp — processing without dedupe.`,
@@ -211,31 +231,35 @@ export async function claimOrAdvanceWebhookEvent(
 	const now = new Date();
 	const lockId = randomUUID();
 
-	try {
-		const inserted = await ctx.context.adapter.create<WebhookEventRow>({
-			model: WEBHOOK_EVENT_MODEL,
-			data: {
-				eventId,
-				eventType: payload.event_type,
-				status: "pending",
-				attemptCount: 1,
-				receivedAt: now,
-				lastAttemptAt: now,
-				lockedAt: now,
-				lockedBy: lockId,
-				rawPayload: rawBody,
-				signatureHeader,
-			},
-		});
-		return { action: "process", row: inserted };
-	} catch (err) {
-		if (!isUniqueConstraintError(err)) throw err;
+	if (!legacyRow) {
+		try {
+			const inserted = await ctx.context.adapter.create<WebhookEventRow>({
+				model: WEBHOOK_EVENT_MODEL,
+				data: {
+					eventId,
+					eventType: payload.event_type,
+					status: "pending",
+					attemptCount: 1,
+					receivedAt: now,
+					lastAttemptAt: now,
+					lockedAt: now,
+					lockedBy: lockId,
+					rawPayload: rawBody,
+					signatureHeader,
+				},
+			});
+			return { action: "process", row: inserted };
+		} catch (err) {
+			if (!isUniqueConstraintError(err)) throw err;
+		}
 	}
 
-	const existing = await ctx.context.adapter.findOne<WebhookEventRow>({
-		model: WEBHOOK_EVENT_MODEL,
-		where: [{ field: "eventId", value: eventId }],
-	});
+	const existing =
+		legacyRow ??
+		(await ctx.context.adapter.findOne<WebhookEventRow>({
+			model: WEBHOOK_EVENT_MODEL,
+			where: [{ field: "eventId", value: eventId }],
+		}));
 	if (!existing) {
 		throw new Error(
 			`Webhook inbox row missing after unique conflict for ${eventId}; retry delivery.`,
@@ -438,6 +462,7 @@ async function runClaimedEvent(
 	if (!lockId) throw new Error(`Webhook inbox row ${claimed.eventId} was claimed without a lease.`);
 	try {
 		await run(ctx, {
+			eventId: claimed.eventId,
 			previousError: claimed.lastError ?? null,
 			previousErrorCode: claimed.lastErrorCode ?? null,
 		});
@@ -480,6 +505,7 @@ export async function deliverWebhookEvent(
 		request.signatureHeader,
 		scope.maxAttempts,
 		scope.eventIdPrefix ?? undefined,
+		scope.eventKey?.(payload),
 	);
 	if (claim.action === "skip" && claim.reason === "in_progress") {
 		throw new WebhookEventInProgressError(payload.event_type);
@@ -498,7 +524,7 @@ export async function deliverWebhookEvent(
 			signatureHeader: request.signatureHeader,
 		});
 	} else {
-		await run(ctx, { previousError: null, previousErrorCode: null });
+		await run(ctx, { eventId: null, previousError: null, previousErrorCode: null });
 	}
 	return "processed";
 }

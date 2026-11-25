@@ -74,6 +74,7 @@ export interface StreamPayWebhookData {
 }
 
 const StreamPayWebhookEnvelopeSchema = z.object({
+	webhook_delivery_id: z.string().min(1).max(128).optional(),
 	event_type: z.string().min(1),
 	entity_type: z.string().min(1),
 	entity_id: z.string().min(1),
