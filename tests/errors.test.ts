@@ -103,12 +103,23 @@ describe("toAPIError", () => {
 		);
 	});
 
-	it("omits the tail bracket when no parsed fields are available", () => {
+	it("omits unclassified error messages", () => {
 		const logger = createMockLogger();
 		expect(() => toAPIError("generic:", new Error("network down"), logger)).toThrow();
 		const message = logger.error.mock.calls[0]?.[0];
-		expect(message).toContain("generic: network down");
+		expect(message).toBe("generic: StreamPay request failed");
 		expect(message).not.toContain("[");
+	});
+
+	it("omits provider body content and validation messages from logs", () => {
+		const logger = createMockLogger();
+		const err = mockApiError(422, {
+			detail: [{ loc: ["body", "secret"], msg: "echoed-value", input: "private" }],
+		});
+		expect(() => toAPIError("validation failed:", err, logger)).toThrow();
+		expect(logger.error).toHaveBeenCalledExactlyOnceWith(
+			"validation failed: StreamPay request failed [status=422]",
+		);
 	});
 
 	it("re-throws existing APIError instances untouched", () => {

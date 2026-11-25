@@ -126,7 +126,7 @@ describe("consumer hooks", () => {
 			expect(mockClient.createConsumer).not.toHaveBeenCalled();
 		});
 
-		it("throws generic message and logs detail when StreamPay rejects createConsumer — orphan-row fix", async () => {
+		it("logs only the status and code when StreamPay rejects consumer creation", async () => {
 			const options = createEagerTestStreamPayOptions({ client: mockClient });
 			mockClient.createConsumer.mockRejectedValue(
 				mockApiError(403, {
@@ -145,6 +145,9 @@ describe("consumer hooks", () => {
 				/provisioning failed/,
 			);
 			expect(ctx.context.logger.error).toHaveBeenCalledWith(
+				expect.stringContaining("[status=403 code=STREAM_ERROR]"),
+			);
+			expect(ctx.context.logger.error).not.toHaveBeenCalledWith(
 				expect.stringContaining("sandbox mode"),
 			);
 		});
@@ -265,7 +268,7 @@ describe("consumer hooks", () => {
 				});
 			});
 
-			it("falls through to a generic error when the scan cannot find the duplicate (detail logged server-side)", async () => {
+			it("returns a generic error and omits the email when the duplicate cannot be found", async () => {
 				const options = createEagerTestStreamPayOptions({ client: mockClient });
 				mockClient.createConsumer.mockRejectedValue(duplicateError);
 
@@ -278,7 +281,10 @@ describe("consumer hooks", () => {
 					/provisioning failed/,
 				);
 				expect(ctx.context.logger.error).toHaveBeenCalledWith(
-					expect.stringContaining("Consumer with email"),
+					expect.stringContaining("[status=400 code=DUPLICATE_CONSUMER]"),
+				);
+				expect(ctx.context.logger.error).not.toHaveBeenCalledWith(
+					expect.stringContaining("test@example.com"),
 				);
 			});
 

@@ -150,6 +150,41 @@ describe("admin() plugin", () => {
 	});
 
 	describe("refund hook", () => {
+		it("recovers a full refund after an ambiguous response without repeating the write", async () => {
+			const after = createMockPayment({ id: "pay_42", current_status: "REFUNDED" });
+			mockClient.refundPayment.mockRejectedValueOnce(mockApiError(503, {}));
+			mockClient.getPayment.mockResolvedValueOnce(after);
+			const handler = adminHandler(mockClient, "adminRefundPayment");
+			const ctx = createMockContext({ user: createAdminUser() });
+			ctx.params = { id: "pay_42" };
+			ctx.body = { refund_reason: "OTHER" };
+
+			await expect(handler(ctx)).resolves.toEqual(after);
+			expect(mockClient.refundPayment).toHaveBeenCalledTimes(1);
+			expect(mockClient.getPayment).toHaveBeenCalledExactlyOnceWith("pay_42");
+		});
+
+		it("reports an incomplete refund when StreamPay rejects the remaining balance", async () => {
+			mockClient.refundPayment.mockRejectedValueOnce(
+				mockApiError(400, { error: { code: "PAYMENT_REFUNDED_ALREADY" } }),
+			);
+			mockClient.getPayment.mockResolvedValueOnce(
+				Object.assign(createMockPayment({ id: "pay_42" }), {
+					current_status: "PARTIALLY_REFUNDED",
+				}),
+			);
+			const handler = adminHandler(mockClient, "adminRefundPayment");
+			const ctx = createMockContext({ user: createAdminUser() });
+			ctx.params = { id: "pay_42" };
+			ctx.body = { refund_reason: "OTHER" };
+
+			await expect(handler(ctx)).rejects.toMatchObject({
+				code: "CONFLICT",
+				errorCode: "PAYMENT_REFUND_REVIEW_REQUIRED",
+			});
+			expect(mockClient.refundPayment).toHaveBeenCalledTimes(1);
+		});
+
 		it("runs onRefund before the SDK call and can block the refund", async () => {
 			const onRefund =
 				vi.fn<
@@ -173,7 +208,7 @@ describe("admin() plugin", () => {
 			expect(onRefund).toHaveBeenCalledWith({
 				user: expect.objectContaining({ id: "admin-1" }),
 				paymentId: "pay_42",
-				request: ctx.body,
+				request: { ...ctx.body, allow_refund_multiple_related_payments: false },
 			});
 			expect(onRefund.mock.invocationCallOrder[0]).toBeLessThan(
 				mockClient.refundPayment.mock.invocationCallOrder[0] as number,

@@ -76,6 +76,21 @@ describe("admin API contracts through the published Stream SDK", () => {
 		expect(request?.searchParams.has("statuses")).toBe(false);
 	});
 
+	it("rejects invalid refund amounts and options at the request boundary", () => {
+		const sdk = StreamSDK.init("test-key");
+		const route = admin()(createTestStreamPayOptions({ client: sdk })).endpoints
+			.adminRefundPayment as unknown as { config: { body: z.ZodType } };
+		const body = route.config.body;
+		for (const amount of ["0.00", "-1.00", "garbage", 0, Number.POSITIVE_INFINITY]) {
+			expect(body.safeParse({ refund_reason: "OTHER", amount }).success).toBe(false);
+		}
+		expect(
+			body.safeParse({ refund_reason: "OTHER", payment_is_part_of_related_set: "true" }).success,
+		).toBe(false);
+		expect(body.safeParse({ refund_reason: "OTHER", amount: "5.50" }).success).toBe(true);
+		expect(body.safeParse({ refund_reason: "OTHER" }).success).toBe(true);
+	});
+
 	it.each(endpoints)("%s rejects unsafe page integers at the request boundary", (endpoint) => {
 		const sdk = StreamSDK.init("test-key");
 		const route = admin()(createTestStreamPayOptions({ client: sdk })).endpoints[

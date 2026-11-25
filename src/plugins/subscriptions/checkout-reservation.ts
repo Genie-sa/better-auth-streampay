@@ -52,7 +52,7 @@ function subscriptionAlreadyActiveError(): APIError {
  * A missing link is already unpayable. Custom clients without the status API cannot be
  * compensated, so the release proceeds and a late payment is handled by webhook slot recovery.
  */
-async function deactivatePaymentLink(
+export async function deactivatePaymentLink(
 	client: StreamPayClient,
 	paymentLinkId: string,
 	log: { warn: (message: string) => void },

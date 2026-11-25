@@ -13,7 +13,7 @@ import {
 	isNotFoundError,
 	resolveDuplicateConsumer,
 } from "../utils/ensure-consumer";
-import { formatStreamPayError } from "../utils/format-error";
+import { summarizeStreamPayError } from "../utils/format-error";
 import { getLogger } from "../utils/logger";
 import { asSessionUser } from "../utils/session";
 
@@ -64,7 +64,7 @@ export const onBeforeUserCreate =
 			}
 
 			getLogger(context).error(
-				`consumer creation failed for user=${user.id ?? "<pre-insert>"}: ${formatStreamPayError(err)}`,
+				`consumer creation failed for user=${user.id ?? "<pre-insert>"}: ${summarizeStreamPayError(err)}`,
 			);
 			throw new APIError("INTERNAL_SERVER_ERROR", {
 				message: "StreamPay consumer provisioning failed. Please try again.",
@@ -87,7 +87,7 @@ export const onAfterUserCreate =
 			});
 		} catch (err: unknown) {
 			getLogger(context).error(
-				`consumer external_id link failed for user=${sessionUser.id} consumer=${sessionUser.streampayConsumerId}: ${formatStreamPayError(err)}`,
+				`consumer external_id link failed for user=${sessionUser.id} consumer=${sessionUser.streampayConsumerId}: ${summarizeStreamPayError(err)}`,
 			);
 		}
 	};
@@ -131,14 +131,14 @@ export const onUserUpdate =
 						);
 					} catch (clearErr: unknown) {
 						getLogger(context).error(
-							`stale-link clear failed for user=${sessionUser.id}: ${formatStreamPayError(clearErr)}`,
+							`stale-link clear failed for user=${sessionUser.id}: ${summarizeStreamPayError(clearErr)}`,
 						);
 					}
 				}
 				return;
 			}
 			getLogger(context).error(
-				`consumer update failed for user=${sessionUser.id} consumer=${sessionUser.streampayConsumerId}: ${formatStreamPayError(err)}`,
+				`consumer update failed for user=${sessionUser.id} consumer=${sessionUser.streampayConsumerId}: ${summarizeStreamPayError(err)}`,
 			);
 		}
 	};
@@ -157,7 +157,7 @@ export const onUserDelete =
 		} catch (err: unknown) {
 			if (isNotFoundError(err)) return;
 			getLogger(context).error(
-				`consumer delete failed for user=${sessionUser.id} consumer=${sessionUser.streampayConsumerId}: ${formatStreamPayError(err)}`,
+				`consumer delete failed for user=${sessionUser.id} consumer=${sessionUser.streampayConsumerId}: ${summarizeStreamPayError(err)}`,
 			);
 		}
 	};

@@ -1,5 +1,6 @@
 import { APIError } from "better-auth/api";
 import { mapToErrorCode } from "../error-codes";
+import { summarizeStreamPayError } from "./format-error";
 import { parseStreamPayError } from "./parse-error";
 import type { StreamPaySessionUser } from "./session";
 
@@ -45,21 +46,7 @@ export function toAPIError(
 			? { logPrefix: messageOrConfig, userMessage: messageOrConfig }
 			: messageOrConfig;
 	const parsed = parseStreamPayError(err);
-	const tail = [
-		parsed.status !== undefined ? `status=${parsed.status}` : undefined,
-		parsed.code ? `code=${parsed.code}` : undefined,
-		parsed.requestId ? `request_id=${parsed.requestId}` : undefined,
-	].filter((segment): segment is string => segment !== undefined);
-	const validationSummary =
-		parsed.validationErrors.length > 0
-			? ` validation=${parsed.validationErrors
-					.map((issue) => `${issue.loc.join(".")}: ${issue.message}`)
-					.join(" | ")}`
-			: "";
-	const logDetail =
-		(tail.length > 0 ? `${parsed.message} [${tail.join(" ")}]` : parsed.message) +
-		validationSummary;
-	logger.error(`${logPrefix} ${logDetail}`);
+	logger.error(`${logPrefix} ${summarizeStreamPayError(err)}`);
 	throw new APIError(statusToAPIErrorStatus(parsed.status), {
 		code: mapToErrorCode(parsed.code, parsed.status),
 		message: userMessage,

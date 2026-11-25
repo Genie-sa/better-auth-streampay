@@ -1,6 +1,6 @@
 import type { Where } from "better-auth";
 import { APIError } from "better-auth/api";
-import { formatStreamPayError } from "./format-error";
+import { summarizeStreamPayError } from "./format-error";
 import { getLogger } from "./logger";
 import type { StreamPaySessionUser } from "./session";
 
@@ -97,7 +97,7 @@ async function findConsumerOwner(
 		});
 	} catch (err: unknown) {
 		getLogger(ctx).error(
-			`consumer ownership check failed for consumer=${consumerId}: ${formatStreamPayError(err)}`,
+			`consumer ownership check failed for consumer=${consumerId}: ${summarizeStreamPayError(err)}`,
 		);
 		throw consumerLinkUnavailable();
 	}
@@ -150,7 +150,7 @@ export async function linkConsumer(
 			update: { streampayConsumerId: consumerId },
 		});
 	} catch (err: unknown) {
-		log.error(`consumer link write failed for user=${userId}: ${formatStreamPayError(err)}`);
+		log.error(`consumer link write failed for user=${userId}: ${summarizeStreamPayError(err)}`);
 		await assertConsumerUnclaimed(ctx, consumerId, userId);
 		throw consumerLinkUnavailable();
 	}
