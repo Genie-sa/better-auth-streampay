@@ -13,6 +13,7 @@ import type {
 	StreamPayWebhookPayload,
 } from "../../webhooks/events";
 import {
+	ACTIVATION_EVENT_ID_PREFIX,
 	DEFAULT_MAX_WEBHOOK_ATTEMPTS,
 	deliverWebhookEvent,
 	WEBHOOK_EVENT_MODEL,
@@ -61,6 +62,7 @@ export { subscriptionItemProductId } from "./reconcile";
 
 const SUBSCRIPTION_MODEL = "subscription";
 const RENEWAL_CALLBACK_FAILURE_CODE = "SUBSCRIPTION_RENEWAL_CALLBACK_FAILED";
+const DIRECT_ACTIVATION_CALLBACK_FAILURE_CODE = "SUBSCRIPTION_DIRECT_ACTIVATION_CALLBACK_FAILED";
 /** Rows written before `RENEWAL_CALLBACK_FAILURE_CODE` existed only carry the message. */
 const LEGACY_RENEWAL_CALLBACK_FAILURE_PREFIX =
 	"Subscription callback onSubscriptionRenewed failed:";
@@ -166,6 +168,7 @@ async function fireCallback(
 	data: SubscriptionCallbackData,
 	callbackName: string,
 	retryOnError: boolean,
+	failureCode?: string,
 ): Promise<void> {
 	if (!callback) return;
 	try {
@@ -174,7 +177,7 @@ async function fireCallback(
 		const msg = summarizeStreamPayError(err);
 		logger(ctx).error(`subscription callback ${callbackName} failed: ${msg}`);
 		if (retryOnError) {
-			throw new SubscriptionCallbackDeliveryError(callbackName, err);
+			throw new SubscriptionCallbackDeliveryError(callbackName, err, failureCode);
 		}
 	}
 }
@@ -182,13 +185,14 @@ async function fireCallback(
 class SubscriptionCallbackDeliveryError extends WebhookProcessingError {
 	readonly callbackName: string;
 
-	constructor(callbackName: string, cause: unknown) {
+	constructor(callbackName: string, cause: unknown, failureCode?: string) {
 		const message = cause instanceof Error ? cause.message : String(cause);
 		super(
 			`Subscription callback ${callbackName} failed: ${message}`,
-			callbackName === "onSubscriptionRenewed"
-				? RENEWAL_CALLBACK_FAILURE_CODE
-				: "SubscriptionCallbackDeliveryError",
+			failureCode ??
+				(callbackName === "onSubscriptionRenewed"
+					? RENEWAL_CALLBACK_FAILURE_CODE
+					: "SubscriptionCallbackDeliveryError"),
 		);
 		this.name = "SubscriptionCallbackDeliveryError";
 		this.callbackName = callbackName;
@@ -304,7 +308,11 @@ function updateReconciledSubscription(
 
 export type LinkOptions = Pick<
 	SubscriptionsOptions,
-	"appId" | "resolveSubscriptionReference" | "resolveUnlinkedSubscription"
+	| "appId"
+	| "resolveSubscriptionReference"
+	| "resolveUnlinkedSubscription"
+	| "reconcilePayments"
+	| "maxWebhookAttempts"
 >;
 
 function linkPolicy(options: LinkOptions, source: LinkPolicy["source"]): LinkPolicy {
@@ -485,7 +493,11 @@ async function reconcileFromStreamPay(
 	plans: ResolvedPlans,
 	policy: LinkPolicy,
 	prefetched?: SubscriptionDetailed,
-): Promise<{ row: Subscription | null; stream: SubscriptionDetailed | null }> {
+): Promise<{
+	row: Subscription | null;
+	stream: SubscriptionDetailed | null;
+	previous?: Subscription;
+}> {
 	const streampaySubscriptionId = payload.entity_id;
 	if (!streampaySubscriptionId) {
 		logger(ctx).warn(`webhook ${payload.event_type} has no entity_id — cannot reconcile.`);
@@ -571,7 +583,7 @@ async function reconcileFromStreamPay(
 			);
 			return { row: null, stream };
 		}
-		return { row: updated, stream };
+		return { row: updated, stream, previous: existing };
 	}
 
 	const correlation = await resolveUnlinkedCorrelation(ctx, payload, stream, plans, policy);
@@ -718,7 +730,9 @@ async function reconcileFromStreamPay(
 }
 
 interface SubscriptionEventOptions {
+	eventId?: string | null;
 	retryOnCallbackError: boolean;
+	retryingDirectActivationCallback?: boolean;
 	retryingRenewalCallback: boolean;
 	/** The inbox table exists, so a renewal lock whose event already completed can be released. */
 	inboxEnabled: boolean;
@@ -762,10 +776,11 @@ async function processSubscriptionEvent(
 			options.retryOnCallbackError,
 			options.retryingRenewalCallback,
 			options.inboxEnabled,
+			options.eventId ?? webhookEventId(payload),
 		);
 		return;
 	}
-	const { row, stream } = await reconcileFromStreamPay(
+	const { row, stream, previous } = await reconcileFromStreamPay(
 		ctx,
 		payload,
 		client,
@@ -773,14 +788,96 @@ async function processSubscriptionEvent(
 		linkPolicy(callbacks, CREATION_EVENT_TYPES.has(payload.event_type) ? "creation" : "recovery"),
 	);
 	if (!row) return;
-	const user = await resolveRowUser(ctx, row);
+	if (
+		callbacks.reconcilePayments &&
+		callbacks.onSubscriptionActivated &&
+		payload.event_type === "SUBSCRIPTION_ACTIVATED" &&
+		!options.retryingDirectActivationCallback &&
+		initialCheckoutActivation(row, stream, payload, previous)
+	) {
+		await deliverWebhookEvent(
+			ctx,
+			initialActivationScope(client, callbacks, options.retryOnCallbackError),
+			payload,
+			{ rawBody: JSON.stringify(payload), signatureHeader: null },
+		);
+		return;
+	}
 	await dispatchSubscriptionCallback(
 		ctx,
 		payload,
-		{ subscription: row, streampaySubscription: stream, user, event: payload },
+		{
+			subscription: row,
+			streampaySubscription: stream,
+			user: await resolveRowUser(ctx, row),
+			event: payload,
+		},
 		callbacks,
 		options.retryOnCallbackError,
+		options.eventId ?? webhookEventId(payload),
 	);
+}
+
+function initialCheckoutActivation(
+	row: Subscription,
+	stream: SubscriptionDetailed | null,
+	payload: StreamPayWebhookPayload,
+	previous?: Subscription,
+): boolean {
+	if (!row.streampayPaymentLinkId || stream?.status !== "ACTIVE") return false;
+	const eventAt = parseDate(payload.timestamp);
+	if (
+		isTerminalSubscriptionStatus(previous?.status) &&
+		(!previous?.providerUpdatedAt || !eventAt || eventAt >= previous.providerUpdatedAt)
+	) {
+		return false;
+	}
+	if (payload.data?.payment_link?.id === row.streampayPaymentLinkId) return true;
+	if ((stream.current_cycle_number ?? 1) > 1) {
+		return eventAt !== null && row.periodStart !== null && eventAt < row.periodStart;
+	}
+	return (
+		stream.latest_invoice?.payment_link_id === row.streampayPaymentLinkId &&
+		stream.latest_invoice?.status === "COMPLETED"
+	);
+}
+
+/** The paid checkout's first activation has one receipt across provider delivery and recovery. */
+export function initialActivationScope(
+	client: StreamPayClient,
+	callbacks: SubscriptionCallbacks & LinkOptions,
+	retryOnCallbackError: boolean,
+): WebhookInboxScope {
+	return {
+		eventIdPrefix: ACTIVATION_EVENT_ID_PREFIX,
+		eventKey: (event) => `checkout:${event.entity_id}`,
+		maxAttempts: callbacks.maxWebhookAttempts ?? DEFAULT_MAX_WEBHOOK_ATTEMPTS,
+		isPermanentFailure: (err) => classifyWebhookFailure(err) === "PERMANENT",
+		prepare: (event) => {
+			if (event.event_type !== "SUBSCRIPTION_ACTIVATED" || !isSubscriptionSyncEvent(event)) {
+				return null;
+			}
+			return async (ctx) => {
+				const row = await findSubscriptionByStreampayId(ctx, event.entity_id);
+				if (!row) return;
+				const stream = await client.getSubscription(event.entity_id);
+				if (stream.id !== event.entity_id || stream.status !== "ACTIVE") return;
+				await fireCallback(
+					ctx,
+					callbacks.onSubscriptionActivated,
+					{
+						subscription: row,
+						streampaySubscription: stream,
+						user: await resolveRowUser(ctx, row),
+						event,
+						idempotencyKey: `subscription:${stream.id}:checkout-activation`,
+					},
+					"onSubscriptionActivated",
+					retryOnCallbackError,
+				);
+			};
+		},
+	};
 }
 
 /** The inbox scope that reconciles subscription rows from StreamPay events. */
@@ -802,7 +899,10 @@ export function subscriptionInboxScope(args: {
 			if (!isSubscriptionSyncEvent(payload)) return null;
 			return async (ctx, attempt) =>
 				processSubscriptionEvent(ctx, payload, args.client, await args.plans(), args.callbacks, {
+					eventId: attempt.eventId,
 					retryOnCallbackError: args.retryOnCallbackError !== false,
+					retryingDirectActivationCallback:
+						attempt.previousErrorCode === DIRECT_ACTIVATION_CALLBACK_FAILURE_CODE,
 					retryingRenewalCallback:
 						args.retryingRenewalCallback === true || isRenewalCallbackRetry(attempt),
 					inboxEnabled: args.inboxEnabled !== false,
@@ -986,6 +1086,7 @@ async function handleRenewalEvidence(
 	retryOnCallbackError: boolean,
 	retryingRenewalCallback: boolean,
 	inboxEnabled: boolean,
+	eventId: string | null,
 ): Promise<void> {
 	const invoiceId = payload.data?.invoice?.id ?? payload.entity_id;
 	if (!invoiceId) return;
@@ -1040,6 +1141,9 @@ async function handleRenewalEvidence(
 	const settlesLatestInvoice =
 		stream.latest_invoice?.status === "COMPLETED" &&
 		(evidenceInvoiceId === null || stream.latest_invoice.id === evidenceInvoiceId);
+	if (payload.webhook_delivery_id?.startsWith("recovery-renewal:") && !settlesLatestInvoice) {
+		throw new Error("The provider changed the renewal invoice during reconciliation.");
+	}
 	const evidenceApplies = !eventIsStale || settlesLatestInvoice;
 	const projected: Partial<Subscription> = {
 		...projectSubscriptionFields(stream, existing),
@@ -1065,7 +1169,6 @@ async function handleRenewalEvidence(
 	// Period boundaries drift between cycles, so the provider's cycle counter identifies a renewal.
 	const tracksCycles = renewedCycle !== null && projectedCycle !== null;
 	const renewalAdvanced = tracksCycles ? projectedCycle > renewedCycle : periodAdvanced;
-	const eventId = webhookEventId(payload);
 	let pendingCallback = existing.renewalCallbackEventId ?? null;
 	if (pendingCallback && pendingCallback !== eventId) {
 		const released =
@@ -1136,7 +1239,17 @@ async function handleRenewalEvidence(
 		await fireCallback(
 			ctx,
 			callbacks.onSubscriptionRenewed,
-			{ subscription: row, streampaySubscription: stream, user, event: payload },
+			{
+				subscription: row,
+				streampaySubscription: stream,
+				user,
+				event: payload,
+				idempotencyKey:
+					"subscription:" +
+					subscriptionId +
+					":renewal:" +
+					(row.renewedCycleNumber ?? evidenceInvoiceId ?? invoiceId),
+			},
 			"onSubscriptionRenewed",
 			retryOnCallbackError,
 		);
@@ -1180,10 +1293,20 @@ async function dispatchSubscriptionCallback(
 	data: SubscriptionCallbackData,
 	callbacks: SubscriptionCallbacks & LinkOptions,
 	retryOnCallbackError: boolean,
+	eventId: string | null,
 ): Promise<void> {
 	const callbackName = LIFECYCLE_CALLBACKS[payload.event_type];
 	if (!callbackName) return;
-	await fireCallback(ctx, callbacks[callbackName], data, callbackName, retryOnCallbackError);
+	await fireCallback(
+		ctx,
+		callbacks[callbackName],
+		{ ...data, ...(eventId ? { idempotencyKey: `${callbackName}:${eventId}` } : {}) },
+		callbackName,
+		retryOnCallbackError,
+		callbackName === "onSubscriptionActivated" && callbacks.reconcilePayments
+			? DIRECT_ACTIVATION_CALLBACK_FAILURE_CODE
+			: undefined,
+	);
 }
 
 export interface SubscriptionLinkRequest {

@@ -107,6 +107,8 @@ export interface Subscription {
 }
 
 export interface SubscriptionCallbackData {
+	/** Stable across retries of the same provider event or recovered subscription cycle. */
+	idempotencyKey?: string;
 	subscription: Subscription;
 	user: StreamPaySessionUser | null;
 	streampaySubscription: SubscriptionDetailed | null;
@@ -197,6 +199,8 @@ export function subscriptionSlotKey(
 }
 
 interface SubscriptionsOptionsBase extends SubscriptionCallbacks {
+	/** Enable exact provider lookup and the server-only payment reconciliation job. */
+	reconcilePayments?: boolean;
 	plans: PlansInput;
 
 	/** Paginated REST adapter for SDK versions that cannot pass freeze query parameters. */

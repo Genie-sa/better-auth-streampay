@@ -20,6 +20,7 @@ import {
 	requireConfirmedOwnedSubscription,
 	requireUser,
 } from "./access";
+import { toSyncContext } from "./adapter";
 import {
 	attachCheckoutLink,
 	deactivatePaymentLink,
@@ -33,6 +34,7 @@ import {
 	subscriptionCouponIds,
 	subscriptionItemsForUpdate,
 } from "./lifecycle";
+import { reconcileSubscriptionPayment, reconcileSubscriptionPayments } from "./payment-recovery";
 import type { ResolvedPlans } from "./plans";
 import { buildSubscriptionReadEndpoints } from "./reads";
 import {
@@ -466,6 +468,39 @@ export function buildSubscriptionEndpoints(
 			},
 		),
 
+		reconcileStreampaySubscriptionPayments: createAuthEndpoint(
+			"/subscription/reconcile-payments",
+			{
+				method: "POST",
+				body: z
+					.object({
+						limit: z.number().int().min(1).max(100).optional(),
+						offset: z.number().int().nonnegative().optional(),
+					})
+					.optional(),
+				metadata: { SERVER_ONLY: true },
+			},
+			async (ctx) => {
+				if (!subsOptions.reconcilePayments) {
+					throw new APIError("BAD_REQUEST", {
+						message: "Subscription payment reconciliation is disabled.",
+					});
+				}
+				const plans = await plansRef();
+				return ctx.json(
+					await reconcileSubscriptionPayments(
+						toSyncContext(ctx),
+						{
+							client,
+							plans,
+							subscriptions: subsOptions,
+						},
+						{ limit: ctx.body?.limit ?? 25, offset: ctx.body?.offset ?? 0 },
+					),
+				);
+			},
+		),
+
 		subscriptionSuccess: createAuthEndpoint(
 			"/subscription/success",
 			{
@@ -507,6 +542,25 @@ export function buildSubscriptionEndpoints(
 				}
 				try {
 					const plans = await plansRef();
+					if (subsOptions.reconcilePayments) {
+						const status = await reconcileSubscriptionPayment(toSyncContext(ctx), row, {
+							client,
+							plans,
+							subscriptions: subsOptions,
+						});
+						const subscription =
+							status === "recovered"
+								? await adapter.findOne<Subscription>({
+										model: SUBSCRIPTION_MODEL,
+										where: [{ field: "id", value: row.id }],
+									})
+								: row;
+						return ctx.json({
+							subscription,
+							synced: status === "recovered",
+							recoveryStatus: status,
+						});
+					}
 					const plan = plans.byName.get(row.plan);
 					if (!plan) {
 						getLogger(ctx).warn(

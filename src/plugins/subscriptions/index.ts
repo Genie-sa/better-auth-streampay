@@ -17,6 +17,7 @@ import { subscriptionTable, webhookEventTable } from "./schema";
 import { SUBSCRIPTION_STATUSES } from "./status";
 import {
 	classifyWebhookFailure,
+	initialActivationScope,
 	linkSubscriptionToReference,
 	type SubscriptionLinkRequest,
 	subscriptionInboxScope,
@@ -126,6 +127,9 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 	}
 
 	const dedupeEnabled = subsOptions.enableWebhookEventTable !== false;
+	if (subsOptions.reconcilePayments && !dedupeEnabled) {
+		throw new TypeError("subscriptions(): payment reconciliation requires the webhook inbox.");
+	}
 
 	return (options: StreamPayOptions, registry?: StreamPayPluginRegistry) => {
 		const plansRef = () => resolvePlans(subsOptions.plans);
@@ -142,6 +146,17 @@ export function subscriptions(subsOptions: SubscriptionsOptions) {
 			});
 			// Without its own inbox table the scope still releases renewal owners of rows it stored earlier.
 			registerWebhookInboxScope(registry, scope, { replayable: dedupeEnabled });
+			if (subsOptions.reconcilePayments) {
+				registerWebhookInboxScope(
+					registry,
+					initialActivationScope(
+						options.client,
+						subsOptions,
+						subsOptions.retryOnCallbackError !== false,
+					),
+					{ replayable: true },
+				);
+			}
 
 			registry.refreshSubscriptionProjection = async (ctx, subscription, source) => {
 				const log = getLogger(ctx);

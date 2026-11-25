@@ -242,6 +242,23 @@ new payment link. Deactivation is best effort, so webhook handling should still 
 links. Relative success and failure URLs resolve against the auth server; use absolute URLs when the
 storefront has a different origin.
 
+### Verify a one-time checkout
+
+Store the StreamPay payment link ID and the amount and currency you quoted on your server. A
+return from hosted checkout can ask your server to check that stored quote.
+
+```ts
+const payment = await auth.api.verifyStreampayCheckoutPayment({
+  body: { paymentLinkId, amountInSmallestUnit, currency, consumerId },
+});
+```
+
+Pass the consumer ID if your checkout assigned one. A paid result includes the provider invoice
+and payment IDs. Apply fulfillment once per payment in your own database. The helper returns
+`unpaid` for an open link without a completed invoice and `needs_review` for mismatched or ambiguous
+evidence, including an invoice with multiple payments. Applications can call this method in
+scheduled reconciliation too. Keep the expected quote in server-owned state.
+
 ## Billing portal
 
 `portal()` adds signed-in user actions:
@@ -361,6 +378,31 @@ await authClient.subscription.success({
 ```
 
 Then refresh the subscription data used by your UI.
+
+### Recover missed subscription webhooks
+
+Set `reconcilePayments: true` in `subscriptions()` and keep its webhook inbox enabled. The
+subscription success endpoint then verifies the exact reserved checkout link and provider invoice.
+Schedule the server-only reconciliation method alongside the inbox retry job when the payer may
+never return or a renewal webhook may be missed.
+
+```ts
+const { results, nextOffset } = await auth.api.reconcileStreampaySubscriptionPayments({
+  body: { limit: 25, offset: 0 },
+});
+```
+
+Carry `nextOffset` into the next batch and restart at zero after the end of each sweep. Report
+`needs_review` results to whoever handles payment exceptions. A `retry` result can be checked in
+the next sweep. Recovery verifies a paid invoice and its payment. An invoice without a confirmed
+payment does not activate a checkout. For linked subscriptions, the job checks the latest paid
+renewal cycle. The provider webhook and recovery use the same initial activation receipt and the
+same renewal cycle claim.
+
+Use `idempotencyKey` from a subscription callback to deduplicate side effects in your own database.
+The initial checkout activation key is per subscription. Renewal keys identify the confirmed cycle
+or its invoice. A callback can be retried after an interruption, so record the key with the side
+effect it protects.
 
 ### Manage a subscription
 
@@ -593,6 +635,19 @@ The IDE shows the body, query, and response types for every action.
 
 Make sure your Better Auth route accepts `GET`, `POST`, `PATCH`, `PUT`, and `DELETE`.
 
+### Durable refunds
+
+Enable `admin({ durableRefunds: true })` and generate and apply the `streampayRefundIntent` table
+migration before serving refund requests. Give each refund request an `idempotencyKey` and keep
+the same key and body when retrying it. A different refund of the same payment must wait for the
+previous request to reach a confirmed or rejected outcome. Durable refunds apply to one payment.
+
+Use `GET /admin/streampay/payments/:id/refund-intent?idempotencyKey=...` to check a request as an
+authorized admin. The response reports `pending`, `confirmed`, `rejected`, or `needs_review`, along
+with the last confirmed provider state and the cumulative `amountRefunded` in the payment's major
+currency units when available. An uncertain partial refund remains claimed for provider follow-up.
+The plugin only reads StreamPay when you retry an existing request.
+
 ## Webhooks
 
 Register this URL in the StreamPay dashboard:
@@ -630,6 +685,10 @@ the `handlers:` event ID prefix and support the existing authenticated admin rep
 The default is `false` to preserve existing installations that have no inbox table.
 A handler event that keeps failing is dead-lettered after `maxWebhookAttempts` deliveries
 (default 5), the same budget `subscriptions({ maxWebhookAttempts })` sets for subscription sync.
+
+The inbox uses StreamPay's `webhook_delivery_id` when the verified body includes it. Older
+envelopes use the existing event key. An existing inbox record keeps its original key when StreamPay
+redelivers it with a delivery ID, so upgrading preserves completed deliveries and pending work.
 
 Verified payloads are persisted when processing is claimed, so an interrupted delivery can be
 recovered after its two-minute lease expires. A delivery that arrives while another worker holds

@@ -30,6 +30,12 @@ import {
 	type WebhookEventRow,
 	type WebhookInbox,
 } from "../webhooks/inbox";
+import {
+	getRefundIntent,
+	refundIntentKey,
+	refundIntentTable,
+	runRefundIntent,
+} from "./refund-intents";
 import type { StreamPayPluginRegistry } from "./subscriptions";
 import { type PluginAdapter, toSyncContext } from "./subscriptions/adapter";
 
@@ -42,6 +48,8 @@ type SessionUserInput = User | UserWithRole | null | undefined;
 const DEFAULT_ADMIN_ROLES = ["admin"] as const;
 
 export interface AdminOptions {
+	/** Store refund intents and require a request key. Apply the refund table migration first. */
+	durableRefunds?: boolean;
 	adminRoles?: readonly string[];
 
 	isAdmin?: (user: StreamPaySessionUser, ctx: GenericEndpointContext) => boolean | Promise<boolean>;
@@ -132,6 +140,7 @@ const ConsumersListQuery = z
 
 const RefundBody = z
 	.object({
+		idempotencyKey: refundIntentKey.optional(),
 		refund_reason: z.enum(["REQUESTED_BY_CUSTOMER", "DUPLICATE", "FRAUDULENT", "OTHER"]),
 		refund_note: z.string().max(512).nullable().optional(),
 		amount: z
@@ -149,7 +158,7 @@ const RefundBody = z
 	})
 	.strict();
 
-type RefundRequest = PaymentRefundRequest & z.output<typeof RefundBody>;
+type RefundRequest = PaymentRefundRequest & Omit<z.output<typeof RefundBody>, "idempotencyKey">;
 
 function refundConflict(code: "PAYMENT_REFUND_REVIEW_REQUIRED" | "PAYMENT_REFUND_IN_PROGRESS") {
 	return new APIError("CONFLICT", $ERROR_CODES[code]);
@@ -219,11 +228,25 @@ function buildPaymentsEndpoints(client: StreamPayClient, adminOptions: AdminOpti
 						ctx.body.allow_refund_multiple_related_payments ?? false,
 				};
 
-				if (adminOptions.onRefund) {
-					await adminOptions.onRefund({ user, paymentId, request });
+				if (!adminOptions.durableRefunds) {
+					await adminOptions.onRefund?.({ user, paymentId, request });
 				}
-
 				try {
+					if (adminOptions.durableRefunds) {
+						if (!ctx.body.idempotencyKey) {
+							throw new APIError("BAD_REQUEST", $ERROR_CODES.VALIDATION_ERROR);
+						}
+						return ctx.json(
+							await runRefundIntent(
+								getAdapter(ctx),
+								client,
+								paymentId,
+								ctx.body.idempotencyKey,
+								request,
+								async () => adminOptions.onRefund?.({ user, paymentId, request }),
+							),
+						);
+					}
 					const payment = await client
 						.refundPayment(paymentId, request)
 						.catch((err: unknown) => recoverRefund(client, paymentId, request, err));
@@ -238,6 +261,22 @@ function buildPaymentsEndpoints(client: StreamPayClient, adminOptions: AdminOpti
 						getLogger(ctx),
 					);
 				}
+			},
+		),
+
+		adminGetRefundIntent: createAuthEndpoint(
+			"/admin/streampay/payments/:id/refund-intent",
+			{
+				method: "GET",
+				query: z.object({ idempotencyKey: refundIntentKey }),
+				use: [sessionMiddleware],
+			},
+			async (ctx) => {
+				await requireAdmin(ctx, adminOptions);
+				if (!adminOptions.durableRefunds) throw new APIError("NOT_FOUND", $ERROR_CODES.NOT_FOUND);
+				return ctx.json(
+					await getRefundIntent(getAdapter(ctx), client, ctx.params.id, ctx.query.idempotencyKey),
+				);
 			},
 		),
 
@@ -1157,6 +1196,7 @@ export const admin =
 	(options: StreamPayOptions, registry?: StreamPayPluginRegistry) => {
 		const client = options.client;
 		return {
+			schema: adminOptions.durableRefunds ? refundIntentTable : {},
 			endpoints: {
 				...buildPaymentsEndpoints(client, adminOptions),
 				...buildSubscriptionsEndpoints(client, adminOptions, registry),

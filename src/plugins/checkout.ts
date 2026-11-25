@@ -7,6 +7,7 @@ import { type EnsureConsumerContext, ensureConsumerForUser } from "../utils/ensu
 import { toAPIError } from "../utils/errors";
 import { summarizeStreamPayError } from "../utils/format-error";
 import { getLogger, type ScopedLogger } from "../utils/logger";
+import { findPaidCheckoutInvoice } from "../utils/payment-evidence";
 import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
 
 export interface StreamPayCustomFieldDefinition {
@@ -275,6 +276,41 @@ export const checkout = (checkoutOptions: CheckoutOptions = {}) => {
 		const client = options.client;
 		return {
 			endpoints: {
+				verifyStreampayCheckoutPayment: createAuthEndpoint(
+					"/checkout/verify-payment",
+					{
+						method: "POST",
+						metadata: { SERVER_ONLY: true },
+						body: z.object({
+							paymentLinkId: z.string().min(1),
+							amountInSmallestUnit: z.number().int().positive(),
+							currency: z.string().length(3),
+							consumerId: z.string().min(1).optional(),
+						}),
+					},
+					async (ctx) => {
+						const evidence = await findPaidCheckoutInvoice(
+							client,
+							ctx.body.paymentLinkId,
+							ctx.body.consumerId,
+						);
+						if (evidence.status !== "paid") return ctx.json({ status: evidence.status });
+						const { invoice } = evidence;
+						if (
+							invoice.subscription_id ||
+							invoice.subscription ||
+							invoice.total !== ctx.body.amountInSmallestUnit ||
+							invoice.currency !== ctx.body.currency
+						) {
+							return ctx.json({ status: "needs_review" as const });
+						}
+						return ctx.json({
+							status: "paid" as const,
+							invoiceId: invoice.id,
+							paymentId: invoice.paymentId,
+						});
+					},
+				),
 				checkout: createAuthEndpoint(
 					"/checkout",
 					{

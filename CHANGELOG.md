@@ -1,5 +1,13 @@
 # better-auth-streampay
 
+## 3.6.0
+
+### Minor Changes
+
+- Add exact payment verification for hosted checkout and opt-in reconciliation for missed subscription activation and renewal webhooks. Give callbacks stable idempotency keys and use StreamPay delivery IDs when available, with support for existing inbox records.
+
+  Add opt-in durable refund requests. Generate and apply the refund intent table migration before enabling it.
+
 ## 3.5.1
 
 ### Patch Changes

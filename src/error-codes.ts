@@ -32,6 +32,7 @@ export const $ERROR_CODES = defineErrorCodes({
 	PAYMENT_DUPLICATE: "A payment with the same information already exists.",
 	PAYMENT_INVALID_STATE: "The payment is in a state that forbids this action.",
 	PAYMENT_ALREADY_REFUNDED: "This payment has already been refunded.",
+	PAYMENT_REFUND_KEY_CONFLICT: "This request key already identifies another refund.",
 	PAYMENT_REFUND_IN_PROGRESS: "A refund is in progress. Check the payment before trying again.",
 	PAYMENT_REFUND_REVIEW_REQUIRED: "Check the refund in StreamPay before trying again.",
 	PAYMENT_REFUND_FAILED: "The payment processor rejected the refund.",
