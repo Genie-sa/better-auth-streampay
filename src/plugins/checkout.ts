@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { StreamPayOptions, StreamPayProduct } from "../types";
 import { type EnsureConsumerContext, ensureConsumerForUser } from "../utils/ensure-consumer";
 import { toAPIError } from "../utils/errors";
-import { formatStreamPayError } from "../utils/format-error";
+import { summarizeStreamPayError } from "../utils/format-error";
 import { getLogger, type ScopedLogger } from "../utils/logger";
 import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
 
@@ -246,7 +246,7 @@ async function deactivatePaymentLinkBestEffort(
 		await client.updatePaymentLinkStatus(paymentLinkId, { status: "INACTIVE" });
 	} catch (err: unknown) {
 		logger.error(
-			`checkout compensation failed for payment_link=${paymentLinkId}: ${formatStreamPayError(err)}`,
+			`checkout compensation failed for payment_link=${paymentLinkId}: ${summarizeStreamPayError(err)}`,
 		);
 	}
 }
@@ -310,7 +310,7 @@ export const checkout = (checkoutOptions: CheckoutOptions = {}) => {
 								overrides = await checkoutOptions.resolveCheckout({ user, body: ctx.body }, ctx);
 							} catch (err: unknown) {
 								if (err instanceof APIError) throw err;
-								getLogger(ctx).error(`resolveCheckout failed: ${formatStreamPayError(err)}`);
+								getLogger(ctx).error(`resolveCheckout failed: ${summarizeStreamPayError(err)}`);
 								throw new APIError("INTERNAL_SERVER_ERROR", {
 									message: "Checkout resolution failed.",
 								});
@@ -403,7 +403,9 @@ export const checkout = (checkoutOptions: CheckoutOptions = {}) => {
 										await checkoutOptions.onCheckoutCreated(callbackData, ctx);
 									} catch (err: unknown) {
 										if (err instanceof APIError) throw err;
-										getLogger(ctx).error(`onCheckoutCreated failed: ${formatStreamPayError(err)}`);
+										getLogger(ctx).error(
+											`onCheckoutCreated failed: ${summarizeStreamPayError(err)}`,
+										);
 										throw new APIError("INTERNAL_SERVER_ERROR", {
 											message: "Checkout persistence failed.",
 										});

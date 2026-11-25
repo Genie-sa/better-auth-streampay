@@ -32,6 +32,8 @@ export const $ERROR_CODES = defineErrorCodes({
 	PAYMENT_DUPLICATE: "A payment with the same information already exists.",
 	PAYMENT_INVALID_STATE: "The payment is in a state that forbids this action.",
 	PAYMENT_ALREADY_REFUNDED: "This payment has already been refunded.",
+	PAYMENT_REFUND_IN_PROGRESS: "A refund is in progress. Check the payment before trying again.",
+	PAYMENT_REFUND_REVIEW_REQUIRED: "Check the refund in StreamPay before trying again.",
 	PAYMENT_REFUND_FAILED: "The payment processor rejected the refund.",
 	PAYMENT_GATEWAY_DECLINED: "The payment was declined by the gateway.",
 	PAYMENT_GATEWAY_UNAVAILABLE: "The payment gateway is temporarily unavailable. Try again later.",
@@ -42,6 +44,8 @@ export const $ERROR_CODES = defineErrorCodes({
 	SUBSCRIPTION_NOT_FOUND: "The subscription does not exist.",
 	SUBSCRIPTION_PLAN_NOT_FOUND: "The requested subscription plan is not configured.",
 	SUBSCRIPTION_ALREADY_ACTIVE: "An active subscription already exists for this plan group.",
+	SUBSCRIPTION_CHECKOUT_QUOTE_MISMATCH:
+		"The checkout does not match this plan. Check the product settings in StreamPay.",
 	SUBSCRIPTION_CHECKOUT_IN_PROGRESS:
 		"A subscription checkout is already being created for this plan group.",
 	SUBSCRIPTION_ALREADY_CANCELED: "The subscription is already canceled.",
@@ -97,6 +101,7 @@ const RAW_CODE_MAP: Record<string, StreamPayErrorCode> = {
 	INVALID_STATUS: "PAYMENT_INVALID_STATE",
 
 	PAYMENT_REFUNDED_ALREADY: "PAYMENT_ALREADY_REFUNDED",
+	PAYMENT_REFUND_BUSY: "PAYMENT_REFUND_IN_PROGRESS",
 	PAYMENT_REFUNDED_FAILED: "PAYMENT_REFUND_FAILED",
 
 	PAYMENT_GATEWAY_DECLINED: "PAYMENT_GATEWAY_DECLINED",

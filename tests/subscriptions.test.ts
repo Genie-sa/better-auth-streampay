@@ -178,6 +178,33 @@ describe("subscriptions() endpoints", () => {
 			});
 		});
 
+		it.each([
+			{ amount_in_smallest_unit: 12_000 },
+			{ currency: "USD" as const },
+			{ recurring_interval: "YEAR" as const },
+		])("closes a subscription link that disagrees with the configured quote", async (mismatch) => {
+			const plugin = buildSubsPlugin([PRO_PLAN], mockClient);
+			const handler = unwrapHandler(plugin.endpoints.upgradeSubscription);
+			mockClient.createPaymentLink.mockResolvedValue({
+				id: "pl_mismatched",
+				url: "https://pay.streampay.sa/pl_mismatched",
+				...mismatch,
+			});
+			mockClient.getPaymentUrl.mockReturnValue("https://pay.streampay.sa/pl_mismatched");
+			const { ctx, adapter } = setupCtx({
+				user: { streampayConsumerId: "cons_linked" },
+				body: { plan: "pro" },
+			});
+
+			await expect(handler(ctx)).rejects.toMatchObject({
+				errorCode: "SUBSCRIPTION_CHECKOUT_QUOTE_MISMATCH",
+			});
+			expect(mockClient.updatePaymentLinkStatus).toHaveBeenCalledExactlyOnceWith("pl_mismatched", {
+				status: "INACTIVE",
+			});
+			expect(getSubscriptionRows(adapter)).toHaveLength(0);
+		});
+
 		it("quotes and persists a fixed seat quantity", async () => {
 			const plugin = buildSubsPlugin(
 				[{ ...PRO_PLAN, seatBilling: { minimum: 2, maximum: 50 } }],

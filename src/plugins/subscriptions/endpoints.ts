@@ -12,6 +12,7 @@ import { $ERROR_CODES } from "../../error-codes";
 import type { StreamPayOptions } from "../../types";
 import { ensureConsumerForUser } from "../../utils/ensure-consumer";
 import { toAPIError } from "../../utils/errors";
+import { summarizeStreamPayError } from "../../utils/format-error";
 import { getLogger } from "../../utils/logger";
 import {
 	authorizeReference,
@@ -21,6 +22,7 @@ import {
 } from "./access";
 import {
 	attachCheckoutLink,
+	deactivatePaymentLink,
 	deleteReservedSubscription,
 	resumeOrReserveCheckoutSlot,
 } from "./checkout-reservation";
@@ -404,6 +406,28 @@ export function buildSubscriptionEndpoints(
 						});
 					}
 					paymentLinkId = link.id;
+					const hasUnadjustedQuote = !linkInput.trial_period_days && !link.coupons?.length;
+					const amountMismatch =
+						hasUnadjustedQuote &&
+						link.amount_in_smallest_unit !== undefined &&
+						link.amount_in_smallest_unit !== quotedSeatTotal(plan, seats);
+					const currencyMismatch =
+						link.currency !== undefined && link.currency !== linkInput.currency;
+					const intervalMismatch =
+						link.recurring_interval != null && link.recurring_interval !== plan.billingInterval;
+					const intervalCountMismatch =
+						link.recurring_interval_count != null &&
+						link.recurring_interval_count !== (plan.billingIntervalCount ?? 1);
+					if (amountMismatch || currencyMismatch || intervalMismatch || intervalCountMismatch) {
+						try {
+							await deactivatePaymentLink(client, paymentLinkId, getLogger(ctx));
+						} catch (err) {
+							getLogger(ctx).error(
+								`Could not deactivate misquoted checkout link=${paymentLinkId}: ${summarizeStreamPayError(err)}`,
+							);
+						}
+						throw new APIError("CONFLICT", $ERROR_CODES.SUBSCRIPTION_CHECKOUT_QUOTE_MISMATCH);
+					}
 					url = client.getPaymentUrl(link);
 				} catch (err) {
 					await deleteReservedSubscription(

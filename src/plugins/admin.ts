@@ -20,8 +20,9 @@ import type { StreamPayClient, StreamPayOptions } from "../types";
 import { unlinkConsumer } from "../utils/consumer-link";
 import { isNotFoundError } from "../utils/ensure-consumer";
 import { toAPIError } from "../utils/errors";
-import { formatStreamPayError } from "../utils/format-error";
+import { summarizeStreamPayError } from "../utils/format-error";
 import { getLogger } from "../utils/logger";
+import { parseStreamPayError } from "../utils/parse-error";
 import { asSessionUser, type StreamPaySessionUser } from "../utils/session";
 import {
 	createWebhookInbox,
@@ -48,7 +49,7 @@ export interface AdminOptions {
 	onRefund?: (ctx: {
 		user: StreamPaySessionUser;
 		paymentId: string;
-		request: PaymentRefundRequest;
+		request: RefundRequest;
 	}) => void | Promise<void>;
 
 	onPlanChange?: (ctx: {
@@ -129,26 +130,103 @@ const ConsumersListQuery = z
 	})
 	.passthrough();
 
+const RefundBody = z
+	.object({
+		refund_reason: z.enum(["REQUESTED_BY_CUSTOMER", "DUPLICATE", "FRAUDULENT", "OTHER"]),
+		refund_note: z.string().max(512).nullable().optional(),
+		amount: z
+			.union([
+				z.number().finite().positive(),
+				z
+					.string()
+					.regex(/^\+?(?:\d+(?:\.\d*)?|\.\d+)$/)
+					.refine((amount) => /[1-9]/.test(amount)),
+			])
+			.nullable()
+			.optional(),
+		allow_refund_multiple_related_payments: z.boolean().optional(),
+		payment_is_part_of_related_set: z.boolean().optional(),
+	})
+	.strict();
+
+type RefundRequest = PaymentRefundRequest & z.output<typeof RefundBody>;
+
+function refundConflict(code: "PAYMENT_REFUND_REVIEW_REQUIRED" | "PAYMENT_REFUND_IN_PROGRESS") {
+	return new APIError("CONFLICT", $ERROR_CODES[code]);
+}
+
+async function recoverRefund(
+	client: StreamPayClient,
+	paymentId: string,
+	request: RefundRequest,
+	error: unknown,
+) {
+	const { code, status } = parseStreamPayError(error);
+	const busy = code === "PAYMENT_REFUND_BUSY";
+	const already = code === "PAYMENT_REFUNDED_ALREADY";
+	const uncertain = status === undefined || status === 408 || status >= 500;
+	if (!busy && !already && !uncertain) throw error;
+
+	const payment = await client.getPayment(paymentId).catch(() => undefined);
+	const state = z
+		.object({
+			current_status: z.string().optional(),
+			refunds: z.array(z.object({ status: z.string() })).nullish(),
+		})
+		.safeParse(payment);
+	const statusAfter = state.success ? state.data.current_status : undefined;
+	const pending =
+		state.success && state.data.refunds?.some((refund) => refund.status === "PENDING");
+	const wholePayment =
+		request.amount == null &&
+		!request.payment_is_part_of_related_set &&
+		!request.allow_refund_multiple_related_payments;
+
+	// A read of one payment can confirm its full refund. It cannot identify a particular partial
+	// refund or confirm a refund distributed across related payments.
+	if (wholePayment && statusAfter === "REFUNDED" && !already && payment) return payment;
+	if (pending || (busy && statusAfter !== "REFUNDED")) {
+		throw refundConflict("PAYMENT_REFUND_IN_PROGRESS");
+	}
+	if (uncertain || busy || statusAfter === "PARTIALLY_REFUNDED") {
+		throw refundConflict("PAYMENT_REFUND_REVIEW_REQUIRED");
+	}
+	throw error;
+}
+
 function buildPaymentsEndpoints(client: StreamPayClient, adminOptions: AdminOptions) {
 	return {
 		adminRefundPayment: createAuthEndpoint(
 			"/admin/streampay/payments/:id/refund",
 			{
 				method: "POST",
-				body: forwardedBody<PaymentRefundRequest>(),
+				body: RefundBody,
 				use: [sessionMiddleware],
 			},
 			async (ctx) => {
 				const user = await requireAdmin(ctx, adminOptions);
 				const paymentId = ctx.params.id;
-				const request = ctx.body;
+				const request: RefundRequest = {
+					refund_reason: ctx.body.refund_reason,
+					...(ctx.body.refund_note === undefined ? {} : { refund_note: ctx.body.refund_note }),
+					...(ctx.body.amount === undefined ? {} : { amount: ctx.body.amount }),
+					...(ctx.body.payment_is_part_of_related_set === undefined
+						? {}
+						: {
+								payment_is_part_of_related_set: ctx.body.payment_is_part_of_related_set,
+							}),
+					allow_refund_multiple_related_payments:
+						ctx.body.allow_refund_multiple_related_payments ?? false,
+				};
 
 				if (adminOptions.onRefund) {
 					await adminOptions.onRefund({ user, paymentId, request });
 				}
 
 				try {
-					const payment = await client.refundPayment(paymentId, request);
+					const payment = await client
+						.refundPayment(paymentId, request)
+						.catch((err: unknown) => recoverRefund(client, paymentId, request, err));
 					return ctx.json(payment);
 				} catch (err) {
 					toAPIError(
@@ -565,7 +643,7 @@ function buildConsumersEndpoints(client: StreamPayClient, adminOptions: AdminOpt
 					await unlinkConsumer(getAdapter(ctx), consumerId);
 				} catch (err: unknown) {
 					getLogger(ctx).error(
-						`StreamPay admin delete: link clear failed for consumer=${consumerId}: ${formatStreamPayError(err)}`,
+						`StreamPay admin delete: link clear failed for consumer=${consumerId}: ${summarizeStreamPayError(err)}`,
 					);
 				}
 

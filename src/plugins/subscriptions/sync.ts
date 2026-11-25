@@ -3,6 +3,7 @@ import { APIError } from "better-auth/api";
 import { $ERROR_CODES } from "../../error-codes";
 import type { StreamPayClient } from "../../types";
 import { readSdkErrorFields } from "../../utils/error-envelope";
+import { summarizeStreamPayError } from "../../utils/format-error";
 import { type ScopedLogger, scopedLogger } from "../../utils/logger";
 import { asSessionUser, type StreamPaySessionUser } from "../../utils/session";
 import { isUniqueConstraintError } from "../../utils/unique-constraint";
@@ -170,7 +171,7 @@ async function fireCallback(
 	try {
 		await callback(data);
 	} catch (err: unknown) {
-		const msg = err instanceof Error ? err.message : String(err);
+		const msg = summarizeStreamPayError(err);
 		logger(ctx).error(`subscription callback ${callbackName} failed: ${msg}`);
 		if (retryOnError) {
 			throw new SubscriptionCallbackDeliveryError(callbackName, err);
@@ -495,7 +496,7 @@ async function reconcileFromStreamPay(
 	try {
 		stream = prefetched ?? (await client.getSubscription(streampaySubscriptionId));
 	} catch (err: unknown) {
-		const msg = err instanceof Error ? err.message : String(err);
+		const msg = summarizeStreamPayError(err);
 		logger(ctx).error(
 			`webhook ${payload.event_type}: getSubscription(${streampaySubscriptionId}) failed: ${msg}`,
 		);
@@ -998,7 +999,7 @@ async function handleRenewalEvidence(
 				if (typeof subId === "string" && subId.length > 0) subscriptionId = subId;
 			}
 		} catch (err: unknown) {
-			const msg = err instanceof Error ? err.message : String(err);
+			const msg = summarizeStreamPayError(err);
 			logger(ctx).error(`${payload.event_type}: getInvoice(${invoiceId}) failed: ${msg}`);
 			throw err;
 		}
@@ -1010,7 +1011,7 @@ async function handleRenewalEvidence(
 	try {
 		stream = await client.getSubscription(subscriptionId);
 	} catch (err: unknown) {
-		const msg = err instanceof Error ? err.message : String(err);
+		const msg = summarizeStreamPayError(err);
 		logger(ctx).error(`${payload.event_type}: getSubscription(${subscriptionId}) failed: ${msg}`);
 		throw err;
 	}

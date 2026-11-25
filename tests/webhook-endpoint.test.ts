@@ -242,6 +242,9 @@ describe("webhooks plugin", () => {
 
 			await expect(handler(ctx)).rejects.toThrow(/Webhook handler failed/);
 			expect(ctx.context.logger.error).toHaveBeenCalledWith(
+				expect.stringContaining("webhook handler failed"),
+			);
+			expect(ctx.context.logger.error).not.toHaveBeenCalledWith(
 				expect.stringContaining("database is down"),
 			);
 		});

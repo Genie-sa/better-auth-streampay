@@ -1,6 +1,7 @@
 import { APIError, createAuthEndpoint } from "better-auth/api";
 import { z } from "zod";
 import type { StreamPayOptions } from "../types";
+import { summarizeStreamPayError } from "../utils/format-error";
 import { getLogger } from "../utils/logger";
 import { dispatchWebhook, type WebhookHandlers } from "../webhooks/dispatcher";
 import { isKnownStreamPayWebhookPayload, isStreamPayWebhookEnvelope } from "../webhooks/events";
@@ -141,7 +142,7 @@ export const webhooks = (webhooksOptions: WebhooksOptions) => {
 								});
 							} catch (err: unknown) {
 								if (err instanceof WebhookEventInProgressError) throw inProgressError();
-								const message = err instanceof Error ? err.message : String(err);
+								const message = summarizeStreamPayError(err);
 								logger.error(`subscription sync failed: ${message}`);
 								throw new APIError("INTERNAL_SERVER_ERROR", {
 									message: "Webhook sync failed. See server logs.",
@@ -160,7 +161,7 @@ export const webhooks = (webhooksOptions: WebhooksOptions) => {
 							}
 						} catch (err: unknown) {
 							if (err instanceof WebhookEventInProgressError) throw inProgressError();
-							const message = err instanceof Error ? err.message : String(err);
+							const message = summarizeStreamPayError(err);
 							logger.error(`webhook handler failed: ${message}`);
 							throw new APIError("INTERNAL_SERVER_ERROR", {
 								message: "Webhook handler failed. See server logs.",

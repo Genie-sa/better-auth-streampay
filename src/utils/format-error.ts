@@ -1,4 +1,5 @@
 import { readEnvelope, readSdkErrorFields, readValidationDetails } from "./error-envelope";
+import { parseStreamPayError } from "./parse-error";
 
 export function formatStreamPayError(err: unknown): string {
 	const { body, message: fallback } = readSdkErrorFields(err);
@@ -28,4 +29,19 @@ export function formatStreamPayError(err: unknown): string {
 	} catch {
 		return fallback;
 	}
+}
+
+/** Provider responses may echo submitted values. Only log bounded, structured identifiers. */
+export function summarizeStreamPayError(error: unknown): string {
+	const { status, code, requestId } = parseStreamPayError(error);
+	const safeId = /^[A-Za-z0-9_-]{1,128}$/;
+	const fields = [];
+	if (status !== undefined && Number.isInteger(status) && status >= 100 && status <= 599) {
+		fields.push(`status=${status}`);
+	}
+	if (code && safeId.test(code)) fields.push(`code=${code}`);
+	if (requestId && safeId.test(requestId)) fields.push(`request_id=${requestId}`);
+	return fields.length
+		? `StreamPay request failed [${fields.join(" ")}]`
+		: "StreamPay request failed";
 }

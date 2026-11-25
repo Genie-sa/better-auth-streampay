@@ -1804,7 +1804,12 @@ describe("syncWebhookPayload", () => {
 					onSubscriptionActivated: fn,
 				}),
 			).rejects.toThrow("userland boom");
-			expect(ctx.logs.error.some((m) => m.includes("userland boom"))).toBe(true);
+			expect(
+				ctx.logs.error.some((m) =>
+					m.includes("subscription callback onSubscriptionActivated failed"),
+				),
+			).toBe(true);
+			expect(ctx.logs.error.some((m) => m.includes("userland boom"))).toBe(false);
 			expect(ctx.adapter.tables.streampayWebhookEvent?.[0]).toMatchObject({
 				status: "pending",
 				lastError: "Subscription callback onSubscriptionActivated failed: userland boom",

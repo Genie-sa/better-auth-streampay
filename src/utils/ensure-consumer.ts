@@ -23,7 +23,7 @@ import {
 } from "./consumer-link";
 import { readEnvelope, readSdkErrorFields } from "./error-envelope";
 import { toAPIError } from "./errors";
-import { formatStreamPayError } from "./format-error";
+import { summarizeStreamPayError } from "./format-error";
 import { getLogger } from "./logger";
 import type { StreamPaySessionUser } from "./session";
 
@@ -120,7 +120,7 @@ async function discardOrphanedConsumer(
 		await options.client.deleteConsumer(orphanId);
 	} catch (err: unknown) {
 		getLogger(ctx).error(
-			`orphaned consumer=${orphanId} for user=${userId} could not be deleted; delete it manually: ${formatStreamPayError(err)}`,
+			`orphaned consumer=${orphanId} for user=${userId} could not be deleted; delete it manually: ${summarizeStreamPayError(err)}`,
 		);
 	}
 }
@@ -185,11 +185,11 @@ export async function ensureConsumerForUser(
 						await unlinkConsumer(ctx.context.adapter, reusedId, user.id);
 					} catch (clearErr: unknown) {
 						getLogger(ctx).error(
-							`consumer claim cleanup failed for user=${user.id} consumer=${reusedId}: ${formatStreamPayError(clearErr)}`,
+							`consumer claim cleanup failed for user=${user.id} consumer=${reusedId}: ${summarizeStreamPayError(clearErr)}`,
 						);
 					}
 					getLogger(ctx).error(
-						`consumer external_id backfill failed for user=${user.id} consumer=${reusedId}: ${formatStreamPayError(backfillErr)}`,
+						`consumer external_id backfill failed for user=${user.id} consumer=${reusedId}: ${summarizeStreamPayError(backfillErr)}`,
 					);
 					throw consumerLinkUnavailable();
 				}
@@ -206,7 +206,7 @@ export async function ensureConsumerForUser(
 				recoveredId = await findConsumerByExternalId(options.client, { externalId: user.id });
 			} catch (searchErr: unknown) {
 				getLogger(ctx).warn(
-					`consumer recovery search failed for user=${user.id}: ${formatStreamPayError(searchErr)}`,
+					`consumer recovery search failed for user=${user.id}: ${summarizeStreamPayError(searchErr)}`,
 				);
 			}
 		}
