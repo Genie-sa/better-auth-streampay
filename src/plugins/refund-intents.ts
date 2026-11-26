@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { PaymentRefundRequest, PaymentResponse } from "@streamsdk/typescript";
 import { APIError } from "better-auth/api";
 import { z } from "zod";
@@ -30,6 +30,8 @@ export const refundIntentTable = {
 			providerStatus: { type: "string", required: false, input: false },
 			currency: { type: "string", required: false, input: false },
 			amountRefunded: { type: "string", required: false, input: false },
+			providerRefundId: { type: "string", required: false, input: false },
+			refundEvidence: { type: "string", required: false, input: false },
 			createdAt: { type: "date", required: true, input: false },
 		},
 	},
@@ -51,19 +53,41 @@ interface RefundIntent {
 	providerStatus: string | null;
 	currency: string | null;
 	amountRefunded: string | null;
+	providerRefundId?: string | null;
+	refundEvidence?: string | null;
 	createdAt: Date;
 }
 
+const decimal = z.union([z.string().regex(/^\d+(?:\.\d+)?$/), z.number().finite().nonnegative()]);
 const paymentState = z.object({
 	id: z.string(),
 	current_status: z.string(),
 	currency: z.string(),
 	amount_in_smallest_unit: z.number().int().positive().optional(),
-	amount_refunded: z
-		.union([z.string().regex(/^\d+(?:\.\d+)?$/), z.number().finite().nonnegative()])
+	amount_refunded: decimal.nullish(),
+	refunds: z
+		.array(
+			z.object({
+				id: z.string().min(1).optional(),
+				status: z.string(),
+				amount_refunded: decimal.optional(),
+				refund_reason: z.string().nullish(),
+				refund_note: z.string().nullish(),
+			}),
+		)
 		.nullish(),
-	refunds: z.array(z.object({ status: z.string() })).nullish(),
 });
+
+const refundEvidence = z.object({
+	currency: z.string(),
+	amount: z.number().int().positive(),
+	previousIds: z.array(z.string()),
+	requestHash: z.string(),
+	generatedNote: z.boolean(),
+});
+
+type PaymentState = z.infer<typeof paymentState>;
+type RefundEvidence = z.infer<typeof refundEvidence>;
 
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
@@ -87,17 +111,19 @@ async function writeOutcome(
 	adapter: PluginAdapter,
 	row: RefundIntent,
 	status: RefundStatus,
-	state?: z.infer<typeof paymentState>,
-	authoritative = false,
+	state?: PaymentState,
+	options: { refundId?: string; writeResponse?: boolean } = {},
 ) {
 	return adapter.update<RefundIntent>({
 		model: MODEL,
 		where: [
 			{ field: "id", value: row.id },
-			...(authoritative ? [] : [{ field: "status", value: row.status }]),
+			{ field: "activePaymentId", value: row.paymentId },
+			...(options.writeResponse ? [] : [{ field: "status", value: row.status }]),
 		],
 		update: {
 			status,
+			...(options.refundId ? { providerRefundId: options.refundId } : {}),
 			...(status === "confirmed" || status === "rejected" ? { activePaymentId: null } : {}),
 			...(state
 				? {
@@ -116,7 +142,7 @@ function readState(payment: unknown, paymentId: string) {
 }
 
 function outcome(
-	state: z.infer<typeof paymentState> | undefined,
+	state: PaymentState | undefined,
 	full: boolean,
 	partialConfirmed = false,
 ): RefundStatus {
@@ -126,6 +152,76 @@ function outcome(
 		return "confirmed";
 	}
 	return "needs_review";
+}
+
+function readEvidence(row: RefundIntent) {
+	if (!row.refundEvidence) return undefined;
+	try {
+		const decoded = refundEvidence.safeParse(JSON.parse(row.refundEvidence));
+		return decoded.success ? decoded.data : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function prepareEvidence(
+	payment: PaymentState,
+	request: RefundProviderRequest,
+	amount: number | null,
+) {
+	if (amount === null || amount <= 0 || !payment.refunds) return undefined;
+	const previousIds = payment.refunds.flatMap((refund) => (refund.id ? [refund.id] : []));
+	if (new Set(previousIds).size !== payment.refunds.length) return undefined;
+
+	const generatedNote = request.refund_note == null;
+	const note = request.refund_note ?? `better-auth-streampay:${randomUUID()}`;
+	const evidence: RefundEvidence = {
+		currency: payment.currency,
+		amount,
+		previousIds,
+		requestHash: digest([request.refund_reason, note]),
+		generatedNote,
+	};
+	return { evidence, note };
+}
+
+function observeRefund(
+	state: PaymentState | undefined,
+	row: RefundIntent,
+	evidence: RefundEvidence,
+	writeResponse = false,
+): { status: RefundStatus; refundId?: string } {
+	if (state?.currency !== evidence.currency || !state.refunds) return { status: "needs_review" };
+	const candidates = state.refunds.filter((refund) => {
+		if (!refund.id || evidence.previousIds.includes(refund.id)) return false;
+		if (row.providerRefundId && refund.id !== row.providerRefundId) return false;
+		if (amountToSmallestUnit(String(refund.amount_refunded), state.currency) !== evidence.amount) {
+			return false;
+		}
+		if (row.providerRefundId) return true;
+		return (
+			(writeResponse || evidence.generatedNote) &&
+			digest([refund.refund_reason, refund.refund_note]) === evidence.requestHash
+		);
+	});
+	const [refund] = candidates;
+	if (
+		candidates.length !== 1 ||
+		!refund?.id ||
+		state.refunds.filter((entry) => entry.id === refund.id).length !== 1
+	) {
+		return { status: "needs_review" };
+	}
+	switch (refund.status) {
+		case "REFUNDED":
+			return { status: "confirmed", refundId: refund.id };
+		case "CANCELED":
+			return { status: "rejected", refundId: refund.id };
+		case "PENDING":
+			return { status: "pending", refundId: refund.id };
+		default:
+			return { status: "needs_review" };
+	}
 }
 
 async function refreshIntent(adapter: PluginAdapter, client: StreamPayClient, row: RefundIntent) {
@@ -144,8 +240,11 @@ async function refreshIntent(adapter: PluginAdapter, client: StreamPayClient, ro
 		return { row };
 	}
 	const state = readState(payment, row.paymentId);
-	const status = outcome(state, row.full);
-	const updated = await writeOutcome(adapter, row, status, state);
+	const evidence = readEvidence(row);
+	const observed = evidence
+		? observeRefund(state, row, evidence)
+		: { status: row.refundEvidence ? ("needs_review" as const) : outcome(state, row.full) };
+	const updated = await writeOutcome(adapter, row, observed.status, state, observed);
 	return { row: updated ?? row, payment };
 }
 
@@ -164,6 +263,7 @@ export async function getRefundIntent(
 		providerStatus: row.providerStatus,
 		currency: row.currency,
 		amountRefunded: row.amountRefunded,
+		providerRefundId: row.providerRefundId ?? null,
 	};
 }
 
@@ -241,16 +341,36 @@ export async function runRefundIntent(
 	}
 	const pending = current.refunds?.some((refund) => refund.status === "PENDING");
 	if (pending) {
-		await writeOutcome(adapter, row, "pending", current);
+		await writeOutcome(adapter, row, "rejected", current);
 		throw conflict("PAYMENT_REFUND_IN_PROGRESS");
 	}
 	if (full && current.current_status === "REFUNDED") {
-		await writeOutcome(adapter, row, "confirmed", current, true);
+		await writeOutcome(adapter, row, "confirmed", current);
 		return before;
+	}
+	const expected =
+		full && current.amount_in_smallest_unit !== undefined && beforeAmount !== null
+			? current.amount_in_smallest_unit - beforeAmount
+			: requested;
+	const prepared = prepareEvidence(current, request, expected);
+	if (prepared) {
+		const staged = await adapter.update<RefundIntent>({
+			model: MODEL,
+			where: [
+				{ field: "id", value: row.id },
+				{ field: "status", value: "sending" },
+			],
+			update: { refundEvidence: JSON.stringify(prepared.evidence) },
+		});
+		if (!staged) throw conflict("PAYMENT_REFUND_REVIEW_REQUIRED");
+		row = staged;
 	}
 	let payment: PaymentResponse;
 	try {
-		payment = await client.refundPayment(paymentId, request);
+		payment = await client.refundPayment(
+			paymentId,
+			prepared ? { ...request, refund_note: prepared.note } : request,
+		);
 	} catch (err) {
 		const { code, status } = parseStreamPayError(err);
 		if (
@@ -268,7 +388,8 @@ export async function runRefundIntent(
 		await writeOutcome(adapter, row, "needs_review");
 		const stored = await findIntent(adapter, paymentId, key);
 		const observed = stored && (await refreshIntent(adapter, client, stored));
-		if (observed?.row.status === "confirmed" && observed.payment) return observed.payment;
+		if (observed?.row.status === "confirmed")
+			return observed.payment ?? client.getPayment(paymentId);
 		if (observed?.row.status === "pending" || code === "PAYMENT_REFUND_BUSY") {
 			throw conflict("PAYMENT_REFUND_IN_PROGRESS");
 		}
@@ -288,8 +409,11 @@ export async function runRefundIntent(
 		state?.currency === current.currency &&
 		(state.current_status === "PARTIALLY_REFUNDED" || state.current_status === "REFUNDED") &&
 		afterAmount - beforeAmount === requested;
-	const status = outcome(state, full, partialConfirmed);
-	await writeOutcome(adapter, row, status, state, status === "confirmed");
+	const observed = prepared
+		? observeRefund(state, row, prepared.evidence, true)
+		: { status: outcome(state, full, partialConfirmed) };
+	const { status } = observed;
+	await writeOutcome(adapter, row, status, state, { ...observed, writeResponse: true });
 	if (status === "confirmed") return payment;
 	throw conflict(
 		status === "pending" ? "PAYMENT_REFUND_IN_PROGRESS" : "PAYMENT_REFUND_REVIEW_REQUIRED",
