@@ -1,5 +1,18 @@
 # better-auth-streampay
 
+## 3.7.0
+
+### Minor Changes
+
+- 6903fd0: Add a browser helper for embedding a server-created StreamPay checkout link and disposing of the embed when the user leaves the screen.
+- 75f990d: Recover verified free trials and ordered missed renewal cycles when subscription payment reconciliation is enabled.
+- caa9385: Reconcile durable refunds from individual StreamPay refund records. Generate and apply the Better Auth migration for the two new nullable refund intent fields if you already use durable refunds.
+- 063d72d: Verify every payment on a completed one-time checkout invoice, including installments. Use the invoice ID to deduplicate fulfillment. One-time checkout verification requires allowManualPayments to accept manually recorded payments. Subscription recovery keeps its existing payment method policy.
+
+### Patch Changes
+
+- 16929df: Verify any valid v1 tag during webhook secret rotation. Reject ambiguous timestamps and bound the signature header before parsing.
+
 ## 3.6.0
 
 ### Minor Changes
