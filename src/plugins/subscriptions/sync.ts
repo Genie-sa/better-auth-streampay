@@ -992,7 +992,7 @@ export async function syncWebhookPayload(
  * A lock whose event is already completed can never deliver its callback (for example after an admin
  * discard that stopped before clearing it), so it is released for the next renewal evidence.
  */
-async function releaseLockOfCompletedRenewal(
+export async function releaseLockOfCompletedRenewal(
 	ctx: SyncContext,
 	subscriptionRowId: string,
 	lockEventId: string,
@@ -1112,6 +1112,7 @@ async function handleRenewalEvidence(
 	}
 
 	if (!subscriptionId) return;
+	const isRecovery = payload.webhook_delivery_id?.startsWith("recovery-renewal:") === true;
 
 	let stream: SubscriptionDetailed;
 	try {
@@ -1132,9 +1133,14 @@ async function handleRenewalEvidence(
 			linkPolicy(callbacks, "recovery"),
 			stream,
 		));
-	if (!existing) return;
+	if (!existing) {
+		if (isRecovery) throw new Error("The local subscription changed during renewal recovery.");
+		return;
+	}
 	const deferRenewal = (reason: string) => {
-		logger(ctx).warn(`Renewal reconciliation deferred for sub=${subscriptionId}: ${reason}.`);
+		const message = `Renewal reconciliation deferred for sub=${subscriptionId}: ${reason}.`;
+		if (isRecovery) throw new Error(message);
+		logger(ctx).warn(message);
 	};
 
 	const eventAt = parseDate(payload.timestamp);
@@ -1174,12 +1180,7 @@ async function handleRenewalEvidence(
 			return deferRenewal("event did not identify the next verifiable billing period");
 		historicalCycle = historical.cycle;
 	}
-	if (
-		!historicalRetry &&
-		historicalCycle === null &&
-		payload.webhook_delivery_id?.startsWith("recovery-renewal:") &&
-		!settlesLatestInvoice
-	) {
+	if (!historicalRetry && historicalCycle === null && isRecovery && !settlesLatestInvoice) {
 		throw new Error("The provider changed the renewal invoice during reconciliation.");
 	}
 	if (

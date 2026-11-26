@@ -113,6 +113,7 @@ describe(`subscription payment history (${TEST_WITH})`, () => {
 			id: "pl_1",
 			organization_consumer_id: "cons_1",
 			trial_period_days: 7,
+			amount_collected_in_smallest_unit: 0,
 			custom_metadata: request?.custom_metadata ?? {},
 		});
 		h.stream.listInvoices.mockResolvedValue({ data: [] });
@@ -125,6 +126,12 @@ describe(`subscription payment history (${TEST_WITH})`, () => {
 				latest_invoice: { id: "draft-invoice", payment_link_id: linkId },
 			});
 		h.stream.listSubscriptions.mockResolvedValue({ data: [provider("TRIALING")] });
+		h.stream.listInvoices.mockResolvedValueOnce({
+			data: [recurringInvoice("paid-link", windows[0], windows[1])],
+		});
+		expect(await reconcile(h)).toMatchObject({ results: [{ status: "needs_review" }] });
+		expect(h.stream.listSubscriptions).not.toHaveBeenCalled();
+		h.stream.getPayment.mockClear();
 		h.stream.getSubscription.mockResolvedValue(provider("TRIAL_PENDING"));
 		expect(await reconcile(h)).toMatchObject({
 			results: [{ subscriptionId: id, status: "unchanged" }],
@@ -238,6 +245,15 @@ describe(`subscription payment history (${TEST_WITH})`, () => {
 			h.stream.listInvoices.mockResolvedValueOnce({ data: [latest, first, candidate] });
 			expect(await reconcile(h)).toMatchObject({ results: [{ status: "needs_review" }] });
 		}
+		h.stream.listInvoices.mockResolvedValueOnce({
+			data: [
+				latest,
+				first,
+				older,
+				recurringInvoice("long-overlap", "2026-05-01T00:00:00Z", windows[2]),
+			],
+		});
+		expect(await reconcile(h)).toMatchObject({ results: [{ status: "needs_review" }] });
 		expect(onSubscriptionRenewed).not.toHaveBeenCalled();
 	});
 
@@ -249,6 +265,12 @@ describe(`subscription payment history (${TEST_WITH})`, () => {
 		expect(onSubscriptionRenewed).toHaveBeenCalledExactlyOnceWith(
 			expect.objectContaining({ idempotencyKey: key }),
 		);
+		for (let i = 0; i < 6; i += 1) {
+			expect(await reconcile(h)).toMatchObject({ results: [{ status: "retry" }] });
+		}
+		expect(await h.rows("streampayWebhookEvent")).toMatchObject([
+			{ status: "pending", attemptCount: 1 },
+		]);
 		expect((await h.deliver(completion(latest.id))).status).toBe(500);
 		expect(onSubscriptionRenewed).toHaveBeenCalledTimes(1);
 		const [row] = await h.rows("subscription");
@@ -271,6 +293,35 @@ describe(`subscription payment history (${TEST_WITH})`, () => {
 		expect(onSubscriptionRenewed).toHaveBeenNthCalledWith(
 			3,
 			expect.objectContaining({ idempotencyKey: `subscription:${subId}:renewal:3` }),
+		);
+	});
+
+	it("retries when provider evidence changes during a synthetic delivery", async () => {
+		const { h, latest, onSubscriptionRenewed } = await renewalHistory();
+		const stable = await h.stream.getSubscription(subId);
+		h.stream.getSubscription
+			.mockResolvedValueOnce(stable)
+			.mockResolvedValueOnce({ ...stable, latest_invoice: { ...latest, id: "new-invoice" } });
+
+		expect(await reconcile(h)).toMatchObject({ results: [{ status: "retry" }] });
+		expect(await reconcile(h)).toMatchObject({ results: [{ status: "retry" }] });
+		expect(onSubscriptionRenewed).not.toHaveBeenCalled();
+		const [receipt] = await h.rows("streampayWebhookEvent");
+		expect(receipt).toMatchObject({
+			status: "pending",
+			attemptCount: 1,
+			eventId: "delivery:recovery-renewal:cycle-2",
+		});
+		if (typeof receipt?.id !== "string") throw new Error("Missing renewal receipt.");
+		await h.setRow("streampayWebhookEvent", receipt.id, { nextAttemptAt: new Date(0) });
+		const processDue = h.auth.api.processDueStreampayWebhookEvents;
+		if (typeof processDue !== "function") throw new Error("Missing inbox retry endpoint.");
+		expect(await processDue({ body: { limit: 1 } })).toMatchObject({
+			succeeded: [receipt.eventId],
+			failed: [],
+		});
+		expect(onSubscriptionRenewed).toHaveBeenCalledExactlyOnceWith(
+			expect.objectContaining({ idempotencyKey: `subscription:${subId}:renewal:2` }),
 		);
 	});
 });

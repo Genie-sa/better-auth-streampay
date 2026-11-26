@@ -114,7 +114,6 @@ export async function findNextHistoricalRenewal(
 	const [latest, ...earlier] = periods.sort((a, b) => b.start - a.start);
 	const fromLocal = earlier[span - 2];
 	const target = earlier[latestCycle - baseline - 2];
-	const older = earlier[span - 1];
 	if (
 		!target ||
 		latest?.id !== latestId ||
@@ -124,7 +123,7 @@ export async function findNextHistoricalRenewal(
 		earlier
 			.slice(0, span - 1)
 			.some(({ end }, index) => end !== (index === 0 ? latest.start : earlier[index - 1]?.start)) ||
-		(older !== undefined && older.end > localEnd)
+		earlier.slice(span - 1).some(({ end }) => end > localEnd)
 	)
 		return null;
 
