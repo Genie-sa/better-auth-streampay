@@ -162,6 +162,7 @@ and SDK 1.1.3. Node 20 passed 511 tests in its supported subset; four cases and 
 were excluded or skipped because that runtime lacks the SQLite features used by the test harness.
 ESM and CommonJS imports passed on Node 20. The package archive includes the three documentation
 guides and contains no local credentials or fixture data.
+
 ## Public API contract
 
 Ordinary tests use a small OpenAPI fixture and intercept the published Stream SDK's HTTP calls.

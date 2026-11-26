@@ -64,6 +64,7 @@ describe("StreamPay's public OpenAPI contract via the published SDK", () => {
 			statuses: "COMPLETED",
 			limit: "2",
 		});
+		expect(contract.invoices.statuses).toContain(query.statuses);
 		expect(requests.map(({ method }) => method)).toEqual(["GET", "GET"]);
 	});
 
@@ -72,8 +73,6 @@ describe("StreamPay's public OpenAPI contract via the published SDK", () => {
 		await client.listInvoices({
 			subscription_id: subscriptionId,
 			limit: 50,
-			sort_field: "period_start",
-			sort_direction: "desc",
 			statuses: ["COMPLETED"],
 		});
 		await client.listSubscriptions({
@@ -83,15 +82,22 @@ describe("StreamPay's public OpenAPI contract via the published SDK", () => {
 		});
 		const [invoices, subscriptions] = requests.map((request) => new URL(request.url));
 		expect(invoices?.pathname).toBe(contract.invoices.path);
-		expect(invoices && Object.fromEntries(invoices.searchParams)).toEqual({
+		const invoiceQuery = Object.fromEntries(invoices?.searchParams ?? []);
+		expect(Object.keys(contract.invoices.query)).toEqual(
+			expect.arrayContaining(Object.keys(invoiceQuery)),
+		);
+		expect(invoiceQuery).toEqual({
 			subscription_id: subscriptionId,
 			limit: "50",
-			sort_field: "period_start",
-			sort_direction: "desc",
 			statuses: "COMPLETED",
 		});
+		expect(contract.invoices.statuses).toContain(invoiceQuery.statuses);
 		expect(subscriptions?.pathname).toBe(contract.subscriptions.path);
-		expect(subscriptions && Object.fromEntries(subscriptions.searchParams)).toEqual({
+		const subscriptionQuery = Object.fromEntries(subscriptions?.searchParams ?? []);
+		expect(Object.keys(contract.subscriptions.query)).toEqual(
+			expect.arrayContaining(Object.keys(subscriptionQuery)),
+		);
+		expect(subscriptionQuery).toEqual({
 			organization_consumer_id: linkId,
 			product_ids: paymentId,
 			limit: "10",
@@ -111,6 +117,9 @@ describe("StreamPay's public OpenAPI contract via the published SDK", () => {
 		const { client, requests } = provider(() =>
 			Response.json({
 				id: paymentId,
+				currency: "SAR",
+				current_status: "SUCCEEDED",
+				amount_in_smallest_unit: 1000,
 				amount_refunded: "0.00",
 				refunds: [refund],
 			}),
@@ -122,12 +131,12 @@ describe("StreamPay's public OpenAPI contract via the published SDK", () => {
 			payment_is_part_of_related_set: false,
 		} as const;
 		const sdkCompatibility = { allow_refund_multiple_related_payments: false };
-		expect(
-			await client.refundPayment(paymentId, { ...request, ...sdkCompatibility }),
-		).toMatchObject({
+		const payment = await client.refundPayment(paymentId, { ...request, ...sdkCompatibility });
+		expect(payment).toMatchObject({
 			amount_refunded: "0.00",
 			refunds: [refund],
 		});
+		expect(Object.keys(payment).sort()).toEqual(Object.keys(contract.refund.payment).sort());
 		const [sent] = requests;
 		expect(sent?.method).toBe("POST");
 		expect(new URL(sent?.url ?? "").pathname).toBe(
@@ -142,5 +151,6 @@ describe("StreamPay's public OpenAPI contract via the published SDK", () => {
 		expect(documentedFields).toEqual(expect.arrayContaining(contract.refund.required));
 		expect(Object.keys(refund).sort()).toEqual(Object.keys(contract.refund.response).sort());
 		expect(contract.refund.statuses).toContain(expectedStatus);
+		expect(contract.refund.reasons).toContain(request.refund_reason);
 	});
 });

@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 const source = "https://stream-app-service.streampay.sa/openapi.json";
@@ -48,6 +51,7 @@ const actual = {
 	source,
 	invoices: {
 		path: "/api/v2/invoices",
+		statuses: schemas.InvoiceStatusEnum.enum,
 		query: query("/api/v2/invoices", [
 			"payment_link_id",
 			"organization_consumer_id",
@@ -74,6 +78,15 @@ const actual = {
 			"payment_is_part_of_related_set",
 		]),
 		statuses: schemas.PaymentRefundStatus.enum,
+		reasons: schemas.PaymentRefundReason.enum,
+		payment: pick(schemas.PaymentResponse.properties, [
+			"id",
+			"currency",
+			"current_status",
+			"amount_in_smallest_unit",
+			"amount_refunded",
+			"refunds",
+		]),
 		response: pick(schemas.PaymentRefundResponse.properties, [
 			"id",
 			"status",
@@ -86,7 +99,14 @@ const actual = {
 };
 
 if (values.update) {
-	await writeFile(fixture, `${JSON.stringify(actual, null, 2)}\n`);
+	const require = createRequire(import.meta.url);
+	const biome = require.resolve("@biomejs/biome/bin/biome");
+	const formatted = execFileSync(
+		process.execPath,
+		[biome, "format", "--stdin-file-path", fileURLToPath(fixture)],
+		{ input: JSON.stringify(actual), encoding: "utf8" },
+	);
+	await writeFile(fixture, formatted);
 } else {
 	const expected = JSON.parse(await readFile(fixture, "utf8"));
 	assert.deepEqual(actual, expected, "StreamPay's public API contract has changed");
