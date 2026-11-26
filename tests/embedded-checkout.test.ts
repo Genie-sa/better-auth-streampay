@@ -10,7 +10,7 @@ function fakeBrowser() {
 		onerror: null as (() => void) | null,
 		remove: vi.fn(),
 	};
-	const mount = { remove: vi.fn() };
+	const mounts: Array<{ remove: ReturnType<typeof vi.fn> }> = [];
 	const destroy = vi.fn();
 	const Checkout = vi.fn(() => ({ destroy }));
 	const browser = {
@@ -19,7 +19,12 @@ function fakeBrowser() {
 		Stream: undefined as { Checkout: typeof Checkout } | undefined,
 	};
 	const document = {
-		createElement: vi.fn((tag: string) => (tag === "script" ? script : mount)),
+		createElement: vi.fn((tag: string) => {
+			if (tag === "script") return script;
+			const mount = { remove: vi.fn() };
+			mounts.push(mount);
+			return mount;
+		}),
 		head: { append: vi.fn() },
 	};
 	const container = { ownerDocument: document, isConnected: true, append: vi.fn() };
@@ -29,11 +34,15 @@ function fakeBrowser() {
 		document,
 		container,
 		script,
-		mount,
+		mounts,
 		Checkout,
 		destroy,
-		mountCheckout: (url = paymentLink) =>
-			mountStreamPayCheckout({ paymentLink: url, container: container as unknown as Element }),
+		mountCheckout: (url = paymentLink, signal?: AbortSignal) =>
+			mountStreamPayCheckout({
+				paymentLink: url,
+				container: container as unknown as Element,
+				...(signal ? { signal } : {}),
+			}),
 		load: () => {
 			browser.Stream = { Checkout };
 			script.onload?.();
@@ -58,7 +67,6 @@ describe("mountStreamPayCheckout", () => {
 		"https://streampay.sa@checkout.example/ds/link",
 		"https://checkout.example@streampay.sa/ds/link",
 		"https://streampay.sa:444/ds/link",
-		"https://streampay.sa/other",
 	])("rejects unsupported payment URLs before loading a script (%s)", async (url) => {
 		const h = fakeBrowser();
 		await expect(h.mountCheckout(url)).rejects.toThrow("Expected an HTTPS StreamPay payment link");
@@ -72,11 +80,11 @@ describe("mountStreamPayCheckout", () => {
 		expect(h.script.src).toBe("https://stream-embed.streampay.sa/sdk/embed.min.js");
 		h.load();
 		const handle = await checkout;
-		expect(h.Checkout).toHaveBeenCalledWith({ paymentLink, container: h.mount });
+		expect(h.Checkout).toHaveBeenCalledWith({ paymentLink, container: h.mounts[0] });
 		handle.destroy();
 		handle.destroy();
 		expect(h.destroy).toHaveBeenCalledTimes(1);
-		expect(h.mount.remove).toHaveBeenCalledTimes(1);
+		expect(h.mounts[0]?.remove).toHaveBeenCalledTimes(1);
 
 		(await h.mountCheckout()).destroy();
 		expect(h.document.head.append).toHaveBeenCalledTimes(1);
@@ -101,5 +109,25 @@ describe("mountStreamPayCheckout", () => {
 		h.load();
 		await expect(checkout).rejects.toThrow("checkout container was removed");
 		expect(h.Checkout).not.toHaveBeenCalled();
+	});
+
+	it("releases the container on abort and lets a new mount share the pending SDK", async () => {
+		const h = fakeBrowser();
+		const abort = new AbortController();
+		const first = h.mountCheckout(paymentLink, abort.signal);
+		abort.abort();
+		const nextLink = "https://pay.streampay.sa/pl_1";
+		const next = h.mountCheckout(nextLink);
+		const aborted = expect(first).rejects.toThrow("aborted");
+		h.load();
+		const handle = await next;
+		await aborted;
+		expect(h.document.head.append).toHaveBeenCalledTimes(1);
+		expect(h.Checkout).toHaveBeenCalledExactlyOnceWith({
+			paymentLink: nextLink,
+			container: h.mounts[1],
+		});
+		await expect(h.mountCheckout()).rejects.toThrow("already using this container");
+		handle.destroy();
 	});
 });

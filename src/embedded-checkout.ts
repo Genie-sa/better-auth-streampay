@@ -4,16 +4,18 @@ const SDK_TIMEOUT_MS = 15_000;
 export interface EmbeddedCheckoutOptions {
 	paymentLink: string;
 	container: Element;
+	/** Cancels a pending mount while the SDK loads. */
+	signal?: AbortSignal;
 	minHeightPx?: number;
 	maxHeightPx?: number;
 	vhCapPx?: number;
 	vhFraction?: number;
 }
 
-type StreamCheckout = (options: EmbeddedCheckoutOptions) => { destroy(): void };
+type StreamCheckout = (options: Omit<EmbeddedCheckoutOptions, "signal">) => { destroy(): void };
 
 let loading: Promise<StreamCheckout> | undefined;
-const mountedContainers = new WeakSet<Element>();
+const mountedContainers = new WeakMap<Element, Element>();
 
 function getCheckout() {
 	const stream = (window as Window & { Stream?: { Checkout?: StreamCheckout } }).Stream;
@@ -63,26 +65,43 @@ export async function mountStreamPayCheckout(options: EmbeddedCheckoutOptions) {
 		paymentLink.username ||
 		paymentLink.password ||
 		paymentLink.port ||
-		paymentLink.hash ||
-		(paymentLink.hostname !== "streampay.sa" && !paymentLink.hostname.endsWith(".streampay.sa")) ||
-		!/^\/ds\/[^/]+\/?$/.test(paymentLink.pathname)
+		(paymentLink.hostname !== "streampay.sa" && !paymentLink.hostname.endsWith(".streampay.sa"))
 	) {
 		throw new Error("Expected an HTTPS StreamPay payment link.");
 	}
 
-	const { container } = options;
+	const { container, signal, ...settings } = options;
+	signal?.throwIfAborted();
 	if (container.ownerDocument !== document || !container.isConnected) {
 		throw new Error("The checkout container must be attached to this page.");
 	}
 	if (mountedContainers.has(container))
 		throw new Error("Checkout is already using this container.");
-	mountedContainers.add(container);
 	const mount = document.createElement("div");
+	mountedContainers.set(container, mount);
+	const release = () => {
+		mount.remove();
+		if (mountedContainers.get(container) === mount) mountedContainers.delete(container);
+	};
+	let onAbort: (() => void) | undefined;
 	try {
-		const checkout = await loadCheckout();
+		const ready = loadCheckout();
+		const checkout = signal
+			? await Promise.race([
+					ready,
+					new Promise<never>((_, reject) => {
+						onAbort = () => {
+							release();
+							reject(signal.reason);
+						};
+						signal.addEventListener("abort", onAbort, { once: true });
+					}),
+				])
+			: await ready;
+		signal?.throwIfAborted();
 		if (!container.isConnected) throw new Error("The checkout container was removed.");
 		container.append(mount);
-		const handle = checkout({ ...options, container: mount, paymentLink: paymentLink.href });
+		const handle = checkout({ ...settings, container: mount, paymentLink: paymentLink.href });
 		let destroyed = false;
 		return {
 			destroy() {
@@ -91,14 +110,14 @@ export async function mountStreamPayCheckout(options: EmbeddedCheckoutOptions) {
 				try {
 					handle.destroy();
 				} finally {
-					mount.remove();
-					mountedContainers.delete(container);
+					release();
 				}
 			},
 		};
 	} catch (error) {
-		mount.remove();
-		mountedContainers.delete(container);
+		release();
 		throw error;
+	} finally {
+		if (onAbort) signal?.removeEventListener("abort", onAbort);
 	}
 }

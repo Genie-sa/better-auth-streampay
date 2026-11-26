@@ -256,9 +256,24 @@ if (error || !data?.url) throw new Error("Could not create checkout.");
 const container = document.getElementById("checkout");
 if (!container) throw new Error("Checkout container is missing.");
 
-const checkout = await mountStreamPayCheckout({ paymentLink: data.url, container });
-// When leaving this screen or closing the checkout:
-checkout.destroy();
+const hosted = document.createElement("a");
+hosted.href = data.url;
+hosted.textContent = "Open hosted checkout";
+container.after(hosted);
+
+const pending = new AbortController();
+const checkout = mountStreamPayCheckout({
+  paymentLink: data.url,
+  container,
+  signal: pending.signal,
+}).catch(() => null);
+// The hosted link remains available if the iframe is blocked.
+// Call this when the checkout page or component is removed.
+async function closeCheckout() {
+  pending.abort();
+  (await checkout)?.destroy();
+  hosted.remove();
+}
 ```
 
 Use your server's checkout configuration to create links and set return URLs. If the SDK or
