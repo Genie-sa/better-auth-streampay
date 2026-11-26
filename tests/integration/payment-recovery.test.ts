@@ -60,11 +60,16 @@ function scheduled(h: Harness) {
 	return endpoint({ body: { limit: 10 } });
 }
 
-function refund(h: Harness, key: string, amount?: string) {
+function refund(h: Harness, key: string, amount?: string, note?: string) {
 	return callAuthEndpoint(h.auth, "/admin/streampay/payments/pay_1/refund", {
 		method: "POST",
 		headers: h.headers,
-		body: { idempotencyKey: key, refund_reason: "OTHER", ...(amount ? { amount } : {}) },
+		body: {
+			idempotencyKey: key,
+			refund_reason: "OTHER",
+			...(amount ? { amount } : {}),
+			...(note === undefined ? {} : { refund_note: note }),
+		},
 	});
 }
 
@@ -249,6 +254,107 @@ describe(`payment reconciliation end to end (${TEST_WITH})`, () => {
 });
 
 describe(`durable refund requests end to end (${TEST_WITH})`, () => {
+	it.each([
+		["full with generated note", undefined, undefined],
+		["full with caller note", undefined, "Customer request"],
+		["partial with generated note", "0.20", undefined],
+		["partial with caller note", "0.20", "Customer request"],
+	] as const)("confirms a successful response with a provider refund record (%s)", async (_, amount, note) => {
+		const h = await harness([admin({ durableRefunds: true, isAdmin: () => true })]);
+		h.stream.getPayment.mockResolvedValue(payment("pay_1", "SUCCEEDED", "0.00", []));
+		const refunded = amount ?? "1.00";
+		h.stream.refundPayment.mockImplementation(async (_, request) =>
+			payment("pay_1", amount ? "PARTIALLY_REFUNDED" : "REFUNDED", refunded, [
+				{
+					id: "exact-refund",
+					status: "REFUNDED",
+					amount_refunded: refunded,
+					refund_reason: request.refund_reason,
+					refund_note: request.refund_note,
+				},
+			]),
+		);
+
+		expect((await refund(h, "refund-success", amount, note)).status).toBe(200);
+		expect(h.stream.refundPayment.mock.calls[0]?.[1].refund_note).toEqual(
+			note ?? expect.stringMatching(/^better-auth-streampay:/),
+		);
+		expect(await (await refundStatus(h, "refund-success")).json()).toMatchObject({
+			status: "confirmed",
+			providerRefundId: "exact-refund",
+			amountRefunded: refunded,
+		});
+		expect(await h.rows("streampayRefundIntent")).toMatchObject([{ activePaymentId: null }]);
+	});
+
+	it("remembers a pending refund ID returned with a caller note", async () => {
+		const h = await harness([admin({ durableRefunds: true, isAdmin: () => true })]);
+		h.stream.getPayment.mockResolvedValue(payment("pay_1", "SUCCEEDED", "0.00", []));
+		const pending = {
+			id: "pending-refund",
+			status: "PENDING",
+			amount_refunded: "0.20",
+			refund_reason: "OTHER",
+			refund_note: "Refund for order",
+		};
+		h.stream.refundPayment.mockResolvedValue(payment("pay_1", "SUCCEEDED", "0.00", [pending]));
+		expect((await refund(h, "pending", "0.20", pending.refund_note)).status).toBe(409);
+		expect(await h.rows("streampayRefundIntent")).toMatchObject([
+			{ status: "pending", activePaymentId: "pay_1", providerRefundId: pending.id },
+		]);
+		h.stream.getPayment.mockResolvedValue(
+			payment("pay_1", "PARTIALLY_REFUNDED", "0.20", [{ ...pending, status: "REFUNDED" }]),
+		);
+		expect(await (await refundStatus(h, "pending")).json()).toMatchObject({
+			status: "confirmed",
+			providerRefundId: pending.id,
+		});
+		expect(h.stream.refundPayment).toHaveBeenCalledTimes(1);
+	});
+
+	it("holds a lost response with an unproven caller note for review", async () => {
+		const h = await harness([admin({ durableRefunds: true, isAdmin: () => true })]);
+		const note = "Customer request";
+		h.stream.getPayment.mockResolvedValue(payment("pay_1", "SUCCEEDED", "0.00", []));
+		h.stream.refundPayment.mockRejectedValue(new Error("provider reply lost"));
+		expect((await refund(h, "unproven-note", "0.20", note)).status).toBe(409);
+		expect(h.stream.refundPayment.mock.calls[0]?.[1].refund_note).toBe(note);
+		h.stream.getPayment.mockResolvedValue(
+			payment("pay_1", "PARTIALLY_REFUNDED", "0.20", [
+				{
+					id: "unknown-refund",
+					status: "REFUNDED",
+					amount_refunded: "0.20",
+					refund_reason: "OTHER",
+					refund_note: note,
+				},
+			]),
+		);
+		expect(await (await refundStatus(h, "unproven-note")).json()).toMatchObject({
+			status: "needs_review",
+			providerRefundId: null,
+		});
+		expect(await h.rows("streampayRefundIntent")).toMatchObject([{ activePaymentId: "pay_1" }]);
+		expect((await refund(h, "other-key", "0.20")).status).toBe(409);
+		expect(h.stream.refundPayment).toHaveBeenCalledTimes(1);
+	});
+
+	it("rejects an intent before writing if another refund is pending", async () => {
+		const h = await harness([admin({ durableRefunds: true, isAdmin: () => true })]);
+		const earlier = { id: "other-refund", status: "PENDING", amount_refunded: "1.00" };
+		h.stream.getPayment.mockResolvedValue(payment("pay_1", "SUCCEEDED", "0.00", [earlier]));
+		expect((await refund(h, "our-key")).status).toBe(409);
+		h.stream.getPayment.mockResolvedValue(
+			payment("pay_1", "REFUNDED", "1.00", [{ ...earlier, status: "REFUNDED" }]),
+		);
+		expect(await (await refundStatus(h, "our-key")).json()).toMatchObject({
+			status: "rejected",
+			providerRefundId: null,
+		});
+		expect(await h.rows("streampayRefundIntent")).toMatchObject([{ activePaymentId: null }]);
+		expect(h.stream.refundPayment).not.toHaveBeenCalled();
+	});
+
 	it.each([
 		"REFUNDED",
 		"CANCELED",
