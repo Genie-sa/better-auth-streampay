@@ -244,6 +244,88 @@ describe(`payment reconciliation end to end (${TEST_WITH})`, () => {
 			).status,
 		).toBe(404);
 	});
+
+	it("verifies every installment and returns a stable invoice and payment IDs", async () => {
+		const h = await harness([checkout()]);
+		const invoice = {
+			...paidInvoice("inv_installments", "pay_2"),
+			total_amount: "250.00",
+			total_amount_in_smallest_unit: 25_000,
+			paid_amount_in_smallest_unit: 25_000,
+			remaining_amount_in_smallest_unit: 0,
+			payments: [{ id: "pay_2" }, { id: "pay_1" }],
+		};
+		h.stream.listInvoices.mockResolvedValue({ data: [invoice] });
+		const providerPayment = (id: string, overrides: Record<string, unknown> = {}) =>
+			({
+				id,
+				current_status: "SUCCEEDED",
+				currency: "SAR",
+				amount_in_smallest_unit: 12_500,
+				payment_method: "MADA",
+				...overrides,
+			}) as never;
+		h.stream.getPayment.mockImplementation(async (id) => providerPayment(id));
+		const endpoint = h.auth.api.verifyStreampayCheckoutPayment;
+		if (typeof endpoint !== "function")
+			throw new Error("Checkout verification endpoint is missing.");
+		const verify = (allowManualPayments = false) =>
+			endpoint({
+				body: {
+					paymentLinkId: "pl_1",
+					consumerId: "cons_1",
+					amountInSmallestUnit: 25_000,
+					currency: "SAR",
+					allowManualPayments,
+				},
+			});
+		const expected = {
+			status: "paid",
+			invoiceId: "inv_installments",
+			paymentId: "pay_1",
+			paymentIds: ["pay_1", "pay_2"],
+		};
+		expect(await verify()).toEqual(expected);
+		h.stream.listInvoices.mockResolvedValue({
+			data: [{ ...invoice, payments: [...invoice.payments].reverse() }],
+		});
+		expect(await verify()).toEqual(expected);
+
+		for (const overrides of [
+			{ current_status: "PENDING" },
+			{ current_status: "PARTIALLY_REFUNDED" },
+			{ amount_refunded: "1.00" },
+			{ refunds: [{ status: "PENDING" }] },
+			{ amount_in_smallest_unit: 12_499 },
+			{ currency: "USD" },
+			{ id: "different-payment" },
+			{ payment_method: null },
+		]) {
+			h.stream.getPayment.mockImplementation(async (id) =>
+				providerPayment(id, id === "pay_1" ? overrides : {}),
+			);
+			expect(await verify(), JSON.stringify(overrides)).toEqual({ status: "needs_review" });
+		}
+
+		h.stream.getPayment.mockImplementation(async (id) =>
+			providerPayment(id, id === "pay_1" ? { payment_method: "CASH" } : {}),
+		);
+		expect(await verify()).toEqual({ status: "needs_review" });
+		expect(await verify(true)).toEqual(expected);
+
+		for (const overrides of [
+			{ payments: [{ id: "pay_1" }, { id: "pay_1" }] },
+			{ paid_amount_in_smallest_unit: 12_500 },
+			{ remaining_amount_in_smallest_unit: 1 },
+			{ total_refunded: "5.00" },
+			{ payment_link_id: "different-link" },
+			{ organization_consumer_id: "different-consumer" },
+			{ subscription: { id: "sub_1" } },
+		]) {
+			h.stream.listInvoices.mockResolvedValue({ data: [{ ...invoice, ...overrides }] });
+			expect(await verify(true), JSON.stringify(overrides)).toEqual({ status: "needs_review" });
+		}
+	});
 });
 
 describe(`durable refund requests end to end (${TEST_WITH})`, () => {
