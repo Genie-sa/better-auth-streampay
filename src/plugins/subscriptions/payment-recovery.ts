@@ -10,7 +10,11 @@ import {
 	projectSubscriptionAgainstExisting,
 	subscriptionItemProductId,
 } from "./reconcile";
-import { confirmLatestRenewal, findNextHistoricalRenewal } from "./renewal-evidence";
+import {
+	confirmLatestRenewal,
+	findNextHistoricalRenewal,
+	renewalBaseline,
+} from "./renewal-evidence";
 import { syncWebhookPayload } from "./sync";
 import {
 	APP_ID_METADATA_KEY,
@@ -77,7 +81,15 @@ async function recoverTrial(
 		(candidate) => candidate.latest_invoice?.payment_link_id === linkId,
 	);
 	const [candidate] = candidates;
-	if (candidates.length === 0) return list.data?.length ? "needs_review" : fallback;
+	if (candidates.length === 0) {
+		return list.data?.some(
+			(candidate) =>
+				(candidate.status === "TRIALING" || candidate.status === "TRIAL_PENDING") &&
+				!candidate.latest_invoice?.payment_link_id,
+		)
+			? "needs_review"
+			: fallback;
+	}
 	if (candidates.length !== 1 || !candidate?.id) return "needs_review";
 
 	const stream = await client.getSubscription(candidate.id);
@@ -209,21 +221,26 @@ async function recoverRenewal(
 		return "needs_review";
 	}
 	const cycle = stream.current_cycle_number;
-	const baseline = row.renewedCycleNumber ?? row.currentCycleNumber ?? 0;
+	const baseline = renewalBaseline(row);
 	const latestInvoiceId = stream.latest_invoice?.id;
 	if (
 		stream.status !== "ACTIVE" ||
 		cycle === undefined ||
 		!Number.isSafeInteger(cycle) ||
-		cycle <= baseline ||
+		cycle <= (baseline ?? 0) ||
 		!latestInvoiceId ||
 		stream.latest_invoice?.status !== "COMPLETED"
 	) {
 		return "unchanged";
 	}
+	if (baseline === null) {
+		const providerPeriodEnd = parseDate(stream.current_period_end);
+		if (!row.periodEnd || !providerPeriodEnd) return "needs_review";
+		if (providerPeriodEnd <= row.periodEnd) return "unchanged";
+	}
 	let invoiceId = latestInvoiceId;
 	let claimedCycle = cycle;
-	if (cycle - baseline > 1) {
+	if (baseline !== null && cycle - baseline > 1) {
 		const historical = await findNextHistoricalRenewal(client, stream, row, baseline);
 		if (!historical) return "needs_review";
 		({ invoiceId, cycle: claimedCycle } = historical);

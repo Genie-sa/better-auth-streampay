@@ -47,6 +47,53 @@ function recurringInvoice(id: string, start: string, end: string) {
 	};
 }
 
+async function renewalHistory() {
+	const onSubscriptionRenewed = vi.fn();
+	const h = await harness([
+		subscriptions({ plans: [TEAM], reconcilePayments: true, onSubscriptionRenewed }),
+		webhooks({ secret: SECRET }),
+	]);
+	const id = await reserve(h);
+	await h.setRow("subscription", id, {
+		status: "active",
+		streampaySubscriptionId: subId,
+		currentCycleNumber: 1,
+		renewedCycleNumber: 1,
+		periodStart: new Date(windows[0]),
+		periodEnd: new Date(windows[1]),
+	});
+	const first = recurringInvoice("cycle-2", windows[1], windows[2]);
+	const latest = recurringInvoice("cycle-3", windows[2], windows[3]);
+	h.stream.getSubscription.mockResolvedValue(
+		providerSubscription(subId, "ACTIVE", {
+			current_cycle_number: 3,
+			current_period_start: windows[2],
+			current_period_end: windows[3],
+			currency: "SAR",
+			latest_invoice: latest,
+			updated_at: windows[2],
+		}),
+	);
+	h.stream.getInvoice.mockImplementation(async (id) => (id === latest.id ? latest : first));
+	h.stream.getPayment.mockImplementation(async (id) => ({
+		id,
+		currency: "SAR",
+		current_status: "SUCCEEDED",
+		amount_in_smallest_unit: 100,
+	}));
+	h.stream.listInvoices.mockResolvedValue({ data: [latest, first] });
+	return { h, id, first, latest, onSubscriptionRenewed };
+}
+
+function completion(invoiceId: string) {
+	return {
+		event_type: "INVOICE_COMPLETED",
+		entity_type: "INVOICE",
+		entity_id: invoiceId,
+		timestamp: windows[2],
+	};
+}
+
 describe(`subscription payment history (${TEST_WITH})`, () => {
 	it("links a verified free trial without running paid activation callbacks", async () => {
 		const trial = { ...TEAM, trialPeriodDays: 7 };
@@ -74,6 +121,7 @@ describe(`subscription payment history (${TEST_WITH})`, () => {
 				currency: "SAR",
 				trial_period_days: 7,
 				trial_end: new Date(Date.now() + 86_400_000).toISOString(),
+				updated_at: windows[0],
 				latest_invoice: { id: "draft-invoice", payment_link_id: linkId },
 			});
 		h.stream.listSubscriptions.mockResolvedValue({ data: [provider("TRIALING")] });
@@ -86,6 +134,23 @@ describe(`subscription payment history (${TEST_WITH})`, () => {
 			results: [{ subscriptionId: id, status: "needs_review" }],
 		});
 		h.stream.getSubscription.mockResolvedValue(provider("TRIALING"));
+		h.stream.listSubscriptions.mockResolvedValueOnce({
+			data: [provider("TRIALING")],
+			pagination: { has_next_page: true },
+		});
+		expect(await reconcile(h)).toMatchObject({ results: [{ status: "needs_review" }] });
+		h.stream.listSubscriptions.mockResolvedValueOnce({
+			data: [
+				provider("TRIALING"),
+				providerSubscription("second-subscription", "TRIALING", {
+					latest_invoice: { payment_link_id: "pl_1" },
+				}),
+			],
+		});
+		expect(await reconcile(h)).toMatchObject({ results: [{ status: "needs_review" }] });
+		await h.setRow("subscription", id, { providerUpdatedAt: new Date(windows[1]) });
+		expect(await reconcile(h)).toMatchObject({ results: [{ status: "retry" }] });
+		await h.setRow("subscription", id, { providerUpdatedAt: null });
 		expect(await reconcile(h)).toMatchObject({
 			results: [{ subscriptionId: id, status: "recovered" }],
 		});
@@ -97,50 +162,12 @@ describe(`subscription payment history (${TEST_WITH})`, () => {
 	});
 
 	it("delivers two missed cycles in order without moving the period ahead of evidence", async () => {
-		const onSubscriptionRenewed = vi.fn();
-		const h = await harness([
-			subscriptions({ plans: [TEAM], reconcilePayments: true, onSubscriptionRenewed }),
-			webhooks({ secret: SECRET }),
-		]);
-		const id = await reserve(h);
-		await h.setRow("subscription", id, {
-			status: "active",
-			streampaySubscriptionId: subId,
-			currentCycleNumber: 1,
-			renewedCycleNumber: 1,
-			periodStart: new Date(windows[0]),
-			periodEnd: new Date(windows[1]),
-		});
-		const first = recurringInvoice("cycle-2", windows[1], windows[2]);
-		const latest = recurringInvoice("cycle-3", windows[2], windows[3]);
-		h.stream.getSubscription.mockResolvedValue(
-			providerSubscription(subId, "ACTIVE", {
-				current_cycle_number: 3,
-				current_period_start: windows[2],
-				current_period_end: windows[3],
-				currency: "SAR",
-				latest_invoice: latest,
-				updated_at: windows[2],
-			}),
-		);
-		h.stream.getInvoice.mockImplementation(async (id) => (id === latest.id ? latest : first));
-		h.stream.getPayment.mockImplementation(async (id) => ({
-			id,
-			currency: "SAR",
-			current_status: "SUCCEEDED",
-			amount_in_smallest_unit: 100,
-		}));
+		const { h, first, latest, onSubscriptionRenewed } = await renewalHistory();
 		h.stream.listInvoices.mockResolvedValue({ data: [latest] });
 		expect(await reconcile(h)).toMatchObject({ results: [{ status: "needs_review" }] });
 		expect(onSubscriptionRenewed).not.toHaveBeenCalled();
 
 		h.stream.listInvoices.mockResolvedValue({ data: [latest, first] });
-		const completion = (invoiceId: string) => ({
-			event_type: "INVOICE_COMPLETED",
-			entity_type: "INVOICE",
-			entity_id: invoiceId,
-			timestamp: windows[2],
-		});
 		expect((await h.deliver(completion(latest.id))).status).toBe(200);
 		expect(onSubscriptionRenewed).not.toHaveBeenCalled();
 
@@ -169,6 +196,80 @@ describe(`subscription payment history (${TEST_WITH})`, () => {
 		);
 		expect(onSubscriptionRenewed).toHaveBeenNthCalledWith(
 			2,
+			expect.objectContaining({ idempotencyKey: `subscription:${subId}:renewal:3` }),
+		);
+	});
+
+	it("keeps legacy rows without a cycle number on latest-period verification", async () => {
+		const { h, id, onSubscriptionRenewed } = await renewalHistory();
+		await h.setRow("subscription", id, { currentCycleNumber: null, renewedCycleNumber: null });
+
+		expect(await reconcile(h)).toMatchObject({ results: [{ status: "recovered" }] });
+		expect(h.stream.listInvoices).not.toHaveBeenCalled();
+		expect(h.stream.getPayment).toHaveBeenCalledWith("payment-cycle-3");
+		expect(onSubscriptionRenewed).toHaveBeenCalledExactlyOnceWith(
+			expect.objectContaining({ idempotencyKey: `subscription:${subId}:renewal:3` }),
+		);
+	});
+
+	it("uses the verified provider currency when an older historical row is missing it", async () => {
+		const { h, id, onSubscriptionRenewed } = await renewalHistory();
+		await h.setRow("subscription", id, { currency: null });
+		expect(await reconcile(h)).toMatchObject({ results: [{ status: "recovered" }] });
+		expect(onSubscriptionRenewed).toHaveBeenCalledExactlyOnceWith(
+			expect.objectContaining({ idempotencyKey: `subscription:${subId}:renewal:2` }),
+		);
+	});
+
+	it("defers missing anchors, truncated histories, and duplicate or overlapping periods", async () => {
+		const { h, id, first, latest, onSubscriptionRenewed } = await renewalHistory();
+		await h.setRow("subscription", id, { periodEnd: null });
+		expect(await reconcile(h)).toMatchObject({ results: [{ status: "needs_review" }] });
+		await h.setRow("subscription", id, { periodEnd: new Date(windows[1]) });
+		const older = recurringInvoice("cycle-1", windows[0], windows[1]);
+		for (const data of [
+			[latest, first],
+			[latest, first, older],
+		]) {
+			h.stream.listInvoices.mockResolvedValueOnce({ data, pagination: { has_next_page: true } });
+			expect(await reconcile(h)).toMatchObject({ results: [{ status: "needs_review" }] });
+		}
+		for (const candidate of [first, recurringInvoice("overlap", windows[0], windows[2])]) {
+			h.stream.listInvoices.mockResolvedValueOnce({ data: [latest, first, candidate] });
+			expect(await reconcile(h)).toMatchObject({ results: [{ status: "needs_review" }] });
+		}
+		expect(onSubscriptionRenewed).not.toHaveBeenCalled();
+	});
+
+	it("retries the same historical callback before processing a later cycle", async () => {
+		const { h, latest, onSubscriptionRenewed } = await renewalHistory();
+		onSubscriptionRenewed.mockRejectedValueOnce(new Error("Callback temporarily unavailable."));
+		expect(await reconcile(h)).toMatchObject({ results: [{ status: "retry" }] });
+		const key = `subscription:${subId}:renewal:2`;
+		expect(onSubscriptionRenewed).toHaveBeenCalledExactlyOnceWith(
+			expect.objectContaining({ idempotencyKey: key }),
+		);
+		expect((await h.deliver(completion(latest.id))).status).toBe(500);
+		expect(onSubscriptionRenewed).toHaveBeenCalledTimes(1);
+		const [row] = await h.rows("subscription");
+		const owner = (await h.rows("streampayWebhookEvent")).find(
+			(event) => event.eventId === row?.renewalCallbackEventId,
+		);
+		if (typeof owner?.id !== "string") throw new Error("Missing historical callback receipt.");
+		await h.setRow("streampayWebhookEvent", owner.id, { nextAttemptAt: new Date(0) });
+		const processDue = h.auth.api.processDueStreampayWebhookEvents;
+		if (typeof processDue !== "function") throw new Error("Missing inbox retry endpoint.");
+		expect(await processDue({ body: { limit: 1 } })).toMatchObject({
+			succeeded: [owner.eventId],
+			failed: [],
+		});
+		expect(onSubscriptionRenewed).toHaveBeenNthCalledWith(
+			2,
+			expect.objectContaining({ idempotencyKey: key }),
+		);
+		expect(await reconcile(h)).toMatchObject({ results: [{ status: "recovered" }] });
+		expect(onSubscriptionRenewed).toHaveBeenNthCalledWith(
+			3,
 			expect.objectContaining({ idempotencyKey: `subscription:${subId}:renewal:3` }),
 		);
 	});

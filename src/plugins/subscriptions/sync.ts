@@ -39,7 +39,11 @@ import {
 	projectSubscriptionFields,
 	reconcileProjectionAgainstExisting,
 } from "./reconcile";
-import { confirmLatestRenewal, findNextHistoricalRenewal } from "./renewal-evidence";
+import {
+	confirmLatestRenewal,
+	findNextHistoricalRenewal,
+	renewalBaseline,
+} from "./renewal-evidence";
 import { isTerminalSubscriptionStatus, toLocalStatus } from "./status";
 import {
 	APP_ID_METADATA_KEY,
@@ -1129,6 +1133,9 @@ async function handleRenewalEvidence(
 			stream,
 		));
 	if (!existing) return;
+	const deferRenewal = (reason: string) => {
+		logger(ctx).warn(`Renewal reconciliation deferred for sub=${subscriptionId}: ${reason}.`);
+	};
 
 	const eventAt = parseDate(payload.timestamp);
 	const eventIsStale = Boolean(
@@ -1143,17 +1150,28 @@ async function handleRenewalEvidence(
 		stream.latest_invoice?.status === "COMPLETED" &&
 		(evidenceInvoiceId === null || stream.latest_invoice.id === evidenceInvoiceId);
 	const historicalRetry = eventId !== null && existing.renewalCallbackEventId === eventId;
-	const baseline = existing.renewedCycleNumber ?? existing.currentCycleNumber;
+	const baseline = renewalBaseline(existing);
 	let historicalCycle: number | null = null;
+	if (
+		callbacks.reconcilePayments &&
+		!historicalRetry &&
+		(stream.id !== subscriptionId ||
+			!existing.streampayConsumerId ||
+			stream.organization_consumer_id !== existing.streampayConsumerId)
+	) {
+		return deferRenewal("provider subscription or consumer did not match");
+	}
 	if (
 		callbacks.reconcilePayments &&
 		!historicalRetry &&
 		baseline !== null &&
 		(stream.current_cycle_number ?? 0) - baseline > 1
 	) {
-		if (stream.status !== "ACTIVE" || !evidenceInvoiceId) return;
+		if (stream.status !== "ACTIVE" || !evidenceInvoiceId)
+			return deferRenewal("a historical renewal needs an active subscription and invoice ID");
 		const historical = await findNextHistoricalRenewal(client, stream, existing, baseline);
-		if (!historical || historical.invoiceId !== evidenceInvoiceId) return;
+		if (!historical || historical.invoiceId !== evidenceInvoiceId)
+			return deferRenewal("event did not identify the next verifiable billing period");
 		historicalCycle = historical.cycle;
 	}
 	if (
@@ -1172,7 +1190,7 @@ async function handleRenewalEvidence(
 		stream.latest_invoice?.id &&
 		!settlesLatestInvoice
 	)
-		return;
+		return deferRenewal("event invoice did not match the provider's completed latest invoice");
 	const evidenceApplies = historicalCycle !== null || !eventIsStale || settlesLatestInvoice;
 	const projected: Partial<Subscription> = {
 		...projectSubscriptionFields(stream, existing),
@@ -1193,11 +1211,19 @@ async function handleRenewalEvidence(
 		previousPeriodEnd !== null &&
 		projectedPeriodEnd !== null &&
 		projectedPeriodEnd > previousPeriodEnd;
-	const renewedCycle = existing.renewedCycleNumber ?? existing.currentCycleNumber ?? null;
+	const renewedCycle = baseline;
 	const projectedCycle = historicalCycle ?? projected.currentCycleNumber ?? null;
 	// Period boundaries drift between cycles, so the provider's cycle counter identifies a renewal.
 	const tracksCycles = renewedCycle !== null && projectedCycle !== null;
 	const renewalAdvanced = tracksCycles ? projectedCycle > renewedCycle : periodAdvanced;
+	if (
+		callbacks.reconcilePayments &&
+		!historicalRetry &&
+		baseline === null &&
+		(previousPeriodEnd === null || projectedPeriodEnd === null)
+	) {
+		return deferRenewal("legacy subscription has no comparable billing period");
+	}
 	if (
 		callbacks.reconcilePayments &&
 		!historicalRetry &&
@@ -1211,7 +1237,7 @@ async function handleRenewalEvidence(
 			stream.status !== "ACTIVE" ||
 			!(await confirmLatestRenewal(client, existing, latestInvoiceId))
 		)
-			return;
+			return deferRenewal("the latest invoice has no verified payment for this subscription");
 	}
 	let pendingCallback = existing.renewalCallbackEventId ?? null;
 	if (pendingCallback && pendingCallback !== eventId) {

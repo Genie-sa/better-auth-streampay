@@ -19,6 +19,10 @@ const recurringInvoice = z.object({
 	period_end: z.string(),
 });
 
+export function renewalBaseline(row: Subscription) {
+	return row.renewedCycleNumber ?? row.currentCycleNumber ?? null;
+}
+
 export async function confirmLatestRenewal(
 	client: StreamPayClient,
 	row: Subscription,
@@ -33,7 +37,7 @@ export async function confirmLatestRenewal(
 	);
 }
 
-function readPeriod(input: unknown, row: Subscription) {
+function readPeriod(input: unknown, row: Subscription, expectedCurrency: string) {
 	const invoice = recurringInvoice.safeParse(input);
 	if (!invoice.success) return null;
 	const { id, subscription, subscription_id, organization_consumer_id, currency } = invoice.data;
@@ -43,7 +47,7 @@ function readPeriod(input: unknown, row: Subscription) {
 		(subscription_id ?? subscription?.id) !== row.streampaySubscriptionId ||
 		(subscription && subscription_id && subscription.id !== subscription_id) ||
 		organization_consumer_id !== row.streampayConsumerId ||
-		currency !== row.currency ||
+		currency !== expectedCurrency ||
 		start === undefined ||
 		end === undefined ||
 		end <= start
@@ -59,17 +63,29 @@ export async function findNextHistoricalRenewal(
 	baseline: number,
 ) {
 	const latestCycle = stream.current_cycle_number;
+	const localCycle = row.currentCycleNumber;
+	const localEnd = row.periodEnd?.getTime();
+	const currency = row.currency ?? stream.currency ?? stream.latest_invoice?.currency;
 	const latestId = stream.latest_invoice?.id;
 	const currentStart = parseDate(stream.current_period_start)?.getTime();
 	const currentEnd = parseDate(stream.current_period_end)?.getTime();
 	if (
 		latestCycle === undefined ||
 		!stream.id ||
+		stream.id !== row.streampaySubscriptionId ||
+		!row.streampayConsumerId ||
+		row.streampayConsumerId !== stream.organization_consumer_id ||
 		!Number.isSafeInteger(latestCycle) ||
 		!Number.isSafeInteger(baseline) ||
-		baseline < 0 ||
+		baseline < 1 ||
+		localCycle === null ||
+		!Number.isSafeInteger(localCycle) ||
+		localCycle < 1 ||
+		localCycle > baseline ||
+		localEnd === undefined ||
 		latestCycle - baseline <= 1 ||
-		latestCycle - baseline >= HISTORY_LIMIT ||
+		latestCycle - localCycle > HISTORY_LIMIT ||
+		!currency ||
 		!latestId ||
 		currentStart === undefined ||
 		currentEnd === undefined
@@ -79,15 +95,13 @@ export async function findNextHistoricalRenewal(
 	const list = await client.listInvoices({
 		subscription_id: stream.id,
 		limit: HISTORY_LIMIT,
-		sort_field: "period_start",
-		sort_direction: "desc",
 		statuses: ["COMPLETED"],
 	});
 	const invoices = list.data ?? [];
-	if (invoices.length > HISTORY_LIMIT) return null;
+	if (list.pagination?.has_next_page || invoices.length > HISTORY_LIMIT) return null;
 	const recurring = invoices.filter((candidate) => candidate.type === "RECURRING");
 	const periods = recurring.flatMap((candidate) => {
-		const period = readPeriod(candidate, row);
+		const period = readPeriod(candidate, row, currency);
 		return period ? [period] : [];
 	});
 	if (
@@ -95,29 +109,27 @@ export async function findNextHistoricalRenewal(
 		new Set(periods.map(({ id }) => id)).size !== periods.length
 	)
 		return null;
-	const gap = latestCycle - baseline;
-	// Anchor the chain to StreamPay's current cycle. Each preceding invoice must end
-	// exactly where the newer one starts, with one invoice per billing period.
-	const ordered = periods.sort((a, b) => b.start - a.start);
-	const chain = ordered.slice(0, gap);
-	const target = chain[gap - 1];
-	const older = ordered[gap];
+	const span = latestCycle - localCycle;
+	// Anchor both ends of the chain, including periods whose callbacks were already recovered.
+	const [latest, ...earlier] = periods.sort((a, b) => b.start - a.start);
+	const fromLocal = earlier[span - 2];
+	const target = earlier[latestCycle - baseline - 2];
+	const older = earlier[span - 1];
 	if (
 		!target ||
-		chain[0]?.id !== latestId ||
-		chain[0].start !== currentStart ||
-		chain[0].end !== currentEnd ||
-		(row.currentCycleNumber === baseline &&
-			row.periodEnd &&
-			target.start !== row.periodEnd.getTime()) ||
-		chain.some(({ start }, index) => index < gap - 1 && chain[index + 1]?.end !== start) ||
-		(older !== undefined && older.end > target.start) ||
-		(list.pagination?.has_next_page && !older)
+		latest?.id !== latestId ||
+		latest.start !== currentStart ||
+		latest.end !== currentEnd ||
+		fromLocal?.start !== localEnd ||
+		earlier
+			.slice(0, span - 1)
+			.some(({ end }, index) => end !== (index === 0 ? latest.start : earlier[index - 1]?.start)) ||
+		(older !== undefined && older.end > localEnd)
 	)
 		return null;
 
 	const candidate = await client.getInvoice(target.id);
-	const period = readPeriod(candidate, row);
+	const period = readPeriod(candidate, row, currency);
 	if (period?.id !== target.id || period.start !== target.start || period.end !== target.end)
 		return null;
 	const confirmed = await confirmInvoice(client, candidate);

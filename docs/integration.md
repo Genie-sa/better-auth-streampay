@@ -399,9 +399,11 @@ checkout. For free trials, it checks the provider's active trial, the exact rese
 link and its metadata, the consumer, and the plan. A pending or unlinked trial does not grant
 access through recovery. Recovering a trial does not emit a paid activation callback.
 
-If several renewal cycles were missed, the job verifies a bounded history of invoices anchored
-to the provider's current billing period. It reports one paid cycle per sweep in period order.
-Gaps, overlapping periods, and histories that cannot be linked to the reservation require review.
+If several renewal cycles were missed, the job verifies a complete, bounded invoice history
+between the stored billing period and the provider's current billing period. It reports one paid
+cycle per sweep in period order. Gaps, overlapping periods, and histories without both anchors
+require review. Legacy rows without a cycle counter can still verify the latest paid renewal
+when its billing period is newer than the one stored locally.
 The provider webhook and recovery use the same initial activation receipt and renewal cycle claim.
 
 Use `idempotencyKey` from a subscription callback to deduplicate side effects in your own database.
