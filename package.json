@@ -77,6 +77,7 @@
     "lint": "biome check ./src ./tests",
     "format": "biome format --write ./src ./tests",
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
+    "check:provider-contract": "node scripts/check-provider-contract.mjs",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "pnpm build && changeset publish",

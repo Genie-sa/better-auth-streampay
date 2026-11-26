@@ -1,0 +1,136 @@
+{
+	"source": "https://stream-app-service.streampay.sa/openapi.json",
+	"invoices": {
+		"path": "/api/v2/invoices",
+		"query": {
+			"payment_link_id": {
+				"type": "string",
+				"format": "uuid",
+				"nullable": true
+			},
+			"organization_consumer_id": {
+				"type": "string",
+				"format": "uuid4",
+				"nullable": true
+			},
+			"subscription_id": {
+				"type": "string",
+				"format": "uuid4",
+				"nullable": true
+			},
+			"include_payments": {
+				"type": "boolean",
+				"nullable": true
+			},
+			"statuses": {
+				"type": "array",
+				"items": {
+					"$ref": "#/components/schemas/InvoiceStatusEnum"
+				},
+				"nullable": true
+			},
+			"page": {
+				"type": "integer",
+				"exclusiveMinimum": 0,
+				"default": 1
+			},
+			"limit": {
+				"type": "integer",
+				"exclusiveMinimum": 0,
+				"default": 10
+			},
+			"sort_field": {
+				"type": "string",
+				"nullable": true
+			},
+			"sort_direction": {
+				"type": "string",
+				"nullable": true
+			}
+		}
+	},
+	"subscriptions": {
+		"path": "/api/v2/subscriptions",
+		"query": {
+			"organization_consumer_id": {
+				"type": "string",
+				"format": "uuid4",
+				"nullable": true
+			},
+			"product_ids": {
+				"type": "array",
+				"items": {
+					"type": "string",
+					"format": "uuid"
+				},
+				"nullable": true
+			},
+			"limit": {
+				"type": "integer",
+				"exclusiveMinimum": 0,
+				"default": 10
+			}
+		}
+	},
+	"refund": {
+		"path": "/api/v2/payments/{payment_id}/refund",
+		"required": ["refund_reason"],
+		"request": {
+			"amount": {
+				"anyOf": [
+					{
+						"type": "number",
+						"exclusiveMinimum": 0
+					},
+					{
+						"type": "string",
+						"pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+					},
+					{
+						"type": "null"
+					}
+				]
+			},
+			"refund_reason": {
+				"$ref": "#/components/schemas/PaymentRefundReason"
+			},
+			"refund_note": {
+				"type": "string",
+				"maxLength": 512,
+				"nullable": true
+			},
+			"payment_is_part_of_related_set": {
+				"type": "boolean",
+				"default": false
+			}
+		},
+		"statuses": ["PENDING", "REFUNDED", "CANCELED"],
+		"response": {
+			"id": {
+				"type": "string",
+				"format": "uuid"
+			},
+			"status": {
+				"$ref": "#/components/schemas/PaymentRefundStatus",
+				"default": "REFUNDED"
+			},
+			"amount_refunded": {
+				"type": "string",
+				"pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+			},
+			"refund_reason": {
+				"$ref": "#/components/schemas/PaymentRefundReason",
+				"nullable": true
+			},
+			"refund_note": {
+				"type": "string",
+				"nullable": true
+			},
+			"refunded_at": {
+				"type": "string",
+				"format": "date-time",
+				"nullable": true
+			}
+		}
+	}
+}
