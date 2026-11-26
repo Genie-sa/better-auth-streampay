@@ -210,11 +210,7 @@ function observeRefund(
 		!refund?.id ||
 		state.refunds.filter((entry) => entry.id === refund.id).length !== 1
 	) {
-		return {
-			status: state.refunds.some((entry) => entry.status === "PENDING")
-				? "pending"
-				: "needs_review",
-		};
+		return { status: "needs_review" };
 	}
 	switch (refund.status) {
 		case "REFUNDED":
@@ -392,7 +388,8 @@ export async function runRefundIntent(
 		await writeOutcome(adapter, row, "needs_review");
 		const stored = await findIntent(adapter, paymentId, key);
 		const observed = stored && (await refreshIntent(adapter, client, stored));
-		if (observed?.row.status === "confirmed" && observed.payment) return observed.payment;
+		if (observed?.row.status === "confirmed")
+			return observed.payment ?? client.getPayment(paymentId);
 		if (observed?.row.status === "pending" || code === "PAYMENT_REFUND_BUSY") {
 			throw conflict("PAYMENT_REFUND_IN_PROGRESS");
 		}

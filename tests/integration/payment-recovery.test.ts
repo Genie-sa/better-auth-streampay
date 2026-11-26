@@ -356,6 +356,23 @@ describe(`durable refund requests end to end (${TEST_WITH})`, () => {
 	});
 
 	it.each([
+		[null, "confirmed", null],
+		["invalid JSON", "needs_review", "pay_1"],
+	] as const)("handles a stored refund evidence value of %s", async (refundEvidence, status, activePaymentId) => {
+		const h = await harness([admin({ durableRefunds: true, isAdmin: () => true })]);
+		h.stream.getPayment.mockResolvedValue(payment("pay_1", "SUCCEEDED", "0.00", []));
+		h.stream.refundPayment.mockRejectedValue(new Error("provider reply lost"));
+		expect((await refund(h, "stored-evidence")).status).toBe(409);
+		const id = (await h.rows("streampayRefundIntent"))[0]?.id;
+		if (typeof id !== "string") throw new Error("Missing refund intent.");
+		await h.setRow("streampayRefundIntent", id, { refundEvidence });
+		h.stream.getPayment.mockResolvedValue(payment("pay_1", "REFUNDED", "1.00", []));
+		expect(await (await refundStatus(h, "stored-evidence")).json()).toMatchObject({ status });
+		expect(await h.rows("streampayRefundIntent")).toMatchObject([{ activePaymentId }]);
+		expect(h.stream.refundPayment).toHaveBeenCalledTimes(1);
+	});
+
+	it.each([
 		"REFUNDED",
 		"CANCELED",
 	])("reconciles a lost partial refund response by the exact provider row (%s)", async (outcome) => {
@@ -377,6 +394,13 @@ describe(`durable refund requests end to end (${TEST_WITH})`, () => {
 		const foreign = { ...previous, id: "same-amount", amount_refunded: "0.20" };
 		h.stream.getPayment.mockResolvedValue(
 			payment("pay_1", "PARTIALLY_REFUNDED", "0.30", [previous, foreign]),
+		);
+		expect(await (await refundStatus(h, "partial-ambiguous")).json()).toMatchObject({
+			status: "needs_review",
+			providerRefundId: null,
+		});
+		h.stream.getPayment.mockResolvedValue(
+			payment("pay_1", "PARTIALLY_REFUNDED", "0.10", [previous, { ...foreign, status: "PENDING" }]),
 		);
 		expect(await (await refundStatus(h, "partial-ambiguous")).json()).toMatchObject({
 			status: "needs_review",
