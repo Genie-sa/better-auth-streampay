@@ -39,6 +39,7 @@ import {
 	projectSubscriptionFields,
 	reconcileProjectionAgainstExisting,
 } from "./reconcile";
+import { confirmLatestRenewal, findNextHistoricalRenewal } from "./renewal-evidence";
 import { isTerminalSubscriptionStatus, toLocalStatus } from "./status";
 import {
 	APP_ID_METADATA_KEY,
@@ -1141,10 +1142,38 @@ async function handleRenewalEvidence(
 	const settlesLatestInvoice =
 		stream.latest_invoice?.status === "COMPLETED" &&
 		(evidenceInvoiceId === null || stream.latest_invoice.id === evidenceInvoiceId);
-	if (payload.webhook_delivery_id?.startsWith("recovery-renewal:") && !settlesLatestInvoice) {
+	const historicalRetry = eventId !== null && existing.renewalCallbackEventId === eventId;
+	const baseline = existing.renewedCycleNumber ?? existing.currentCycleNumber;
+	let historicalCycle: number | null = null;
+	if (
+		callbacks.reconcilePayments &&
+		!historicalRetry &&
+		baseline !== null &&
+		(stream.current_cycle_number ?? 0) - baseline > 1
+	) {
+		if (stream.status !== "ACTIVE" || !evidenceInvoiceId) return;
+		const historical = await findNextHistoricalRenewal(client, stream, existing, baseline);
+		if (!historical || historical.invoiceId !== evidenceInvoiceId) return;
+		historicalCycle = historical.cycle;
+	}
+	if (
+		!historicalRetry &&
+		historicalCycle === null &&
+		payload.webhook_delivery_id?.startsWith("recovery-renewal:") &&
+		!settlesLatestInvoice
+	) {
 		throw new Error("The provider changed the renewal invoice during reconciliation.");
 	}
-	const evidenceApplies = !eventIsStale || settlesLatestInvoice;
+	if (
+		callbacks.reconcilePayments &&
+		!historicalRetry &&
+		historicalCycle === null &&
+		evidenceInvoiceId &&
+		stream.latest_invoice?.id &&
+		!settlesLatestInvoice
+	)
+		return;
+	const evidenceApplies = historicalCycle !== null || !eventIsStale || settlesLatestInvoice;
 	const projected: Partial<Subscription> = {
 		...projectSubscriptionFields(stream, existing),
 		...projectPlanFields(stream, plans),
@@ -1165,10 +1194,25 @@ async function handleRenewalEvidence(
 		projectedPeriodEnd !== null &&
 		projectedPeriodEnd > previousPeriodEnd;
 	const renewedCycle = existing.renewedCycleNumber ?? existing.currentCycleNumber ?? null;
-	const projectedCycle = projected.currentCycleNumber ?? null;
+	const projectedCycle = historicalCycle ?? projected.currentCycleNumber ?? null;
 	// Period boundaries drift between cycles, so the provider's cycle counter identifies a renewal.
 	const tracksCycles = renewedCycle !== null && projectedCycle !== null;
 	const renewalAdvanced = tracksCycles ? projectedCycle > renewedCycle : periodAdvanced;
+	if (
+		callbacks.reconcilePayments &&
+		!historicalRetry &&
+		historicalCycle === null &&
+		renewalAdvanced
+	) {
+		const latestInvoiceId = stream.latest_invoice?.id;
+		if (
+			!settlesLatestInvoice ||
+			!latestInvoiceId ||
+			stream.status !== "ACTIVE" ||
+			!(await confirmLatestRenewal(client, existing, latestInvoiceId))
+		)
+			return;
+	}
 	let pendingCallback = existing.renewalCallbackEventId ?? null;
 	if (pendingCallback && pendingCallback !== eventId) {
 		const released =
@@ -1187,6 +1231,7 @@ async function handleRenewalEvidence(
 	}
 	if (
 		!pendingCallback &&
+		historicalCycle === null &&
 		projected.activeSlotKey &&
 		projected.activeSlotKey !== existing.activeSlotKey
 	) {
@@ -1208,9 +1253,14 @@ async function handleRenewalEvidence(
 	const updated = await ctx.context.adapter.update<Subscription>({
 		model: SUBSCRIPTION_MODEL,
 		// Recovery must retain the pending cycle, even if Stream has already advanced again.
-		update: pendingCallback
-			? { renewalCallbackEventId: callbackOwner }
-			: { ...projected, renewalCallbackEventId: callbackOwner },
+		update: {
+			...(pendingCallback
+				? {}
+				: historicalCycle === null
+					? projected
+					: { renewedCycleNumber: historicalCycle }),
+			renewalCallbackEventId: callbackOwner,
+		},
 		where: [
 			...lifecycleWriteGuard(existing),
 			{ field: "periodEnd", value: existing.periodEnd ?? null },
