@@ -39,6 +39,11 @@ import {
 	projectSubscriptionFields,
 	reconcileProjectionAgainstExisting,
 } from "./reconcile";
+import {
+	confirmLatestRenewal,
+	findNextHistoricalRenewal,
+	renewalBaseline,
+} from "./renewal-evidence";
 import { isTerminalSubscriptionStatus, toLocalStatus } from "./status";
 import {
 	APP_ID_METADATA_KEY,
@@ -987,7 +992,7 @@ export async function syncWebhookPayload(
  * A lock whose event is already completed can never deliver its callback (for example after an admin
  * discard that stopped before clearing it), so it is released for the next renewal evidence.
  */
-async function releaseLockOfCompletedRenewal(
+export async function releaseLockOfCompletedRenewal(
 	ctx: SyncContext,
 	subscriptionRowId: string,
 	lockEventId: string,
@@ -1107,6 +1112,7 @@ async function handleRenewalEvidence(
 	}
 
 	if (!subscriptionId) return;
+	const isRecovery = payload.webhook_delivery_id?.startsWith("recovery-renewal:") === true;
 
 	let stream: SubscriptionDetailed;
 	try {
@@ -1127,7 +1133,15 @@ async function handleRenewalEvidence(
 			linkPolicy(callbacks, "recovery"),
 			stream,
 		));
-	if (!existing) return;
+	if (!existing) {
+		if (isRecovery) throw new Error("The local subscription changed during renewal recovery.");
+		return;
+	}
+	const deferRenewal = (reason: string) => {
+		const message = `Renewal reconciliation deferred for sub=${subscriptionId}: ${reason}.`;
+		if (isRecovery) throw new Error(message);
+		logger(ctx).warn(message);
+	};
 
 	const eventAt = parseDate(payload.timestamp);
 	const eventIsStale = Boolean(
@@ -1141,10 +1155,44 @@ async function handleRenewalEvidence(
 	const settlesLatestInvoice =
 		stream.latest_invoice?.status === "COMPLETED" &&
 		(evidenceInvoiceId === null || stream.latest_invoice.id === evidenceInvoiceId);
-	if (payload.webhook_delivery_id?.startsWith("recovery-renewal:") && !settlesLatestInvoice) {
+	const historicalRetry = eventId !== null && existing.renewalCallbackEventId === eventId;
+	const baseline = renewalBaseline(existing);
+	let historicalCycle: number | null = null;
+	if (
+		callbacks.reconcilePayments &&
+		!historicalRetry &&
+		(stream.id !== subscriptionId ||
+			!existing.streampayConsumerId ||
+			stream.organization_consumer_id !== existing.streampayConsumerId)
+	) {
+		return deferRenewal("provider subscription or consumer did not match");
+	}
+	if (
+		callbacks.reconcilePayments &&
+		!historicalRetry &&
+		baseline !== null &&
+		(stream.current_cycle_number ?? 0) - baseline > 1
+	) {
+		if (stream.status !== "ACTIVE" || !evidenceInvoiceId)
+			return deferRenewal("a historical renewal needs an active subscription and invoice ID");
+		const historical = await findNextHistoricalRenewal(client, stream, existing, baseline);
+		if (!historical || historical.invoiceId !== evidenceInvoiceId)
+			return deferRenewal("event did not identify the next verifiable billing period");
+		historicalCycle = historical.cycle;
+	}
+	if (!historicalRetry && historicalCycle === null && isRecovery && !settlesLatestInvoice) {
 		throw new Error("The provider changed the renewal invoice during reconciliation.");
 	}
-	const evidenceApplies = !eventIsStale || settlesLatestInvoice;
+	if (
+		callbacks.reconcilePayments &&
+		!historicalRetry &&
+		historicalCycle === null &&
+		evidenceInvoiceId &&
+		stream.latest_invoice?.id &&
+		!settlesLatestInvoice
+	)
+		return deferRenewal("event invoice did not match the provider's completed latest invoice");
+	const evidenceApplies = historicalCycle !== null || !eventIsStale || settlesLatestInvoice;
 	const projected: Partial<Subscription> = {
 		...projectSubscriptionFields(stream, existing),
 		...projectPlanFields(stream, plans),
@@ -1164,11 +1212,34 @@ async function handleRenewalEvidence(
 		previousPeriodEnd !== null &&
 		projectedPeriodEnd !== null &&
 		projectedPeriodEnd > previousPeriodEnd;
-	const renewedCycle = existing.renewedCycleNumber ?? existing.currentCycleNumber ?? null;
-	const projectedCycle = projected.currentCycleNumber ?? null;
+	const renewedCycle = baseline;
+	const projectedCycle = historicalCycle ?? projected.currentCycleNumber ?? null;
 	// Period boundaries drift between cycles, so the provider's cycle counter identifies a renewal.
 	const tracksCycles = renewedCycle !== null && projectedCycle !== null;
 	const renewalAdvanced = tracksCycles ? projectedCycle > renewedCycle : periodAdvanced;
+	if (
+		callbacks.reconcilePayments &&
+		!historicalRetry &&
+		baseline === null &&
+		(previousPeriodEnd === null || projectedPeriodEnd === null)
+	) {
+		return deferRenewal("legacy subscription has no comparable billing period");
+	}
+	if (
+		callbacks.reconcilePayments &&
+		!historicalRetry &&
+		historicalCycle === null &&
+		renewalAdvanced
+	) {
+		const latestInvoiceId = stream.latest_invoice?.id;
+		if (
+			!settlesLatestInvoice ||
+			!latestInvoiceId ||
+			stream.status !== "ACTIVE" ||
+			!(await confirmLatestRenewal(client, existing, latestInvoiceId))
+		)
+			return deferRenewal("the latest invoice has no verified payment for this subscription");
+	}
 	let pendingCallback = existing.renewalCallbackEventId ?? null;
 	if (pendingCallback && pendingCallback !== eventId) {
 		const released =
@@ -1187,6 +1258,7 @@ async function handleRenewalEvidence(
 	}
 	if (
 		!pendingCallback &&
+		historicalCycle === null &&
 		projected.activeSlotKey &&
 		projected.activeSlotKey !== existing.activeSlotKey
 	) {
@@ -1208,9 +1280,14 @@ async function handleRenewalEvidence(
 	const updated = await ctx.context.adapter.update<Subscription>({
 		model: SUBSCRIPTION_MODEL,
 		// Recovery must retain the pending cycle, even if Stream has already advanced again.
-		update: pendingCallback
-			? { renewalCallbackEventId: callbackOwner }
-			: { ...projected, renewalCallbackEventId: callbackOwner },
+		update: {
+			...(pendingCallback
+				? {}
+				: historicalCycle === null
+					? projected
+					: { renewedCycleNumber: historicalCycle }),
+			renewalCallbackEventId: callbackOwner,
+		},
 		where: [
 			...lifecycleWriteGuard(existing),
 			{ field: "periodEnd", value: existing.periodEnd ?? null },

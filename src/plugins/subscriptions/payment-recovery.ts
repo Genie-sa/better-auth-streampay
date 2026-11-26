@@ -1,15 +1,28 @@
 import type { StreamPayClient } from "../../types";
-import { confirmInvoice, findPaidCheckoutInvoice } from "../../utils/payment-evidence";
+import { findPaidCheckoutInvoice } from "../../utils/payment-evidence";
 import type { StreamPayWebhookPayload } from "../../webhooks/events";
+import { WEBHOOK_EVENT_MODEL, type WebhookEventRow, webhookEventId } from "../../webhooks/inbox";
 import type { SyncContext } from "./adapter";
 import type { ResolvedPlans } from "./plans";
-import { subscriptionItemProductId } from "./reconcile";
-import { syncWebhookPayload } from "./sync";
+import {
+	isOlderProviderState,
+	lifecycleWriteGuard,
+	parseDate,
+	projectSubscriptionAgainstExisting,
+	subscriptionItemProductId,
+} from "./reconcile";
+import {
+	confirmLatestRenewal,
+	findNextHistoricalRenewal,
+	renewalBaseline,
+} from "./renewal-evidence";
+import { releaseLockOfCompletedRenewal, syncWebhookPayload } from "./sync";
 import {
 	APP_ID_METADATA_KEY,
 	PLAN_NAME_METADATA_KEY,
 	REFERENCE_ID_METADATA_KEY,
 	REFERENCE_TYPE_METADATA_KEY,
+	type StreamPayPlanLike,
 	SUBSCRIPTION_ROW_ID_METADATA_KEY,
 	type Subscription,
 	type SubscriptionsOptions,
@@ -24,19 +37,107 @@ type RecoveryOptions = {
 	subscriptions: SubscriptionsOptions;
 };
 
-async function recoverCheckout(
+function ownsCheckoutLink(
+	link: Awaited<ReturnType<StreamPayClient["getPaymentLink"]>>,
+	row: Subscription,
+	options: SubscriptionsOptions,
+) {
+	const metadata = link.custom_metadata;
+	return (
+		link.id === row.streampayPaymentLinkId &&
+		metadata?.[SUBSCRIPTION_ROW_ID_METADATA_KEY] === row.id &&
+		metadata?.[APP_ID_METADATA_KEY] === options.appId &&
+		metadata?.[REFERENCE_ID_METADATA_KEY] === row.referenceId &&
+		metadata?.[REFERENCE_TYPE_METADATA_KEY] === (row.referenceType ?? "user") &&
+		metadata?.[PLAN_NAME_METADATA_KEY] === row.plan
+	);
+}
+
+async function recoverTrial(
 	ctx: SyncContext,
 	row: Subscription,
 	{ client, plans, subscriptions }: RecoveryOptions,
+	plan: StreamPayPlanLike,
+	linkId: string,
+	consumerId: string,
 ): Promise<PaymentRecoveryStatus> {
+	if (!plan.trialPeriodDays || !row.activeSlotKey) return "unchanged";
+	const link = await client.getPaymentLink(linkId);
+	if (!link.trial_period_days) return "unchanged";
+	if (
+		!ownsCheckoutLink(link, row, subscriptions) ||
+		link.amount_collected_in_smallest_unit !== 0 ||
+		link.organization_consumer_id !== consumerId ||
+		link.trial_period_days !== plan.trialPeriodDays
+	)
+		return "needs_review";
+
+	const list = await client.listSubscriptions({
+		organization_consumer_id: consumerId,
+		product_ids: [plan.productId],
+		limit: 10,
+	});
+	if (list.pagination?.has_next_page || (list.data?.length ?? 0) > 10) return "needs_review";
+	const candidates = (list.data ?? []).filter(
+		(candidate) => candidate.latest_invoice?.payment_link_id === linkId,
+	);
+	const [candidate] = candidates;
+	if (candidates.length === 0) {
+		return list.data?.some(
+			(candidate) =>
+				(candidate.status === "TRIALING" || candidate.status === "TRIAL_PENDING") &&
+				!candidate.latest_invoice?.payment_link_id,
+		)
+			? "needs_review"
+			: "unchanged";
+	}
+	if (candidates.length !== 1 || !candidate?.id) return "needs_review";
+
+	const stream = await client.getSubscription(candidate.id);
+	if (
+		stream.id !== candidate.id ||
+		stream.organization_consumer_id !== consumerId ||
+		stream.latest_invoice?.payment_link_id !== linkId ||
+		stream.trial_period_days !== plan.trialPeriodDays ||
+		stream.currency !== row.currency ||
+		stream.items?.length !== 1 ||
+		subscriptionItemProductId(stream.items[0]) !== plan.productId
+	)
+		return "needs_review";
+	if (stream.status === "TRIAL_PENDING") return "unchanged";
+	const trialEnd = parseDate(stream.trial_end);
+	if (stream.status !== "TRIALING" || !trialEnd || trialEnd.getTime() <= Date.now())
+		return "needs_review";
+
+	const projected = projectSubscriptionAgainstExisting(row, stream, plans);
+	if (isOlderProviderState(row, projected)) return "retry";
+	const updated = await ctx.context.adapter.update<Subscription>({
+		model: MODEL,
+		where: [
+			...lifecycleWriteGuard(row),
+			{ field: "streampayPaymentLinkId", value: linkId },
+			{ field: "activeSlotKey", value: row.activeSlotKey },
+		],
+		update: projected,
+	});
+	return updated ? "recovered" : "retry";
+}
+
+async function recoverCheckout(
+	ctx: SyncContext,
+	row: Subscription,
+	options: RecoveryOptions,
+): Promise<PaymentRecoveryStatus> {
+	const { client, plans, subscriptions } = options;
 	const linkId = row.streampayPaymentLinkId;
 	const consumerId = row.streampayConsumerId;
 	if (!linkId || !consumerId) return "unchanged";
 	const plan = plans.byName.get(row.plan);
 	if (!plan || plan.productId !== row.productId) return "needs_review";
 	const evidence = await findPaidCheckoutInvoice(client, linkId, consumerId);
-	if (evidence.status !== "paid")
-		return evidence.status === "unpaid" ? "unchanged" : "needs_review";
+	if (evidence.status === "needs_review") return "needs_review";
+	if (evidence.status === "unpaid")
+		return recoverTrial(ctx, row, options, plan, linkId, consumerId);
 	const invoice = evidence.invoice;
 	const subscriptionId = invoice?.subscription_id ?? invoice?.subscription?.id;
 	if (
@@ -54,12 +155,7 @@ async function recoverCheckout(
 	]);
 	const metadata = link.custom_metadata;
 	if (
-		link.id !== linkId ||
-		metadata?.[SUBSCRIPTION_ROW_ID_METADATA_KEY] !== row.id ||
-		metadata?.[APP_ID_METADATA_KEY] !== subscriptions.appId ||
-		metadata?.[REFERENCE_ID_METADATA_KEY] !== row.referenceId ||
-		metadata?.[REFERENCE_TYPE_METADATA_KEY] !== (row.referenceType ?? "user") ||
-		metadata?.[PLAN_NAME_METADATA_KEY] !== row.plan ||
+		!ownsCheckoutLink(link, row, subscriptions) ||
 		stream.id !== subscriptionId ||
 		stream.organization_consumer_id !== consumerId ||
 		stream.status !== "ACTIVE" ||
@@ -109,6 +205,12 @@ async function recoverRenewal(
 	) {
 		return "unchanged";
 	}
+	if (
+		row.renewalCallbackEventId &&
+		!(await releaseLockOfCompletedRenewal(ctx, row.id, row.renewalCallbackEventId))
+	) {
+		return "retry";
+	}
 	const stream = await client.getSubscription(subscriptionId);
 	if (
 		stream.id !== subscriptionId ||
@@ -118,26 +220,30 @@ async function recoverRenewal(
 		return "needs_review";
 	}
 	const cycle = stream.current_cycle_number;
-	const baseline = row.renewedCycleNumber ?? row.currentCycleNumber ?? 0;
-	const invoiceId = stream.latest_invoice?.id;
+	const baseline = renewalBaseline(row);
+	const latestInvoiceId = stream.latest_invoice?.id;
 	if (
 		stream.status !== "ACTIVE" ||
 		cycle === undefined ||
-		cycle <= baseline ||
-		!invoiceId ||
+		!Number.isSafeInteger(cycle) ||
+		cycle <= (baseline ?? 0) ||
+		!latestInvoiceId ||
 		stream.latest_invoice?.status !== "COMPLETED"
 	) {
 		return "unchanged";
 	}
-	const invoice = await confirmInvoice(client, await client.getInvoice(invoiceId));
-	if (
-		!invoice ||
-		invoice.id !== invoiceId ||
-		invoice.organization_consumer_id !== row.streampayConsumerId ||
-		(invoice.subscription_id ?? invoice.subscription?.id) !== subscriptionId
-	) {
-		return "needs_review";
+	if (baseline === null) {
+		const providerPeriodEnd = parseDate(stream.current_period_end);
+		if (!row.periodEnd || !providerPeriodEnd) return "needs_review";
+		if (providerPeriodEnd <= row.periodEnd) return "unchanged";
 	}
+	let invoiceId = latestInvoiceId;
+	let claimedCycle = cycle;
+	if (baseline !== null && cycle - baseline > 1) {
+		const historical = await findNextHistoricalRenewal(client, stream, row, baseline);
+		if (!historical) return "needs_review";
+		({ invoiceId, cycle: claimedCycle } = historical);
+	} else if (!(await confirmLatestRenewal(client, row, invoiceId))) return "needs_review";
 
 	const renewal: StreamPayWebhookPayload = {
 		webhook_delivery_id: `recovery-renewal:${invoiceId}`,
@@ -149,6 +255,12 @@ async function recoverRenewal(
 		timestamp: stream.updated_at ?? new Date().toISOString(),
 		data: { invoice: { id: invoiceId, url: "" } },
 	};
+	const receipt = await ctx.context.adapter.findOne<WebhookEventRow>({
+		model: WEBHOOK_EVENT_MODEL,
+		where: [{ field: "eventId", value: webhookEventId(renewal) }],
+	});
+	if (receipt?.status === "pending") return "retry";
+	if (receipt?.status === "dead_letter") return "needs_review";
 	await syncWebhookPayload(ctx, renewal, client, plans, subscriptions, {
 		rawBody: JSON.stringify(renewal),
 		...(subscriptions.maxWebhookAttempts === undefined
@@ -160,7 +272,7 @@ async function recoverRenewal(
 		model: MODEL,
 		where: [{ field: "id", value: row.id }],
 	});
-	return (updated?.renewedCycleNumber ?? 0) >= cycle ? "recovered" : "retry";
+	return (updated?.renewedCycleNumber ?? 0) >= claimedCycle ? "recovered" : "retry";
 }
 
 export async function reconcileSubscriptionPayment(

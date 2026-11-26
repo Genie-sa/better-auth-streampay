@@ -444,10 +444,17 @@ const { results, nextOffset } = await auth.api.reconcileStreampaySubscriptionPay
 
 Carry `nextOffset` into the next batch and restart at zero after the end of each sweep. Report
 `needs_review` results to whoever handles payment exceptions. A `retry` result can be checked in
-the next sweep. Recovery verifies a paid invoice and its payment. An invoice without a confirmed
-payment does not activate a checkout. For linked subscriptions, the job checks the latest paid
-renewal cycle. The provider webhook and recovery use the same initial activation receipt and the
-same renewal cycle claim.
+the next sweep. Recovery verifies a paid invoice and its payment before activating a paid
+checkout. For free trials, it checks the provider's active trial, the exact reserved checkout
+link and its metadata, the consumer, and the plan. A pending or unlinked trial does not grant
+access through recovery. Recovering a trial does not emit a paid activation callback.
+
+If several renewal cycles were missed, the job verifies a complete, bounded invoice history
+between the stored billing period and the provider's current billing period. It reports one paid
+cycle per sweep in period order. Gaps, overlapping periods, and histories without both anchors
+require review. Legacy rows without a cycle counter can still verify the latest paid renewal
+when its billing period is newer than the one stored locally.
+The provider webhook and recovery use the same initial activation receipt and renewal cycle claim.
 
 Use `idempotencyKey` from a subscription callback to deduplicate side effects in your own database.
 The initial checkout activation key is per subscription. Renewal keys identify the confirmed cycle
