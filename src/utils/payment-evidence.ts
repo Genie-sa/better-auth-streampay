@@ -96,15 +96,11 @@ export async function confirmInvoice(
 				return null;
 			// Older provider responses may omit the method for a single payment.
 			const method = result.data.payment_method;
-			if (
-				method
-					? !(
-							AUTOMATED_PAYMENT_METHODS.has(method) ||
-							(policy.allowManualPayments && MANUAL_PAYMENT_METHODS.has(method))
-						)
-					: multiple
-			)
-				return null;
+			const methodAllowed = method
+				? AUTOMATED_PAYMENT_METHODS.has(method) ||
+					(policy.allowManualPayments === true && MANUAL_PAYMENT_METHODS.has(method))
+				: !multiple;
+			if (policy.allowManualPayments !== undefined && !methodAllowed) return null;
 			verifiedTotal += result.data.amount_in_smallest_unit;
 			if (!Number.isSafeInteger(verifiedTotal) || verifiedTotal > total) return null;
 		}

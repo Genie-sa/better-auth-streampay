@@ -134,7 +134,13 @@ describe(`payment reconciliation end to end (${TEST_WITH})`, () => {
 			}),
 		);
 		h.stream.getInvoice.mockResolvedValue(second);
-		h.stream.getPayment.mockResolvedValue(payment("pay_second", "SUCCEEDED"));
+		h.stream.getPayment.mockResolvedValue({
+			id: "pay_second",
+			currency: "SAR",
+			current_status: "SUCCEEDED",
+			amount_in_smallest_unit: 100,
+			payment_method: "BANK_TRANSFER",
+		});
 		expect(await scheduled(h)).toMatchObject({
 			results: [{ subscriptionId: rowId, status: "recovered" }],
 		});
@@ -300,6 +306,7 @@ describe(`payment reconciliation end to end (${TEST_WITH})`, () => {
 			{ currency: "USD" },
 			{ id: "different-payment" },
 			{ payment_method: null },
+			{ payment_method: "UNKNOWN_METHOD" },
 		]) {
 			h.stream.getPayment.mockImplementation(async (id) =>
 				providerPayment(id, id === "pay_1" ? overrides : {}),
