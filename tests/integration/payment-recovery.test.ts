@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { admin, checkout, subscriptions, webhooks } from "../../src";
 import { callAuthEndpoint } from "../utils/auth-instance";
+import { mockApiError } from "../utils/helpers";
 import {
 	type Harness,
 	harness,
@@ -28,13 +29,14 @@ function paidInvoice(id: string, paymentId: string, subscriptionId?: string) {
 	};
 }
 
-function payment(id: string, status: string, amountRefunded?: string) {
+function payment(id: string, status: string, amountRefunded?: string, refunds?: unknown[]) {
 	return {
 		id,
 		current_status: status,
 		currency: "SAR",
 		amount_in_smallest_unit: 100,
 		...(amountRefunded === undefined ? {} : { amount_refunded: amountRefunded }),
+		...(refunds === undefined ? {} : { refunds }),
 	} as never;
 }
 
@@ -58,11 +60,16 @@ function scheduled(h: Harness) {
 	return endpoint({ body: { limit: 10 } });
 }
 
-function refund(h: Harness, key: string, amount?: string) {
+function refund(h: Harness, key: string, amount?: string, note?: string) {
 	return callAuthEndpoint(h.auth, "/admin/streampay/payments/pay_1/refund", {
 		method: "POST",
 		headers: h.headers,
-		body: { idempotencyKey: key, refund_reason: "OTHER", ...(amount ? { amount } : {}) },
+		body: {
+			idempotencyKey: key,
+			refund_reason: "OTHER",
+			...(amount ? { amount } : {}),
+			...(note === undefined ? {} : { refund_note: note }),
+		},
 	});
 }
 
@@ -134,7 +141,13 @@ describe(`payment reconciliation end to end (${TEST_WITH})`, () => {
 			}),
 		);
 		h.stream.getInvoice.mockResolvedValue(second);
-		h.stream.getPayment.mockResolvedValue(payment("pay_second", "SUCCEEDED"));
+		h.stream.getPayment.mockResolvedValue({
+			id: "pay_second",
+			currency: "SAR",
+			current_status: "SUCCEEDED",
+			amount_in_smallest_unit: 100,
+			payment_method: "BANK_TRANSFER",
+		});
 		expect(await scheduled(h)).toMatchObject({
 			results: [{ subscriptionId: rowId, status: "recovered" }],
 		});
@@ -244,9 +257,305 @@ describe(`payment reconciliation end to end (${TEST_WITH})`, () => {
 			).status,
 		).toBe(404);
 	});
+
+	it("verifies every installment and returns a stable invoice and payment IDs", async () => {
+		const h = await harness([checkout()]);
+		const invoice = {
+			...paidInvoice("inv_installments", "pay_2"),
+			total_amount: "250.00",
+			total_amount_in_smallest_unit: 25_000,
+			paid_amount_in_smallest_unit: 25_000,
+			remaining_amount_in_smallest_unit: 0,
+			payments: [{ id: "pay_2" }, { id: "pay_1" }],
+		};
+		h.stream.listInvoices.mockResolvedValue({ data: [invoice] });
+		const providerPayment = (id: string, overrides: Record<string, unknown> = {}) =>
+			({
+				id,
+				current_status: "SUCCEEDED",
+				currency: "SAR",
+				amount_in_smallest_unit: 12_500,
+				payment_method: "MADA",
+				...overrides,
+			}) as never;
+		h.stream.getPayment.mockImplementation(async (id) => providerPayment(id));
+		const endpoint = h.auth.api.verifyStreampayCheckoutPayment;
+		if (typeof endpoint !== "function")
+			throw new Error("Checkout verification endpoint is missing.");
+		const verify = (allowManualPayments = false) =>
+			endpoint({
+				body: {
+					paymentLinkId: "pl_1",
+					consumerId: "cons_1",
+					amountInSmallestUnit: 25_000,
+					currency: "SAR",
+					allowManualPayments,
+				},
+			});
+		const expected = {
+			status: "paid",
+			invoiceId: "inv_installments",
+			paymentId: "pay_1",
+			paymentIds: ["pay_1", "pay_2"],
+		};
+		expect(await verify()).toEqual(expected);
+		h.stream.listInvoices.mockResolvedValue({
+			data: [{ ...invoice, payments: [...invoice.payments].reverse() }],
+		});
+		expect(await verify()).toEqual(expected);
+
+		for (const overrides of [
+			{ current_status: "PENDING" },
+			{ current_status: "PARTIALLY_REFUNDED" },
+			{ amount_refunded: "1.00" },
+			{ refunds: [{ status: "PENDING" }] },
+			{ amount_in_smallest_unit: 12_499 },
+			{ currency: "USD" },
+			{ id: "different-payment" },
+			{ payment_method: null },
+			{ payment_method: "UNKNOWN_METHOD" },
+		]) {
+			h.stream.getPayment.mockImplementation(async (id) =>
+				providerPayment(id, id === "pay_1" ? overrides : {}),
+			);
+			expect(await verify(), JSON.stringify(overrides)).toEqual({ status: "needs_review" });
+		}
+
+		h.stream.getPayment.mockImplementation(async (id) =>
+			providerPayment(id, id === "pay_1" ? { payment_method: "CASH" } : {}),
+		);
+		expect(await verify()).toEqual({ status: "needs_review" });
+		expect(await verify(true)).toEqual(expected);
+
+		for (const overrides of [
+			{ payments: [{ id: "pay_1" }, { id: "pay_1" }] },
+			{ paid_amount_in_smallest_unit: 12_500 },
+			{ remaining_amount_in_smallest_unit: 1 },
+			{ total_refunded: "5.00" },
+			{ payment_link_id: "different-link" },
+			{ organization_consumer_id: "different-consumer" },
+			{ subscription: { id: "sub_1" } },
+		]) {
+			h.stream.listInvoices.mockResolvedValue({ data: [{ ...invoice, ...overrides }] });
+			expect(await verify(true), JSON.stringify(overrides)).toEqual({ status: "needs_review" });
+		}
+	});
 });
 
 describe(`durable refund requests end to end (${TEST_WITH})`, () => {
+	it.each([
+		["full with generated note", undefined, undefined],
+		["full with caller note", undefined, "Customer request"],
+		["partial with generated note", "0.20", undefined],
+		["partial with caller note", "0.20", "Customer request"],
+	] as const)("confirms a successful response with a provider refund record (%s)", async (_, amount, note) => {
+		const h = await harness([admin({ durableRefunds: true, isAdmin: () => true })]);
+		h.stream.getPayment.mockResolvedValue(payment("pay_1", "SUCCEEDED", "0.00", []));
+		const refunded = amount ?? "1.00";
+		h.stream.refundPayment.mockImplementation(async (_, request) =>
+			payment("pay_1", amount ? "PARTIALLY_REFUNDED" : "REFUNDED", refunded, [
+				{
+					id: "exact-refund",
+					status: "REFUNDED",
+					amount_refunded: refunded,
+					refund_reason: request.refund_reason,
+					refund_note: request.refund_note,
+				},
+			]),
+		);
+
+		expect((await refund(h, "refund-success", amount, note)).status).toBe(200);
+		expect(h.stream.refundPayment.mock.calls[0]?.[1].refund_note).toEqual(
+			note ?? expect.stringMatching(/^better-auth-streampay:/),
+		);
+		expect(await (await refundStatus(h, "refund-success")).json()).toMatchObject({
+			status: "confirmed",
+			providerRefundId: "exact-refund",
+			amountRefunded: refunded,
+		});
+		expect(await h.rows("streampayRefundIntent")).toMatchObject([{ activePaymentId: null }]);
+	});
+
+	it("remembers a pending refund ID returned with a caller note", async () => {
+		const h = await harness([admin({ durableRefunds: true, isAdmin: () => true })]);
+		h.stream.getPayment.mockResolvedValue(payment("pay_1", "SUCCEEDED", "0.00", []));
+		const pending = {
+			id: "pending-refund",
+			status: "PENDING",
+			amount_refunded: "0.20",
+			refund_reason: "OTHER",
+			refund_note: "Refund for order",
+		};
+		h.stream.refundPayment.mockResolvedValue(payment("pay_1", "SUCCEEDED", "0.00", [pending]));
+		expect((await refund(h, "pending", "0.20", pending.refund_note)).status).toBe(409);
+		expect(await h.rows("streampayRefundIntent")).toMatchObject([
+			{ status: "pending", activePaymentId: "pay_1", providerRefundId: pending.id },
+		]);
+		h.stream.getPayment.mockResolvedValue(
+			payment("pay_1", "PARTIALLY_REFUNDED", "0.20", [{ ...pending, status: "REFUNDED" }]),
+		);
+		expect(await (await refundStatus(h, "pending")).json()).toMatchObject({
+			status: "confirmed",
+			providerRefundId: pending.id,
+		});
+		expect(h.stream.refundPayment).toHaveBeenCalledTimes(1);
+	});
+
+	it("holds a lost response with an unproven caller note for review", async () => {
+		const h = await harness([admin({ durableRefunds: true, isAdmin: () => true })]);
+		const note = "Customer request";
+		h.stream.getPayment.mockResolvedValue(payment("pay_1", "SUCCEEDED", "0.00", []));
+		h.stream.refundPayment.mockRejectedValue(new Error("provider reply lost"));
+		expect((await refund(h, "unproven-note", "0.20", note)).status).toBe(409);
+		expect(h.stream.refundPayment.mock.calls[0]?.[1].refund_note).toBe(note);
+		h.stream.getPayment.mockResolvedValue(
+			payment("pay_1", "PARTIALLY_REFUNDED", "0.20", [
+				{
+					id: "unknown-refund",
+					status: "REFUNDED",
+					amount_refunded: "0.20",
+					refund_reason: "OTHER",
+					refund_note: note,
+				},
+			]),
+		);
+		expect(await (await refundStatus(h, "unproven-note")).json()).toMatchObject({
+			status: "needs_review",
+			providerRefundId: null,
+		});
+		expect(await h.rows("streampayRefundIntent")).toMatchObject([{ activePaymentId: "pay_1" }]);
+		expect((await refund(h, "other-key", "0.20")).status).toBe(409);
+		expect(h.stream.refundPayment).toHaveBeenCalledTimes(1);
+	});
+
+	it("rejects an intent before writing if another refund is pending", async () => {
+		const h = await harness([admin({ durableRefunds: true, isAdmin: () => true })]);
+		const earlier = { id: "other-refund", status: "PENDING", amount_refunded: "1.00" };
+		h.stream.getPayment.mockResolvedValue(payment("pay_1", "SUCCEEDED", "0.00", [earlier]));
+		expect((await refund(h, "our-key")).status).toBe(409);
+		h.stream.getPayment.mockResolvedValue(
+			payment("pay_1", "REFUNDED", "1.00", [{ ...earlier, status: "REFUNDED" }]),
+		);
+		expect(await (await refundStatus(h, "our-key")).json()).toMatchObject({
+			status: "rejected",
+			providerRefundId: null,
+		});
+		expect(await h.rows("streampayRefundIntent")).toMatchObject([{ activePaymentId: null }]);
+		expect(h.stream.refundPayment).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		[null, "confirmed", null],
+		["invalid JSON", "needs_review", "pay_1"],
+	] as const)("handles a stored refund evidence value of %s", async (refundEvidence, status, activePaymentId) => {
+		const h = await harness([admin({ durableRefunds: true, isAdmin: () => true })]);
+		h.stream.getPayment.mockResolvedValue(payment("pay_1", "SUCCEEDED", "0.00", []));
+		h.stream.refundPayment.mockRejectedValue(new Error("provider reply lost"));
+		expect((await refund(h, "stored-evidence")).status).toBe(409);
+		const id = (await h.rows("streampayRefundIntent"))[0]?.id;
+		if (typeof id !== "string") throw new Error("Missing refund intent.");
+		await h.setRow("streampayRefundIntent", id, { refundEvidence });
+		h.stream.getPayment.mockResolvedValue(payment("pay_1", "REFUNDED", "1.00", []));
+		expect(await (await refundStatus(h, "stored-evidence")).json()).toMatchObject({ status });
+		expect(await h.rows("streampayRefundIntent")).toMatchObject([{ activePaymentId }]);
+		expect(h.stream.refundPayment).toHaveBeenCalledTimes(1);
+	});
+
+	it.each([
+		"REFUNDED",
+		"CANCELED",
+	])("reconciles a lost partial refund response by the exact provider row (%s)", async (outcome) => {
+		const h = await harness([admin({ durableRefunds: true, isAdmin: () => true })]);
+		const previous = {
+			id: "older-refund",
+			status: "REFUNDED",
+			amount_refunded: "0.10",
+			refund_reason: "OTHER",
+		};
+		h.stream.getPayment.mockResolvedValue(
+			payment("pay_1", "PARTIALLY_REFUNDED", "0.10", [previous]),
+		);
+		h.stream.refundPayment.mockRejectedValue(new Error("provider reply lost"));
+
+		expect((await refund(h, "partial-ambiguous", "0.20")).status).toBe(409);
+		const request = h.stream.refundPayment.mock.calls[0]?.[1];
+		expect(request?.refund_note).toMatch(/^better-auth-streampay:/);
+		const foreign = { ...previous, id: "same-amount", amount_refunded: "0.20" };
+		h.stream.getPayment.mockResolvedValue(
+			payment("pay_1", "PARTIALLY_REFUNDED", "0.30", [previous, foreign]),
+		);
+		expect(await (await refundStatus(h, "partial-ambiguous")).json()).toMatchObject({
+			status: "needs_review",
+			providerRefundId: null,
+		});
+		h.stream.getPayment.mockResolvedValue(
+			payment("pay_1", "PARTIALLY_REFUNDED", "0.10", [previous, { ...foreign, status: "PENDING" }]),
+		);
+		expect(await (await refundStatus(h, "partial-ambiguous")).json()).toMatchObject({
+			status: "needs_review",
+			providerRefundId: null,
+		});
+
+		const matched = { ...foreign, id: "our-refund", refund_note: request?.refund_note };
+		h.stream.getPayment.mockResolvedValue(
+			payment("pay_1", "PARTIALLY_REFUNDED", "0.30", [
+				previous,
+				foreign,
+				{ ...matched, status: "PENDING" },
+			]),
+		);
+		expect(await (await refundStatus(h, "partial-ambiguous")).json()).toMatchObject({
+			status: "pending",
+			providerRefundId: "our-refund",
+		});
+		expect((await refund(h, "other-key", "0.20")).status).toBe(409);
+
+		h.stream.getPayment.mockResolvedValue(
+			payment("pay_1", "PARTIALLY_REFUNDED", outcome === "REFUNDED" ? "0.50" : "0.30", [
+				previous,
+				foreign,
+				{ ...matched, status: outcome },
+			]),
+		);
+		expect(await (await refundStatus(h, "partial-ambiguous")).json()).toMatchObject({
+			status: outcome === "REFUNDED" ? "confirmed" : "rejected",
+			providerRefundId: "our-refund",
+		});
+		expect((await refund(h, "partial-ambiguous", "0.20")).status).toBe(
+			outcome === "REFUNDED" ? 200 : 409,
+		);
+		expect(h.stream.refundPayment).toHaveBeenCalledTimes(1);
+		expect(await h.rows("streampayRefundIntent")).toMatchObject([
+			{ activePaymentId: null, providerRefundId: "our-refund" },
+		]);
+	});
+
+	it("holds the claim when StreamPay refuses the remaining balance after a partial refund", async () => {
+		const h = await harness([admin({ durableRefunds: true, isAdmin: () => true })]);
+		h.stream.getPayment.mockResolvedValue(
+			payment("pay_1", "PARTIALLY_REFUNDED", "0.10", [
+				{
+					id: "partial",
+					status: "REFUNDED",
+					amount_refunded: "0.10",
+				},
+			]),
+		);
+		h.stream.refundPayment.mockRejectedValue(
+			mockApiError(400, {
+				error: { code: "PAYMENT_REFUNDED_ALREADY" },
+			}),
+		);
+		expect((await refund(h, "remaining")).status).toBe(409);
+		expect(await (await refundStatus(h, "remaining")).json()).toMatchObject({
+			status: "needs_review",
+			amountRefunded: "0.10",
+			providerRefundId: null,
+		});
+		expect((await refund(h, "second-attempt")).status).toBe(409);
+		expect(h.stream.refundPayment).toHaveBeenCalledTimes(1);
+	});
+
 	it("runs one provider write across same and different keys while a refund is in flight", async () => {
 		const onRefund = vi.fn();
 		const h = await harness([admin({ durableRefunds: true, isAdmin: () => true, onRefund })]);

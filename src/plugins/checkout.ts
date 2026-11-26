@@ -286,6 +286,7 @@ export const checkout = (checkoutOptions: CheckoutOptions = {}) => {
 							amountInSmallestUnit: z.number().int().positive(),
 							currency: z.string().length(3),
 							consumerId: z.string().min(1).optional(),
+							allowManualPayments: z.boolean().optional(),
 						}),
 					},
 					async (ctx) => {
@@ -293,6 +294,10 @@ export const checkout = (checkoutOptions: CheckoutOptions = {}) => {
 							client,
 							ctx.body.paymentLinkId,
 							ctx.body.consumerId,
+							{
+								allowInstallments: true,
+								allowManualPayments: ctx.body.allowManualPayments === true,
+							},
 						);
 						if (evidence.status !== "paid") return ctx.json({ status: evidence.status });
 						const { invoice } = evidence;
@@ -308,6 +313,7 @@ export const checkout = (checkoutOptions: CheckoutOptions = {}) => {
 							status: "paid" as const,
 							invoiceId: invoice.id,
 							paymentId: invoice.paymentId,
+							...(invoice.paymentIds.length > 1 ? { paymentIds: invoice.paymentIds } : {}),
 						});
 					},
 				),
