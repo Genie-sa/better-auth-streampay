@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { admin, checkout, subscriptions, webhooks } from "../../src";
 import { callAuthEndpoint } from "../utils/auth-instance";
+import { mockApiError } from "../utils/helpers";
 import {
 	type Harness,
 	harness,
@@ -28,13 +29,14 @@ function paidInvoice(id: string, paymentId: string, subscriptionId?: string) {
 	};
 }
 
-function payment(id: string, status: string, amountRefunded?: string) {
+function payment(id: string, status: string, amountRefunded?: string, refunds?: unknown[]) {
 	return {
 		id,
 		current_status: status,
 		currency: "SAR",
 		amount_in_smallest_unit: 100,
 		...(amountRefunded === undefined ? {} : { amount_refunded: amountRefunded }),
+		...(refunds === undefined ? {} : { refunds }),
 	} as never;
 }
 
@@ -247,6 +249,94 @@ describe(`payment reconciliation end to end (${TEST_WITH})`, () => {
 });
 
 describe(`durable refund requests end to end (${TEST_WITH})`, () => {
+	it.each([
+		"REFUNDED",
+		"CANCELED",
+	])("reconciles a lost partial refund response by the exact provider row (%s)", async (outcome) => {
+		const h = await harness([admin({ durableRefunds: true, isAdmin: () => true })]);
+		const previous = {
+			id: "older-refund",
+			status: "REFUNDED",
+			amount_refunded: "0.10",
+			refund_reason: "OTHER",
+		};
+		h.stream.getPayment.mockResolvedValue(
+			payment("pay_1", "PARTIALLY_REFUNDED", "0.10", [previous]),
+		);
+		h.stream.refundPayment.mockRejectedValue(new Error("provider reply lost"));
+
+		expect((await refund(h, "partial-ambiguous", "0.20")).status).toBe(409);
+		const request = h.stream.refundPayment.mock.calls[0]?.[1];
+		expect(request?.refund_note).toMatch(/^better-auth-streampay:/);
+		const foreign = { ...previous, id: "same-amount", amount_refunded: "0.20" };
+		h.stream.getPayment.mockResolvedValue(
+			payment("pay_1", "PARTIALLY_REFUNDED", "0.30", [previous, foreign]),
+		);
+		expect(await (await refundStatus(h, "partial-ambiguous")).json()).toMatchObject({
+			status: "needs_review",
+			providerRefundId: null,
+		});
+
+		const matched = { ...foreign, id: "our-refund", refund_note: request?.refund_note };
+		h.stream.getPayment.mockResolvedValue(
+			payment("pay_1", "PARTIALLY_REFUNDED", "0.30", [
+				previous,
+				foreign,
+				{ ...matched, status: "PENDING" },
+			]),
+		);
+		expect(await (await refundStatus(h, "partial-ambiguous")).json()).toMatchObject({
+			status: "pending",
+			providerRefundId: "our-refund",
+		});
+		expect((await refund(h, "other-key", "0.20")).status).toBe(409);
+
+		h.stream.getPayment.mockResolvedValue(
+			payment("pay_1", "PARTIALLY_REFUNDED", outcome === "REFUNDED" ? "0.50" : "0.30", [
+				previous,
+				foreign,
+				{ ...matched, status: outcome },
+			]),
+		);
+		expect(await (await refundStatus(h, "partial-ambiguous")).json()).toMatchObject({
+			status: outcome === "REFUNDED" ? "confirmed" : "rejected",
+			providerRefundId: "our-refund",
+		});
+		expect((await refund(h, "partial-ambiguous", "0.20")).status).toBe(
+			outcome === "REFUNDED" ? 200 : 409,
+		);
+		expect(h.stream.refundPayment).toHaveBeenCalledTimes(1);
+		expect(await h.rows("streampayRefundIntent")).toMatchObject([
+			{ activePaymentId: null, providerRefundId: "our-refund" },
+		]);
+	});
+
+	it("holds the claim when StreamPay refuses the remaining balance after a partial refund", async () => {
+		const h = await harness([admin({ durableRefunds: true, isAdmin: () => true })]);
+		h.stream.getPayment.mockResolvedValue(
+			payment("pay_1", "PARTIALLY_REFUNDED", "0.10", [
+				{
+					id: "partial",
+					status: "REFUNDED",
+					amount_refunded: "0.10",
+				},
+			]),
+		);
+		h.stream.refundPayment.mockRejectedValue(
+			mockApiError(400, {
+				error: { code: "PAYMENT_REFUNDED_ALREADY" },
+			}),
+		);
+		expect((await refund(h, "remaining")).status).toBe(409);
+		expect(await (await refundStatus(h, "remaining")).json()).toMatchObject({
+			status: "needs_review",
+			amountRefunded: "0.10",
+			providerRefundId: null,
+		});
+		expect((await refund(h, "second-attempt")).status).toBe(409);
+		expect(h.stream.refundPayment).toHaveBeenCalledTimes(1);
+	});
+
 	it("runs one provider write across same and different keys while a refund is in flight", async () => {
 		const onRefund = vi.fn();
 		const h = await harness([admin({ durableRefunds: true, isAdmin: () => true, onRefund })]);
