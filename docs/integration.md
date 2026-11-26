@@ -296,11 +296,18 @@ const payment = await auth.api.verifyStreampayCheckoutPayment({
 });
 ```
 
-Pass the consumer ID if your checkout assigned one. A paid result includes the provider invoice
-and payment IDs. Apply fulfillment once per payment in your own database. The helper returns
-`unpaid` for an open link without a completed invoice and `needs_review` for mismatched or ambiguous
-evidence, including an invoice with multiple payments. Applications can call this method in
-scheduled reconciliation too. Keep the expected quote in server-owned state.
+Pass the consumer ID if your checkout assigned one. A paid result includes the provider
+`invoiceId` and `paymentId`. When a completed invoice has installments, the helper confirms each
+payment and checks that the combined amount matches the invoice and your quote. The paid result
+also includes `paymentIds` for these invoices. Use `invoiceId` to apply fulfillment once per order.
+
+The helper returns `unpaid` for an open link without a completed invoice or collected funds.
+Incomplete, refunded, mismatched, or ambiguous payment evidence requires review. By default,
+payments recorded by hand in StreamPay require review. Set `allowManualPayments: true` in the
+server call if your app accepts those methods.
+
+Call this helper from an `INVOICE_COMPLETED` handler, a checkout return, or scheduled
+reconciliation. Keep the payment link and expected quote in server-owned state.
 
 ## Billing portal
 
