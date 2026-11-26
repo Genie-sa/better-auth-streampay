@@ -2,6 +2,7 @@ import type { BetterAuthClientPlugin } from "better-auth";
 import { $ERROR_CODES } from "./error-codes";
 import type { streampay } from "./streampay";
 
+export { type EmbeddedCheckoutOptions, mountStreamPayCheckout } from "./embedded-checkout";
 export { $ERROR_CODES, type StreamPayErrorCode } from "./error-codes";
 
 export const streampayClient = () => {

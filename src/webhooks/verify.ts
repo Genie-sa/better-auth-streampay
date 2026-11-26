@@ -28,24 +28,31 @@ export class StreamPayWebhookError extends Error {
 	}
 }
 
-function parseSignatureHeader(header: string): { timestamp: string; signature: string } | null {
+const MAX_SIGNATURE_HEADER_LENGTH = 1024;
+const MAX_SIGNATURE_HEADER_FIELDS = 16;
+
+function parseSignatureHeader(header: string): { timestamp: string; signatures: Buffer[] } | null {
+	if (header.length > MAX_SIGNATURE_HEADER_LENGTH) return null;
 	const parts = header.split(",");
+	if (parts.length > MAX_SIGNATURE_HEADER_FIELDS) return null;
+
 	let timestamp: string | undefined;
-	let signature: string | undefined;
+	let hasSignature = false;
+	const signatures: Buffer[] = [];
 	for (const part of parts) {
 		const [key, ...rest] = part.trim().split("=");
 		const value = rest.join("=");
-		if (key === "t") timestamp = value;
-		else if (key === "v1") signature = value;
+		if (key === "t") {
+			if (timestamp !== undefined) return null;
+			timestamp = value;
+		}
+		if (key === "v1" && value) {
+			hasSignature = true;
+			if (/^[0-9a-fA-F]{64}$/.test(value)) signatures.push(Buffer.from(value, "hex"));
+		}
 	}
-	if (!timestamp || !signature) return null;
-	return { timestamp, signature };
-}
-
-function hexDecode(hex: string): Buffer | null {
-	if (hex.length === 0 || hex.length % 2 !== 0) return null;
-	if (!/^[0-9a-fA-F]+$/.test(hex)) return null;
-	return Buffer.from(hex, "hex");
+	if (!timestamp || !hasSignature) return null;
+	return { timestamp, signatures };
 }
 
 export function verifyWebhook(input: VerifyWebhookInput): VerifyWebhookResult {
@@ -61,20 +68,20 @@ export function verifyWebhook(input: VerifyWebhookInput): VerifyWebhookResult {
 	if (!parsed) return { ok: false, reason: "MALFORMED_HEADER" };
 
 	const ts = Number(parsed.timestamp);
-	if (!Number.isFinite(ts) || !Number.isInteger(ts) || ts <= 0) {
+	if (!/^[0-9]+$/.test(parsed.timestamp) || !Number.isSafeInteger(ts) || ts <= 0) {
 		return { ok: false, reason: "INVALID_TIMESTAMP" };
 	}
 
 	const delta = Math.abs(now() - ts);
 	if (delta > toleranceSeconds) return { ok: false, reason: "EXPIRED" };
 
-	const provided = hexDecode(parsed.signature);
-	if (!provided) return { ok: false, reason: "INVALID_SIGNATURE" };
+	if (parsed.signatures.length === 0) return { ok: false, reason: "INVALID_SIGNATURE" };
 
 	for (const secret of secrets) {
 		const expected = createHmac("sha256", secret).update(`${parsed.timestamp}.${rawBody}`).digest();
-		if (provided.length !== expected.length) continue;
-		if (timingSafeEqual(expected, provided)) return { ok: true, timestamp: ts };
+		if (parsed.signatures.some((provided) => timingSafeEqual(expected, provided))) {
+			return { ok: true, timestamp: ts };
+		}
 	}
 
 	return { ok: false, reason: "INVALID_SIGNATURE" };

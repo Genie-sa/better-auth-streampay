@@ -37,6 +37,51 @@ describe("verifyWebhook", () => {
 		expect(result.ok).toBe(true);
 	});
 
+	it.each([true, false])("checks all v1 tags regardless of order (%s)", (matchingFirst) => {
+		const signed = sign(now(), body, "previous");
+		const nonmatching = `v1=${"0".repeat(64)}`;
+		const signatureHeader = matchingFirst ? `${signed},${nonmatching}` : `${nonmatching},${signed}`;
+		expect(
+			verifyWebhook({ secret: ["current", "previous"], rawBody: body, signatureHeader, now }),
+		).toEqual({ ok: true, timestamp: now() });
+	});
+
+	it("rejects duplicate timestamps", () => {
+		const signatureHeader = `t=${now()},${sign(now(), body)}`;
+		expect(verifyWebhook({ secret: SECRET, rawBody: body, signatureHeader, now })).toEqual({
+			ok: false,
+			reason: "MALFORMED_HEADER",
+		});
+	});
+
+	it.each([
+		`t=17e8,v1=${"0".repeat(64)}`,
+		`t=9007199254740993,v1=${"0".repeat(64)}`,
+	])("rejects timestamps outside the integer Unix seconds format (%s)", (signatureHeader) => {
+		expect(verifyWebhook({ secret: SECRET, rawBody: body, signatureHeader, now })).toEqual({
+			ok: false,
+			reason: "INVALID_TIMESTAMP",
+		});
+	});
+
+	it.each([
+		`${"ignored,".repeat(16)}${sign(now(), body)}`,
+		`v2=${"0".repeat(1024)},${sign(now(), body)}`,
+	])("rejects headers beyond the parsing limits", (signatureHeader) => {
+		expect(verifyWebhook({ secret: SECRET, rawBody: body, signatureHeader, now })).toEqual({
+			ok: false,
+			reason: "MALFORMED_HEADER",
+		});
+	});
+
+	it("checks a valid tag alongside unusable tags", () => {
+		const signatureHeader = `v1=,${sign(now(), body)},v1=bad`;
+		expect(verifyWebhook({ secret: SECRET, rawBody: body, signatureHeader, now })).toEqual({
+			ok: true,
+			timestamp: now(),
+		});
+	});
+
 	it("rejects when the header is missing", () => {
 		const result = verifyWebhook({ secret: SECRET, rawBody: body, signatureHeader: null });
 		expect(result).toEqual({ ok: false, reason: "MISSING_HEADER" });
