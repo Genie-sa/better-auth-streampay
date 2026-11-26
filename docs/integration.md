@@ -688,7 +688,18 @@ previous request to reach a confirmed or rejected outcome. Durable refunds apply
 Use `GET /admin/streampay/payments/:id/refund-intent?idempotencyKey=...` to check a request as an
 authorized admin. The response reports `pending`, `confirmed`, `rejected`, or `needs_review`, along
 with the last confirmed provider state and the cumulative `amountRefunded` in the payment's major
-currency units when available. An uncertain partial refund remains claimed for provider follow-up.
+currency units when available. The `providerRefundId` identifies the matching refund when StreamPay
+reports it. Apply a migration for the new nullable `providerRefundId` and `refundEvidence` fields
+if you already use durable refunds.
+
+When StreamPay provides a refund history and no note was supplied, the plugin sends a unique
+provider refund note to identify the request if the response is lost. A caller-supplied note is
+preserved. With a caller-supplied note, a lost response may still require review until the exact
+refund can be identified. A pending refund keeps the payment claimed. A matched cancellation releases
+the claim without retrying the refund. StreamPay can reject a remaining-balance request with
+`PAYMENT_REFUNDED_ALREADY` after a partial refund. If there is no evidence that the balance was
+refunded, the request stays in `needs_review` for provider follow-up.
+
 The plugin only reads StreamPay when you retry an existing request.
 
 ## Webhooks
